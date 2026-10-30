@@ -59,6 +59,8 @@ class Listener {
 struct ReceiverConfig {
   /// Name shown on the sender
   const char *name{"AirPlay"};
+  /// Device model announced in mDNS ("am"); must stay valid while the receiver exists
+  const char *model{"airplay-cpp"};
   /// MAC address of the network interface; part of the mDNS name and of the Apple-Challenge answer
   uint8_t mac[6]{};
   /// Jitter buffer. Synchronized playback needs the sender's latency plus a margin, about 2250 ms;

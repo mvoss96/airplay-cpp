@@ -216,13 +216,14 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
   // The set shairport-sync advertises, which current Apple senders accept. cn: codecs (0 = PCM, 1 = ALAC),
   // et: encryption (0 = none, 1 = RSA), vn: protocol version (65537 = 1.1), sf: status flags
   static const TxtRecord RECORDS[] = {
-      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},      {"et", "0,1"},         {"ek", "1"},   {"sv", "false"},
-      {"da", "true"},   {"sr", "44100"}, {"ss", "16"},       {"pw", "false"},       {"tp", "UDP"}, {"vn", "65537"},
-      {"vs", "105.1"},  {"sf", "0x4"},   {"fv", "76400.10"}, {"am", "airplay-cpp"},
+      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},   {"et", "0,1"}, {"ek", "1"},
+      {"sv", "false"},  {"da", "true"},  {"sr", "44100"}, {"ss", "16"},  {"pw", "false"},
+      {"tp", "UDP"},    {"vn", "65537"}, {"vs", "105.1"}, {"sf", "0x4"}, {"fv", "76400.10"},
   };
-  static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) < MAX_TXT_RECORDS, "No room for md");
+  static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 2 <= MAX_TXT_RECORDS, "No room for am and md");
   for (const TxtRecord &record : RECORDS)
     this->txt_records_[this->txt_record_count_++] = record;
+  this->txt_records_[this->txt_record_count_++] = TxtRecord{"am", config.model};
   // md: which details the receiver takes (0 = text, 1 = cover art)
   if (config.metadata || config.artwork) {
     const char *md = config.metadata && config.artwork ? "0,1" : (config.metadata ? "0" : "1");
