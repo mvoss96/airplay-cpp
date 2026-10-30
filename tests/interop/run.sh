@@ -43,7 +43,7 @@ sleep 2
 
 if [ "$SENDER" = pyatv ]; then
   TXT="txtvers=1 ch=2 cn=0,1 et=0,1 ek=1 sv=false da=true sr=44100 ss=16 pw=false sm=false tp=UDP vn=3 vs=105.1 md=0"
-  python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT
+  python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
   sleep 2
 else
   export XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/config"

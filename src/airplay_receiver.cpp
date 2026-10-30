@@ -504,7 +504,8 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
       this->handle_set_parameter_(content_type, body, body_length);
   } else if (std::strcmp(method, "GET_PARAMETER") == 0) {
     if (body != nullptr && std::strstr(body, "volume") != nullptr)
-      std::snprintf(response_body, sizeof(response_body), "volume: %.6f\r\n", this->airplay_volume_);
+      std::snprintf(response_body, sizeof(response_body), "volume: %.6f\r\n",
+                    static_cast<double>(this->airplay_volume_));
   } else {
     status = 501;
     status_text = "Not Implemented";

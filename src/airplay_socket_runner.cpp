@@ -146,6 +146,7 @@ static constexpr uint32_t FAST_POLL_MS = 5;
 static constexpr size_t MAX_PACKETS_PER_READ = 16;
 static constexpr size_t TCP_READ_SIZE = 1024;
 static constexpr int LISTEN_BACKLOG = 2;
+static constexpr uint32_t UDP_PORT_ATTEMPTS = 100;
 // Detect senders that disappear without closing the connection
 static constexpr int KEEPALIVE_IDLE_S = 30;
 static constexpr int KEEPALIVE_INTERVAL_S = 5;
@@ -169,22 +170,43 @@ static void close_fd(int *fd) {
   }
 }
 
-static int open_udp_socket(uint16_t *port) {
+static int bind_udp_socket(uint16_t port) {
   const int fd = net::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (fd < 0)
     return -1;
   struct sockaddr_in address {};
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_ANY);
-  address.sin_port = 0;
-  socklen_t length = sizeof(address);
-  if (net::bind(fd, reinterpret_cast<struct sockaddr *>(&address), sizeof(address)) != 0 ||
-      net::getsockname(fd, reinterpret_cast<struct sockaddr *>(&address), &length) != 0) {
+  address.sin_port = htons(port);
+  if (net::bind(fd, reinterpret_cast<struct sockaddr *>(&address), sizeof(address)) != 0) {
     net::close(fd);
     return -1;
   }
-  *port = ntohs(address.sin_port);
   return fd;
+}
+
+/// Opens a UDP socket on a port the system picks. Network stacks without getsockname() (e.g. Zephyr's
+/// native_sim sockets) get the next free port from `*next_port` on instead.
+static int open_udp_socket(uint16_t *port, uint16_t *next_port) {
+  int fd = bind_udp_socket(0);
+  if (fd >= 0) {
+    struct sockaddr_in address {};
+    socklen_t length = sizeof(address);
+    if (net::getsockname(fd, reinterpret_cast<struct sockaddr *>(&address), &length) == 0 && address.sin_port != 0) {
+      *port = ntohs(address.sin_port);
+      return fd;
+    }
+    net::close(fd);
+  }
+  for (uint32_t attempt = 0; attempt < UDP_PORT_ATTEMPTS && *next_port != 0; attempt++) {
+    const uint16_t candidate = (*next_port)++;
+    fd = bind_udp_socket(candidate);
+    if (fd >= 0) {
+      *port = candidate;
+      return fd;
+    }
+  }
+  return -1;
 }
 
 SocketRunner::~SocketRunner() { this->end(); }
@@ -212,6 +234,7 @@ bool SocketRunner::begin(Receiver &receiver, uint16_t port) {
     return false;
   }
   this->listen_fd_ = fd;
+  this->port_ = port;
   AIRPLAY_LOGI("Listening on port %u", port);
   return true;
 }
@@ -361,8 +384,9 @@ void SocketRunner::close(uint8_t connection) {
 
 bool SocketRunner::open_udp(uint16_t *ports) {
   this->close_udp();
+  uint16_t next_port = static_cast<uint16_t>(this->port_ + 1);
   for (size_t i = 0; i < NUM_UDP_CHANNELS; i++) {
-    this->udp_fds_[i] = open_udp_socket(&ports[i]);
+    this->udp_fds_[i] = open_udp_socket(&ports[i], &next_port);
     if (this->udp_fds_[i] < 0) {
       this->close_udp();
       return false;
