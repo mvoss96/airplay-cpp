@@ -67,7 +67,10 @@ struct ReceiverStats {
   uint32_t late_packets;  // Arrived or were due too late
   uint32_t decode_errors;
   uint32_t resend_requests;
-  bool synchronized;  // Playing on the sender's timeline
+  uint32_t trimmed_frames;  // Single frames dropped or repeated to follow the sender's clock or the buffer level
+  uint32_t silence_frames;  // Written instead of audio: for lost packets and to line playback up
+  uint32_t underruns;       // Times the output ran out of audio during playback
+  bool synchronized;        // Playing on the sender's timeline
 };
 
 /// AirPlay 1 (RAOP) audio receiver without any I/O of its own: feed it RTSP connections, UDP packets and the
@@ -263,6 +266,8 @@ class Receiver {
   int32_t servo_error_us_{0};
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
+  uint32_t last_stats_log_ms_{0};
+  bool output_dry_{false};
   ReceiverStats stats_{};
 
   // Clock of the sender

@@ -99,6 +99,8 @@ static constexpr int32_t FILL_SMOOTHING_SHIFT = 8;
 static constexpr uint32_t OUTPUT_RESTART_SETTLE_MS = 20;
 /// The session shows as paused when a playing sender sends no audio for this long
 static constexpr uint32_t SENDER_IDLE_MS = 10000;
+/// Statistics are logged at debug level this often during playback
+static constexpr uint32_t STATS_LOG_INTERVAL_MS = 10000;
 
 /// Seconds between 1900 (NTP epoch) and 1970
 static constexpr int64_t NTP_UNIX_OFFSET_NS = 2208988800LL * 1000000000LL;
@@ -828,10 +830,11 @@ void Receiver::stop_audio_() {
   if (!this->audio_active_)
     return;
   this->audio_active_ = false;
-  if (this->stats_.lost_packets > 0 || this->stats_.late_packets > 0) {
-    AIRPLAY_LOGD("Session ended: %" PRIu32 " packets lost, %" PRIu32 " arrived too late", this->stats_.lost_packets,
-                 this->stats_.late_packets);
-  }
+  const ReceiverStats &st = this->stats_;
+  AIRPLAY_LOGD("Session ended: %" PRIu32 " packets lost, %" PRIu32 " late, %" PRIu32 " resend requests, %" PRIu32
+               " trimmed frames, %" PRIu32 " ms silence, %" PRIu32 " underruns",
+               st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
+               static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
 }
 
 void Receiver::flush_(bool have_seq, uint16_t seq) {
@@ -1199,6 +1202,7 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
   std::memcpy(samples, slot.samples, frames * BYTES_PER_FRAME);
 
   if (trim != 0 && frames > 2) {
+    this->stats_.trimmed_frames++;
     // Drop or repeat one frame where the audio is quietest, which makes the seam inaudible
     uint32_t quietest = 1;
     int32_t quietest_level = INT32_MAX;
@@ -1226,6 +1230,7 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
 void Receiver::queue_silence_output_() {
   const uint32_t frames = std::min(this->silence_pending_frames_, FRAMES_PER_PACKET + 1);
   std::memset(this->output_buffer_, 0, frames * BYTES_PER_FRAME);
+  this->stats_.silence_frames += frames;
   this->silence_pending_frames_ -= frames;
   this->output_offset_ = 0;
   this->output_length_ = frames;
@@ -1294,6 +1299,26 @@ void Receiver::playback_step_(int64_t now_us) {
     this->synced_ = false;
   }
   this->stats_.synchronized = this->playback_started_ && this->synced_;
+
+  // The output ran dry while playing: an underrun, unless the sender stopped sending
+  const bool dry = this->playback_started_ && this->frames_written_ > 0 &&
+                   this->frames_played_.load(std::memory_order_relaxed) != 0 && this->speaker_queued_frames_() == 0;
+  if (dry && !this->output_dry_ && this->buffered_packets_() > 0)
+    this->stats_.underruns++;
+  this->output_dry_ = dry;
+
+  if (this->playback_started_ && now_ms - this->last_stats_log_ms_ >= STATS_LOG_INTERVAL_MS) {
+    this->last_stats_log_ms_ = now_ms;
+    const ReceiverStats &st = this->stats_;
+    AIRPLAY_LOGD("%s: buffered %" PRIu32 " ms, output %" PRIu32 " ms, servo %" PRId32 " us; lost %" PRIu32
+                 ", late %" PRIu32 ", resend requests %" PRIu32 ", trimmed frames %" PRIu32 ", silence %" PRIu32
+                 " ms, underruns %" PRIu32,
+                 this->synced_ ? "Synchronized" : "Unsynchronized",
+                 static_cast<uint32_t>(frames_to_us(this->buffered_packets_() * FRAMES_PER_PACKET) / 1000),
+                 static_cast<uint32_t>(frames_to_us(this->speaker_queued_frames_()) / 1000), this->servo_error_us_,
+                 st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
+                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
+  }
 
   if (!this->have_seq_)
     return;
