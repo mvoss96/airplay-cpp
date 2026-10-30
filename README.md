@@ -77,7 +77,8 @@ dependencies:
 **Arduino IDE**: download the repository as ZIP and use *Sketch → Include Library → Add .ZIP Library*.
 
 **Zephyr**: add the repository to your west manifest (it is a Zephyr module) and set `CONFIG_AIRPLAY_CPP=y`;
-see [`examples/zephyr/prj.conf`](examples/zephyr/prj.conf) for the network and mbedTLS options.
+see [`examples/zephyr/prj.conf`](examples/zephyr/prj.conf) for the network and mbedTLS options
+(`CONFIG_ZVFS_POLL_MAX` must be at least 6).
 
 **CMake**: `add_subdirectory(airplay-cpp)` and `target_link_libraries(app PRIVATE airplay)`. The mbedTLS
 backend is built when `libmbedcrypto` is found.

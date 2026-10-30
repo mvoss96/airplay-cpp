@@ -17,6 +17,10 @@
 // Zephyr's own socket API, so that CONFIG_POSIX_API is not needed
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
+// The runner polls up to 6 sockets at once (3 UDP, 2 RTSP connections and the listening socket)
+#if defined(CONFIG_ZVFS_POLL_MAX) && CONFIG_ZVFS_POLL_MAX < 6
+#error "airplay-cpp needs CONFIG_ZVFS_POLL_MAX=6 or more"
+#endif
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -71,17 +75,27 @@ inline void set_timeouts(int fd, uint32_t timeout_ms) {
 }
 /// Waits until one of the sockets is readable (or writable) and marks them in `ready`. False on timeout.
 inline bool wait(const int *fds, size_t count, uint32_t timeout_ms, bool *ready, bool for_writing = false) {
+  // Only open sockets: each entry counts against CONFIG_ZVFS_POLL_MAX
   struct zsock_pollfd poll_fds[8];
-  count = std::min(count, sizeof(poll_fds) / sizeof(poll_fds[0]));
-  for (size_t i = 0; i < count; i++) {
-    poll_fds[i].fd = fds[i];
-    poll_fds[i].events = for_writing ? ZSOCK_POLLOUT : ZSOCK_POLLIN;
-    poll_fds[i].revents = 0;
+  size_t index[8];
+  size_t used = 0;
+  for (size_t i = 0; i < count && used < 8; i++) {
+    ready[i] = false;
+    if (fds[i] < 0)
+      continue;
+    poll_fds[used].fd = fds[i];
+    poll_fds[used].events = for_writing ? ZSOCK_POLLOUT : ZSOCK_POLLIN;
+    poll_fds[used].revents = 0;
+    index[used++] = i;
   }
-  if (zsock_poll(poll_fds, count, static_cast<int>(timeout_ms)) <= 0)
+  if (used == 0) {
+    k_sleep(K_MSEC(timeout_ms));
     return false;
-  for (size_t i = 0; i < count; i++)
-    ready[i] = fds[i] >= 0 && poll_fds[i].revents != 0;
+  }
+  if (zsock_poll(poll_fds, used, static_cast<int>(timeout_ms)) <= 0)
+    return false;
+  for (size_t i = 0; i < used; i++)
+    ready[index[i]] = poll_fds[i].revents != 0;
   return true;
 }
 inline bool set_nonblocking(int fd, bool enable) {
