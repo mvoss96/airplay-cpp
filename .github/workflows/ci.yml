@@ -88,9 +88,16 @@ jobs:
           test "$PROPS" = "$HEADER"
 
   interop:
-    # Independent sender: pyatv streams a test signal to the POSIX example; every sample must arrive in order
-    # and playback must lock to the sender's clock. pyatv is deliberately unpinned.
+    # Independent senders stream a test signal to the POSIX example: every sample must arrive in order and
+    # playback must lock to the sender's clock. pyatv (Python, unencrypted, retransmits lost packets) and
+    # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
+    # duplicate 5/2/1 % of the UDP packets the receiver gets. pyatv is deliberately unpinned.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sender: [pyatv, pipewire]
+        network: [clean, lossy]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -99,10 +106,19 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y libmbedtls-dev
-          pip install pyatv
+          if [ "${{ matrix.sender }}" = pyatv ]; then
+            pip install pyatv
+          else
+            sudo apt-get install -y pipewire pipewire-bin wireplumber dbus-daemon
+          fi
       - name: Build receiver
         run: |
           cmake -S . -B build -DAIRPLAY_BUILD_EXAMPLES=ON
           cmake --build build -j
-      - name: Stream with pyatv
-        run: tests/interop/run.sh posix build/airplay_receiver
+          gcc -shared -fPIC -O2 -Wall -Wextra tests/interop/impair.c -o build/impair.so -ldl
+      - name: Stream
+        run: |
+          if [ "${{ matrix.network }}" = lossy ]; then
+            export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01
+          fi
+          tests/interop/run.sh posix build/airplay_receiver ${{ matrix.sender }}

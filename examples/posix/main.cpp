@@ -11,6 +11,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -100,8 +101,12 @@ int main(int argc, char **argv) {
   }
   std::signal(SIGINT, [](int) { g_running = false; });
   std::signal(SIGPIPE, SIG_IGN);
+  // AIRPLAY_DEBUG=1 shows the details of each session, AIRPLAY_DEBUG=2 every packet that is asked for again
+  const char *debug = std::getenv("AIRPLAY_DEBUG");
   airplay::set_log_handler([](airplay::LogLevel, const char *message) { std::fprintf(stderr, "%s\n", message); },
-                           airplay::LogLevel::LOG_LEVEL_INFO);
+                           debug != nullptr && debug[0] == '2'   ? airplay::LogLevel::LOG_LEVEL_VERBOSE
+                           : debug != nullptr && debug[0] == '1' ? airplay::LogLevel::LOG_LEVEL_DEBUG
+                                                                 : airplay::LogLevel::LOG_LEVEL_INFO);
 
   airplay::MbedtlsCrypto crypto;
   if (!crypto.init()) {

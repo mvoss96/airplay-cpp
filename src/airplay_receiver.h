@@ -192,7 +192,7 @@ class Receiver {
   void queue_packet_output_(const PacketSlot &slot, int32_t trim);
   void queue_silence_output_();
   void playback_step_(int64_t now_us);
-  bool start_playback_(uint32_t now_ms);
+  bool start_playback_();
   bool synced_step_(int64_t now_us);
   bool unsynced_step_();
   /// Frames waiting in the output: written minus reported as played
@@ -246,7 +246,6 @@ class Receiver {
   uint16_t resend_seq_{0};
   bool have_seq_{false};
   bool accept_any_seq_{false};
-  uint32_t first_packet_ms_{0};
   uint32_t last_packet_ms_{0};
   uint32_t last_resend_scan_ms_{0};
   uint32_t output_restart_ms_{0};

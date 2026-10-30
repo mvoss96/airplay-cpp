@@ -153,8 +153,10 @@ cmake --build build && ctest --test-dir build --output-on-failure
   key, AES-encrypted audio, retransmission, flush, volume, track details, take-over and teardown
 - `test_sync`: simulation of a sender, a network with jitter, loss and stalls, and an output with its own
   clock; checks that playback stays within a few milliseconds of the sender's timeline
-- `tests/interop`: streams to the POSIX example with [pyatv](https://pyatv.dev), an independent AirPlay
-  sender implementation, and checks that every sample arrives in order and in sync
+- `tests/interop`: streams a test signal to the POSIX example from two independent AirPlay senders,
+  [pyatv](https://pyatv.dev) (unencrypted, with retransmission) and PipeWire's RAOP sink (RSA/AES-encrypted
+  ALAC), and checks that every sample arrives in order and in sync. The same runs repeat with 5 % packet loss,
+  2 % reordering and 1 % duplicates, injected into the receiver's UDP sockets by a small `LD_PRELOAD` shim
 
 CI also builds the ESP-IDF, Arduino, PlatformIO and Zephyr examples and runs the Zephyr build against pyatv.
 

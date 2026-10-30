@@ -3,5 +3,5 @@ config AIRPLAY_CPP
 	depends on CPP
 	depends on NETWORKING
 	help
-	  AirPlay 1 (RAOP) audio receiver. The socket runner needs CONFIG_POSIX_API,
+	  AirPlay 1 (RAOP) audio receiver. The socket runner needs CONFIG_NET_SOCKETS,
 	  the mbedTLS backend needs CONFIG_MBEDTLS.

@@ -1,6 +1,6 @@
 #pragma once
 
-// Drives a Receiver with BSD sockets: ESP-IDF and Arduino-ESP32 (lwIP), Zephyr (CONFIG_POSIX_API), Linux and
+// Drives a Receiver with BSD sockets: ESP-IDF and Arduino-ESP32 (lwIP), Zephyr (CONFIG_NET_SOCKETS), Linux and
 // macOS. Define AIRPLAY_NO_SOCKETS to leave it out, e.g. on platforms with another network API.
 
 #if !defined(AIRPLAY_NO_SOCKETS) && \

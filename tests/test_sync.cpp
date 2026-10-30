@@ -24,7 +24,10 @@ struct Scenario {
   double stall_ms = 0;
   uint32_t buffer_ms = 2500;
   bool output_reports = true;
-  double seek_at_s = 0;  // Flush and jump in the timeline at this time
+  double seek_at_s = 0;             // Flush and jump in the timeline at this time
+  bool flush_after_record = false;  // Like pyatv: a FLUSH after RECORD, before any audio
+  bool sync_before_record = false;  // Like pyatv: the first sync packet comes before RECORD
+  int lost_first_syncs = 0;         // The first sync packets after RECORD never arrive
   double duration_s = 60;
   uint32_t report_chunk_frames = 441;
   // Limits
@@ -33,6 +36,7 @@ struct Scenario {
   double max_abs_error_ms = 10.0;  // Largest timing error after settling (synchronized only)
   double max_silence_percent = 0.5;
   uint64_t max_discontinuities = 0;
+  uint32_t max_late_packets = UINT32_MAX;
 };
 
 static constexpr int64_t NTP_EPOCH_NS = 3900000000LL * 1000000000LL;
@@ -146,8 +150,9 @@ struct Sim : Transport {
       put_be32(&sync[4], rtp_now - SENDER_LATENCY);
       put_ntp(&sync[8], now_remote);
       put_be32(&sync[16], rtp_now);
-      if (!this->lost())
+      if (!this->lost() && this->syncs_sent >= this->sc.lost_first_syncs)
         this->deliver(this->now_us + this->net_delay_us(), UdpChannel::CONTROL, sync);
+      this->syncs_sent++;
       this->next_sync_remote_ns += 1000000000LL;
     }
   }
@@ -213,13 +218,25 @@ struct Sim : Transport {
     this->receiver.connection_opened(0, Endpoint{SENDER_IP, 50000}, Endpoint{ipv4(10, 0, 0, 1), 5000});
     this->rtsp("ANNOUNCE", "User-Agent: AirPlay/380.20\r\n", PCM_SDP);
     this->rtsp("SETUP", "Transport: RTP/AVP/UDP;unicast;mode=record;control_port=6001;timing_port=6002\r\n");
-    this->rtsp("RECORD",
-               "RTP-Info: seq=" + std::to_string(this->next_seq) + ";rtptime=" + std::to_string(RTP0) + "\r\n");
-    this->receiver.request_output_restart();
-
     this->base_ntp = this->sender_ns(this->now_us);
     this->next_send_remote_ns = this->base_ntp;
     this->next_sync_remote_ns = this->base_ntp;
+    if (this->sc.sync_before_record) {
+      std::vector<uint8_t> sync = {0x90, 0xd4, 0x00, 0x07};
+      sync.resize(20);
+      put_be32(&sync[4], RTP0 - SENDER_LATENCY);
+      put_ntp(&sync[8], this->base_ntp);
+      put_be32(&sync[16], RTP0);
+      this->receiver.udp_packet(UdpChannel::CONTROL, sync.data(), sync.size(), Endpoint{SENDER_IP, 7000}, this->now_us);
+      this->next_sync_remote_ns += 1000000000LL;
+    }
+    this->rtsp("RECORD",
+               "RTP-Info: seq=" + std::to_string(this->next_seq) + ";rtptime=" + std::to_string(RTP0) + "\r\n");
+    if (this->sc.flush_after_record)
+      this->rtsp("FLUSH",
+                 "RTP-Info: seq=" + std::to_string(this->next_seq) + ";rtptime=" + std::to_string(RTP0) + "\r\n");
+    this->receiver.request_output_restart();
+
     this->measure_from_us = this->now_us + 8000000;
     bool seeked = false;
 
@@ -262,6 +279,7 @@ struct Sim : Transport {
     CHECK(this->frames_heard > 0);
     CHECK(silence <= this->sc.max_silence_percent);
     CHECK(this->discontinuities <= this->sc.max_discontinuities);
+    CHECK(stats.late_packets <= this->sc.max_late_packets);
     if (this->sc.expect_synced) {
       CHECK(std::fabs(mean) <= this->sc.max_mean_error_ms);
       CHECK(this->max_abs_error <= this->sc.max_abs_error_ms);
@@ -284,6 +302,7 @@ struct Sim : Transport {
   uint32_t next_rtp{RTP0};
   int64_t next_send_remote_ns{0};
   int64_t next_sync_remote_ns{0};
+  int syncs_sent{0};
 
   double output_phase{0};
   uint32_t unreported{0};
@@ -313,6 +332,15 @@ int main(int argc, char **argv) {
                        .max_discontinuities = 10});
   scenarios.push_back({.name = "large clock drift", .sender_ppm = 150, .output_ppm = -150, .max_mean_error_ms = 7.0});
   scenarios.push_back({.name = "seek", .loss = 0.01, .jitter_ms = 3, .seek_at_s = 30});
+  // The sender's clock arrives only after 2 s, when the first packets are already due: those are dropped, the
+  // rest plays in sync
+  scenarios.push_back({.name = "early flush, syncs lost", .flush_after_record = true, .lost_first_syncs = 2});
+  // Like pyatv: the first sync packet before RECORD is enough when the next ones are lost
+  scenarios.push_back({.name = "sync before record",
+                       .flush_after_record = true,
+                       .sync_before_record = true,
+                       .lost_first_syncs = 2,
+                       .max_late_packets = 0});
   scenarios.push_back({.name = "coarse reports (46 ms)", .jitter_ms = 3, .report_chunk_frames = 2048});
   scenarios.push_back({.name = "small buffer (unsynced)",
                        .loss = 0.01,

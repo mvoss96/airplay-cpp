@@ -65,8 +65,6 @@ static constexpr int64_t START_WINDOW_US = 100000;
 static constexpr int64_t EARLY_LATE_THRESHOLD_US = 50000;
 /// A missing packet is replaced by silence once it is due within this time
 static constexpr int64_t CONCEAL_MARGIN_US = 10000;
-/// Time to wait for the sender's clock before falling back to unsynchronized playback
-static constexpr uint32_t SYNC_WAIT_MS = 2000;
 /// Extra buffer needed on top of the sender's latency for synchronized playback (250 ms)
 static constexpr uint32_t SYNC_MARGIN_FRAMES = SAMPLE_RATE / 4;
 /// Timestamps of playback reports older than this are not used
@@ -664,6 +662,12 @@ bool Receiver::handle_setup_(uint8_t connection, const char *transport, char *re
     return false;
   }
   this->udp_open_ = true;
+  this->timing_requests_sent_ = 0;
+  this->last_timing_request_ms_ = 0;
+  this->timing_sample_count_ = 0;
+  this->timing_sample_index_ = 0;
+  this->clock_locked_ = false;
+  this->anchor_valid_ = false;
 
   const uint32_t address = this->connections_[connection].peer.address;
   this->client_control_ = Endpoint{address, static_cast<uint16_t>(control_port)};
@@ -806,13 +810,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->stats_ = ReceiverStats{};
   // The written and played frame counts are not reset here: the output may still play audio of an earlier
   // session and keep reporting it. They restart with request_output_restart().
-
-  this->timing_requests_sent_ = 0;
-  this->last_timing_request_ms_ = 0;
-  this->timing_sample_count_ = 0;
-  this->timing_sample_index_ = 0;
-  this->clock_locked_ = false;
-  this->anchor_valid_ = false;
+  // The sender's clock is kept from SETUP on: some senders send their first sync packet before RECORD
   this->played_reports_missing_ = false;
   this->sync_logged_ = false;
   this->audio_active_ = true;
@@ -841,9 +839,11 @@ void Receiver::flush_(bool have_seq, uint16_t seq) {
     this->accept_from_seq_ = this->highest_seq_ + 1;
     this->accept_any_seq_ = false;
   }
+  // The timeline may jump after a seek, so wait for the next sync packet. A flush before any audio (some
+  // senders send one right after RECORD) changes nothing, so the anchor stays.
+  if (this->have_seq_ || this->playback_started_)
+    this->anchor_valid_ = false;
   this->reset_playback_();
-  // The timeline may jump after a seek, so wait for the next sync packet
-  this->anchor_valid_ = false;
   if (this->session_state_ == SessionState::PLAYING)
     this->set_session_state_(SessionState::PAUSED);
 }
@@ -871,9 +871,19 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
   if (!this->udp_open_ || length < RETRANSMIT_HEADER_SIZE)
     return;
   const uint8_t type = packet[1] & 0x7f;
-  if (type == PAYLOAD_TIMING_REQUEST) {
-    this->handle_timing_request_(channel, packet, length, from, now_us);
-    return;
+  // The clock exchange and sync packets start with SETUP, the audio with RECORD
+  switch (type) {
+    case PAYLOAD_TIMING_REQUEST:
+      this->handle_timing_request_(channel, packet, length, from, now_us);
+      return;
+    case PAYLOAD_TIMING_REPLY:
+      this->handle_timing_reply_(packet, length, now_us);
+      return;
+    case PAYLOAD_SYNC:
+      this->handle_sync_packet_(packet, length);
+      return;
+    default:
+      break;
   }
   if (!this->audio_active_)
     return;
@@ -894,12 +904,6 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
       }
       break;
     }
-    case PAYLOAD_SYNC:
-      this->handle_sync_packet_(packet, length);
-      break;
-    case PAYLOAD_TIMING_REPLY:
-      this->handle_timing_reply_(packet, length, now_us);
-      break;
     default:
       break;
   }
@@ -921,7 +925,6 @@ void Receiver::handle_audio_packet_(uint16_t seq, uint32_t rtp, const uint8_t *p
     this->next_seq_ = seq;
     this->highest_seq_ = seq - 1;
     this->head_slot_ = 0;
-    this->first_packet_ms_ = now_ms;
   }
 
   int32_t ahead = static_cast<int16_t>(seq - this->next_seq_);
@@ -1020,6 +1023,8 @@ void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length) {
   if (fixed_offset)
     this->anchor_remote_ns_ += frames_to_us(FIXED_LATENCY_OFFSET_FRAMES) * 1000;
   this->sender_latency_frames_ = latency + (fixed_offset ? FIXED_LATENCY_OFFSET_FRAMES : 0);
+  if (!this->anchor_valid_)
+    AIRPLAY_LOGV("Timeline of the sender received (latency %" PRIu32 " frames)", this->sender_latency_frames_);
   this->anchor_valid_ = true;
 }
 
@@ -1247,15 +1252,17 @@ void Receiver::poll(int64_t now_us) {
     this->played_timestamp_.store(0, std::memory_order_relaxed);
   }
 
-  if (!this->audio_active_)
+  if (!this->udp_open_)
     return;
-
   // Keep asking quickly until the clock locks, so that a lost packet does not delay synchronized playback
   const uint32_t timing_interval = this->timing_requests_sent_ < TIMING_BURST_COUNT || !this->clock_locked_
                                        ? TIMING_BURST_INTERVAL_MS
                                        : TIMING_INTERVAL_MS;
   if (this->timing_requests_sent_ == 0 || now_ms - this->last_timing_request_ms_ >= timing_interval)
     this->send_timing_request_(now_us);
+
+  if (!this->audio_active_)
+    return;
 
   if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
     this->last_resend_scan_ms_ = now_ms;
@@ -1283,7 +1290,7 @@ void Receiver::playback_step_(int64_t now_us) {
 
   if (!this->have_seq_)
     return;
-  if (!this->playback_started_ && !this->start_playback_(now_ms))
+  if (!this->playback_started_ && !this->start_playback_())
     return;
 
   for (uint32_t i = 0; i < MAX_CHUNKS_PER_STEP; i++) {
@@ -1303,7 +1310,7 @@ void Receiver::playback_step_(int64_t now_us) {
   }
 }
 
-bool Receiver::start_playback_(uint32_t now_ms) {
+bool Receiver::start_playback_() {
   const uint32_t buffered = this->buffered_packets_();
   const uint32_t capacity_frames = this->slot_count_ * FRAMES_PER_PACKET;
   const bool fits = capacity_frames >= this->sender_latency_frames_ + SYNC_MARGIN_FRAMES;
@@ -1311,9 +1318,10 @@ bool Receiver::start_playback_(uint32_t now_ms) {
   if (this->clock_locked_ && this->anchor_valid_ && fits && !this->played_reports_missing_) {
     this->synced_ = true;
   } else {
-    // Wait a moment for the sender's clock, unless synchronized playback is impossible anyway
+    // Wait for the sender's clock while the buffer has room, unless synchronized playback is impossible anyway.
+    // Packets that become due in the meantime are dropped once playback starts.
     const bool may_sync = !this->played_reports_missing_ && (!this->anchor_valid_ || fits);
-    if (may_sync && now_ms - this->first_packet_ms_ < SYNC_WAIT_MS && buffered + 1 < this->slot_count_)
+    if (may_sync && buffered + 1 < this->slot_count_)
       return false;
     const uint32_t level = this->speaker_queued_frames_() + buffered * FRAMES_PER_PACKET;
     if (level < this->fill_target_frames_ && buffered + 1 < this->slot_count_)
@@ -1387,6 +1395,7 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
 
   if (error_us < -EARLY_LATE_THRESHOLD_US) {
+    AIRPLAY_LOGV("Packet %u is %" PRId32 " ms late", this->next_seq_, static_cast<int32_t>(-error_us / 1000));
     this->stats_.late_packets++;
     this->advance_head_();
     return true;
