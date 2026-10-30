@@ -81,7 +81,9 @@ see [`examples/zephyr/prj.conf`](examples/zephyr/prj.conf) for the network and m
 (`CONFIG_ZVFS_POLL_MAX` must be at least 6).
 
 **CMake**: `add_subdirectory(airplay-cpp)` and `target_link_libraries(app PRIVATE airplay)`. The mbedTLS
-backend is built when `libmbedcrypto` is found.
+backend is built when `libmbedcrypto` 2.28 or 3.x is found (Debian/Ubuntu: `libmbedtls-dev`). mbedTLS 4 only
+has the PSA crypto API and is not supported yet; on macOS, where Homebrew now installs mbedTLS 4, use
+`brew install mbedtls@3` and configure with `-DCMAKE_PREFIX_PATH=$(brew --prefix mbedtls@3)`.
 
 ## Audio output
 
@@ -95,6 +97,15 @@ driver's `on_sent` callback (see the ESP-IDF example) or the playback position o
 `notify_played()` is thread-safe. Without these reports the receiver still plays, but not synchronized.
 
 If the output pipeline is restarted and drops what it holds, call `request_output_restart()`.
+
+## Network
+
+The receiver listens on TCP port 5000 and opens three UDP ports per session (audio, control and timing).
+By default the system picks free UDP ports. Behind NAT or in a container, fix them with
+`runner.set_udp_base_port(7000)` (ports 7000-7002; the POSIX example reads `AIRPLAY_UDP_PORT`) and forward
+TCP 5000 and these UDP ports. Avoid 6000-6002 when the sender runs on the same machine: many senders use
+6001/6002 themselves. Docker Desktop on Windows and macOS does not work well, because its port forwarding
+hides the sender's address; use host networking on Linux instead.
 
 ## Memory
 

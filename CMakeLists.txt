@@ -32,8 +32,24 @@ target_compile_features(airplay PUBLIC cxx_std_17)
 add_library(airplay::airplay ALIAS airplay)
 
 # The mbedTLS backend is built when libmbedcrypto is found; otherwise bring your own airplay::Crypto.
-find_path(AIRPLAY_MBEDTLS_INCLUDE mbedtls/pk.h)
+find_path(AIRPLAY_MBEDTLS_INCLUDE mbedtls/version.h)
 find_library(AIRPLAY_MBEDCRYPTO mbedcrypto)
+if(AIRPLAY_MBEDTLS_INCLUDE)
+    # mbedTLS 4 offers only the PSA crypto API, which the backend does not use yet
+    file(STRINGS ${AIRPLAY_MBEDTLS_INCLUDE}/mbedtls/version.h AIRPLAY_MBEDTLS_MAJOR
+         REGEX "^#define MBEDTLS_VERSION_MAJOR +[0-9]+")
+    if(NOT AIRPLAY_MBEDTLS_MAJOR AND EXISTS ${AIRPLAY_MBEDTLS_INCLUDE}/mbedtls/build_info.h)
+        file(STRINGS ${AIRPLAY_MBEDTLS_INCLUDE}/mbedtls/build_info.h AIRPLAY_MBEDTLS_MAJOR
+             REGEX "^#define MBEDTLS_VERSION_MAJOR +[0-9]+")
+    endif()
+    string(REGEX MATCH "[0-9]+$" AIRPLAY_MBEDTLS_MAJOR "${AIRPLAY_MBEDTLS_MAJOR}")
+    if(AIRPLAY_MBEDTLS_MAJOR AND AIRPLAY_MBEDTLS_MAJOR GREATER_EQUAL 4)
+        message(WARNING "airplay: mbedTLS ${AIRPLAY_MBEDTLS_MAJOR} is not supported yet, use mbedTLS 2.28 or 3.x "
+                        "(macOS: brew install mbedtls@3 and -DCMAKE_PREFIX_PATH=$(brew --prefix mbedtls@3))")
+        unset(AIRPLAY_MBEDCRYPTO CACHE)
+        set(AIRPLAY_MBEDCRYPTO "")
+    endif()
+endif()
 if(AIRPLAY_MBEDTLS_INCLUDE AND AIRPLAY_MBEDCRYPTO)
     target_include_directories(airplay PUBLIC ${AIRPLAY_MBEDTLS_INCLUDE})
     target_link_libraries(airplay PUBLIC ${AIRPLAY_MBEDCRYPTO})

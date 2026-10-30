@@ -7,6 +7,10 @@
 // Senders find the receiver through mDNS; the program prints the command that announces it (Avahi or dns-sd).
 #include "airplay.h"
 
+#ifndef AIRPLAY_HAS_MBEDTLS
+#error "This example needs mbedTLS 2.28 or 3.x (macOS: brew install mbedtls@3, see README)"
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -126,6 +130,9 @@ int main(int argc, char **argv) {
   PacedOutput sink(output, receiver_for_output);
   PrintingListener listener;
   airplay::SocketRunner runner;
+  // AIRPLAY_UDP_PORT=6000 uses UDP ports 6000-6002, e.g. to forward them from a container
+  if (const char *udp_port = std::getenv("AIRPLAY_UDP_PORT"))
+    runner.set_udp_base_port(static_cast<uint16_t>(std::atoi(udp_port)));
   airplay::Receiver receiver(config, crypto, runner, sink, &listener);
   if (!receiver.begin() || !runner.begin(receiver, airplay::Receiver::DEFAULT_PORT)) {
     std::fprintf(stderr, "Failed to start\n");

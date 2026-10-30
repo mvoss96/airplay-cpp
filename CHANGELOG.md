@@ -12,3 +12,4 @@ First release.
 - Sans-I/O core with a BSD socket runner for ESP-IDF, Arduino-ESP32, Zephyr, Linux and macOS
 - mbedTLS 2.28 and 3.x crypto backend
 - Examples for ESP-IDF, Arduino ESP32, Zephyr and POSIX
+- `SocketRunner::set_udp_base_port()` for fixed UDP ports (NAT, containers)

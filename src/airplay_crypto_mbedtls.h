@@ -1,11 +1,19 @@
 #pragma once
 
 // Crypto backend on top of mbedTLS 2.28 or 3.x (ESP-IDF, Arduino-ESP32, Zephyr, desktop with libmbedtls).
-// Compiled only where mbedTLS is available; define AIRPLAY_NO_MBEDTLS to leave it out.
+// Compiled only where one of these is available (not mbedTLS 4); define AIRPLAY_NO_MBEDTLS to leave it out.
 
 #if !defined(AIRPLAY_NO_MBEDTLS) && defined(__has_include)
 #if __has_include(<mbedtls/version.h>) && __has_include(<mbedtls/pk.h>)
 #define AIRPLAY_HAS_MBEDTLS 1
+#endif
+#endif
+
+#ifdef AIRPLAY_HAS_MBEDTLS
+#include <mbedtls/version.h>
+// mbedTLS 4 offers only the PSA crypto API; this backend needs the RSA, AES and PK functions of 2.28 or 3.x
+#if MBEDTLS_VERSION_MAJOR >= 4
+#undef AIRPLAY_HAS_MBEDTLS
 #endif
 #endif
 

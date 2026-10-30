@@ -400,7 +400,12 @@ bool SocketRunner::open_udp(uint16_t *ports) {
   this->close_udp();
   uint16_t next_port = static_cast<uint16_t>(this->port_ + 1);
   for (size_t i = 0; i < NUM_UDP_CHANNELS; i++) {
-    this->udp_fds_[i] = open_udp_socket(&ports[i], &next_port);
+    if (this->udp_base_port_ != 0) {
+      ports[i] = static_cast<uint16_t>(this->udp_base_port_ + i);
+      this->udp_fds_[i] = bind_udp_socket(ports[i]);
+    } else {
+      this->udp_fds_[i] = open_udp_socket(&ports[i], &next_port);
+    }
     if (this->udp_fds_[i] < 0) {
       this->close_udp();
       return false;

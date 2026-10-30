@@ -34,6 +34,10 @@ class SocketRunner final : public Transport {
   /// @brief Closes all sockets. The receiver ends its session.
   void end();
 
+  /// @brief Uses the fixed UDP ports base, base + 1 and base + 2 (audio, control, timing) instead of ports the
+  /// system picks, e.g. to forward them through NAT or a container. 0 (the default) lets the system pick.
+  void set_udp_base_port(uint16_t base) { this->udp_base_port_ = base; }
+
   /// @brief Waits up to max_wait_ms for network traffic, hands it to the receiver and calls Receiver::poll().
   /// The wait is shortened to 5 ms while a session plays.
   void run_once(uint32_t max_wait_ms = 100);
@@ -57,6 +61,7 @@ class SocketRunner final : public Transport {
   Receiver *receiver_{nullptr};
   int listen_fd_{-1};
   uint16_t port_{0};
+  uint16_t udp_base_port_{0};
   int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
   uint8_t udp_buffer_[1600];
