@@ -868,6 +868,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->last_packet_ms_ = to_ms(now_us);
   this->last_resend_scan_ms_ = 0;
   this->stats_ = ReceiverStats{};
+  this->last_poll_ms_ = 0;
   // The written and played frame counts are not reset here: the output may still play audio of an earlier
   // session and keep reporting it. They restart with request_output_restart().
   // The sender's clock is kept from SETUP on: some senders send their first sync packet before RECORD
@@ -883,9 +884,9 @@ void Receiver::stop_audio_() {
   this->audio_active_ = false;
   const ReceiverStats &st = this->stats_;
   AIRPLAY_LOGD("Session ended: %" PRIu32 " packets lost, %" PRIu32 " late, %" PRIu32 " resend requests, %" PRIu32
-               " trimmed frames, %" PRIu32 " ms silence, %" PRIu32 " underruns",
+               " trimmed frames, %" PRIu32 " ms silence, %" PRIu32 " underruns, longest poll gap %" PRIu32 " ms",
                st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
-               static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
+               static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms);
 }
 
 void Receiver::flush_(bool have_seq, uint16_t seq) {
@@ -1291,6 +1292,11 @@ void Receiver::poll(int64_t now_us) {
   if (this->slots_ == nullptr)
     return;
   const uint32_t now_ms = to_ms(now_us);
+  if (this->audio_active_) {
+    if (this->last_poll_ms_ != 0)
+      this->stats_.longest_gap_ms = std::max(this->stats_.longest_gap_ms, now_ms - this->last_poll_ms_);
+    this->last_poll_ms_ = now_ms;
+  }
 
   if (this->disconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
     if (this->session_owner_ != NO_CONNECTION) {
@@ -1363,12 +1369,12 @@ void Receiver::playback_step_(int64_t now_us) {
     const ReceiverStats &st = this->stats_;
     AIRPLAY_LOGD("%s: buffered %" PRIu32 " ms, output %" PRIu32 " ms, servo %" PRId32 " us; lost %" PRIu32
                  ", late %" PRIu32 ", resend requests %" PRIu32 ", trimmed frames %" PRIu32 ", silence %" PRIu32
-                 " ms, underruns %" PRIu32,
+                 " ms, underruns %" PRIu32 ", longest poll gap %" PRIu32 " ms",
                  this->synced_ ? "Synchronized" : "Unsynchronized",
                  static_cast<uint32_t>(frames_to_us(this->buffered_packets_() * FRAMES_PER_PACKET) / 1000),
                  static_cast<uint32_t>(frames_to_us(this->speaker_queued_frames_()) / 1000), this->servo_error_us_,
                  st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
-                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
+                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms);
   }
 
   if (!this->have_seq_)

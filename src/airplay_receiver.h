@@ -81,6 +81,7 @@ struct ReceiverStats {
   uint32_t trimmed_frames;  // Single frames dropped or repeated to follow the sender's clock or the buffer level
   uint32_t silence_frames;  // Written instead of audio: for lost packets and to line playback up
   uint32_t underruns;       // Times the output ran out of audio during playback
+  uint32_t longest_gap_ms;  // Longest time between two poll() calls in a session, e.g. while the thread was blocked
   bool synchronized;        // Playing on the sender's timeline
 };
 
@@ -285,6 +286,7 @@ class Receiver {
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
   uint32_t last_stats_log_ms_{0};
+  uint32_t last_poll_ms_{0};
   bool output_dry_{false};
   ReceiverStats stats_{};
 
