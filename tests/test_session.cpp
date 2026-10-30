@@ -431,11 +431,11 @@ static void test_mdns() {
   CHECK(with.receiver.service_instance_name(name, 10) == 0);
   size_t count = 0;
   const TxtRecord *records = with.receiver.txt_records(&count);
-  CHECK(count == 16);
+  CHECK(count == 17);
   CHECK(std::strcmp(records[count - 1].key, "md") == 0);
   Fixture without(false);
   without.receiver.txt_records(&count);
-  CHECK(count == 15);
+  CHECK(count == 16);
 }
 
 int main() {

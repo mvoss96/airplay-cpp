@@ -129,12 +129,16 @@ int main(int argc, char **argv) {
   airplay::Receiver *receiver_for_output = nullptr;
   PacedOutput sink(output, receiver_for_output);
   PrintingListener listener;
+  // AIRPLAY_PORT changes the RTSP port, e.g. on macOS, whose own AirPlay receiver uses 5000 and 7000
+  uint16_t port = airplay::Receiver::DEFAULT_PORT;
+  if (const char *port_text = std::getenv("AIRPLAY_PORT"))
+    port = static_cast<uint16_t>(std::atoi(port_text));
   airplay::SocketRunner runner;
   // AIRPLAY_UDP_PORT=6000 uses UDP ports 6000-6002, e.g. to forward them from a container
   if (const char *udp_port = std::getenv("AIRPLAY_UDP_PORT"))
     runner.set_udp_base_port(static_cast<uint16_t>(std::atoi(udp_port)));
   airplay::Receiver receiver(config, crypto, runner, sink, &listener);
-  if (!receiver.begin() || !runner.begin(receiver, airplay::Receiver::DEFAULT_PORT)) {
+  if (!receiver.begin() || !runner.begin(receiver, port)) {
     std::fprintf(stderr, "Failed to start\n");
     return 1;
   }
@@ -145,12 +149,14 @@ int main(int argc, char **argv) {
   receiver.service_instance_name(instance, sizeof(instance));
   size_t count = 0;
   const airplay::TxtRecord *records = receiver.txt_records(&count);
-  std::fprintf(stderr, "Announce the receiver with:\n  avahi-publish-service '%s' _raop._tcp %u", instance,
-               airplay::Receiver::DEFAULT_PORT);
+  std::fprintf(stderr, "Announce the receiver with:\n  Linux: avahi-publish-service '%s' _raop._tcp %u", instance,
+               port);
   for (size_t i = 0; i < count; i++)
     std::fprintf(stderr, " %s=%s", records[i].key, records[i].value);
-  std::fprintf(stderr, "\n  (macOS: dns-sd -R '%s' _raop._tcp local %u ...)\n", instance,
-               airplay::Receiver::DEFAULT_PORT);
+  std::fprintf(stderr, "\n  macOS: dns-sd -R '%s' _raop._tcp local %u", instance, port);
+  for (size_t i = 0; i < count; i++)
+    std::fprintf(stderr, " %s=%s", records[i].key, records[i].value);
+  std::fprintf(stderr, "\n");
 
   while (g_running)
     runner.run_once(100);

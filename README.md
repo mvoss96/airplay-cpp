@@ -102,9 +102,11 @@ If the output pipeline is restarted and drops what it holds, call `request_outpu
 
 The receiver listens on TCP port 5000 and opens three UDP ports per session (audio, control and timing).
 By default the system picks free UDP ports. Behind NAT or in a container, fix them with
-`runner.set_udp_base_port(7000)` (ports 7000-7002; the POSIX example reads `AIRPLAY_UDP_PORT`) and forward
-TCP 5000 and these UDP ports. Avoid 6000-6002 when the sender runs on the same machine: many senders use
-6001/6002 themselves. Docker Desktop on Windows and macOS does not work well, because its port forwarding
+`runner.set_udp_base_port(6100)` (ports 6100-6102; the POSIX example reads `AIRPLAY_UDP_PORT`) and forward
+the RTSP port and these UDP ports. Avoid 6000-6002 when the sender runs on the same machine: many senders use
+6001/6002 themselves. On macOS the built-in AirPlay receiver occupies ports 5000 and 7000: pass another RTSP
+port to `SocketRunner::begin()` (the POSIX example reads `AIRPLAY_PORT`), or turn off *AirPlay Receiver* in
+System Settings. Docker Desktop on Windows and macOS does not work well, because its port forwarding
 hides the sender's address; use host networking on Linux instead.
 
 ## Memory

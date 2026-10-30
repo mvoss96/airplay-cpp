@@ -285,11 +285,13 @@ size_t Receiver::service_instance_name(char *buffer, size_t size) const {
 }
 
 const TxtRecord *Receiver::txt_records(size_t *count) const {
-  // cn: codecs (0 = PCM, 1 = ALAC), et: encryption types (0 = none, 1 = RSA), md: track details (0 = text)
+  // The set shairport-sync advertises, which current Apple senders accept. cn: codecs (0 = PCM, 1 = ALAC),
+  // et: encryption (0 = none, 1 = RSA), vn: protocol version (65537 = 1.1), sf: status flags, md: track
+  // details (0 = text; last, so that it can be left out)
   static const TxtRecord RECORDS[] = {
-      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},         {"et", "0,1"},   {"ek", "1"},     {"sv", "false"},
-      {"da", "true"},   {"sr", "44100"}, {"ss", "16"},          {"pw", "false"}, {"sm", "false"}, {"tp", "UDP"},
-      {"vn", "3"},      {"vs", "105.1"}, {"am", "airplay-cpp"}, {"md", "0"},
+      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},      {"et", "0,1"},         {"ek", "1"},   {"sv", "false"},
+      {"da", "true"},   {"sr", "44100"}, {"ss", "16"},       {"pw", "false"},       {"tp", "UDP"}, {"vn", "65537"},
+      {"vs", "105.1"},  {"sf", "0x4"},   {"fv", "76400.10"}, {"am", "airplay-cpp"}, {"md", "0"},
   };
   static constexpr size_t TOTAL = sizeof(RECORDS) / sizeof(RECORDS[0]);
   *count = this->config_.metadata ? TOTAL : TOTAL - 1;
@@ -507,6 +509,10 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
       std::snprintf(response_body, sizeof(response_body), "volume: %.6f\r\n",
                     static_cast<double>(this->airplay_volume_));
   } else {
+    // E.g. GET /info or POST /pair-setup from AirPlay 2 senders
+    const char *line_end = std::strstr(request, "\r\n");
+    const int line_length = line_end != nullptr ? static_cast<int>(std::min<ptrdiff_t>(line_end - request, 96)) : 0;
+    AIRPLAY_LOGD("Unsupported request: %.*s", line_length, request);
     status = 501;
     status_text = "Not Implemented";
   }
