@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CXXFLAGS_STRICT: -std=c++17 -fno-exceptions -fno-rtti -Wall -Wextra -Werror
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install mbedtls
+        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+      - name: Build tests
+        run: |
+          mkdir -p build
+          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_receiver.cpp src/airplay_socket_runner.cpp src/airplay_util.cpp"
+          for t in test_util test_alac test_sync test_session; do
+            ${{ matrix.compiler }} $CXXFLAGS_STRICT -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+              -I src tests/$t.cpp $SRC -lmbedcrypto -o build/$t
+          done
+          ${{ matrix.compiler }} $CXXFLAGS_STRICT -I src examples/posix/main.cpp $SRC -lmbedcrypto -pthread \
+            -o build/airplay_receiver
+      - name: Run tests
+        run: |
+          ./build/test_util
+          ./build/test_alac tests/vectors
+          ./build/test_sync --long
+          ./build/test_session
+
+  no-backends:
+    # The core must build without mbedTLS and without sockets (bring-your-own Crypto and Transport)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build core only
+        run: |
+          for f in src/*.cpp; do
+            g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src -c $f -o /dev/null
+          done
+          g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src tests/test_sync.cpp \
+            src/airplay_receiver.cpp src/airplay_alac.cpp src/airplay_util.cpp src/airplay_log.cpp -o test_sync
+          ./test_sync
+
+  ctest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install mbedtls
+        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+      - name: Configure, build and run via CTest
+        run: |
+          cmake -S . -B build-cmake -DAIRPLAY_BUILD_TESTS=ON -DAIRPLAY_BUILD_EXAMPLES=ON -DCMAKE_CXX_FLAGS=-Werror
+          cmake --build build-cmake -j
+          ctest --test-dir build-cmake --output-on-failure
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: clang-format
+        run: |
+          clang-format --version
+          clang-format --dry-run --Werror src/*.cpp src/*.h tests/*.cpp tests/*.h examples/posix/main.cpp \
+            examples/esp_idf/main/main.cpp examples/zephyr/src/main.cpp examples/arduino_esp32/arduino_esp32.ino
+
+  manifests:
+    # library.properties, library.json and idf_component.yml must carry the same version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Manifest versions must match
+        run: |
+          PROPS=$(grep '^version=' library.properties | cut -d= -f2)
+          JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
+          IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
+          HEADER=$(sed -n 's/^#define AIRPLAY_CPP_VERSION "\(.*\)"$/\1/p' src/airplay_version.h)
+          echo "library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER"
+          test "$PROPS" = "$JSON"
+          test "$PROPS" = "$IDF"
+          test "$PROPS" = "$HEADER"
+
+  interop:
+    # Independent sender: pyatv streams a test signal to the POSIX example; every sample must arrive in order
+    # and playback must lock to the sender's clock. pyatv is deliberately unpinned.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+          pip install pyatv
+      - name: Build receiver
+        run: |
+          cmake -S . -B build -DAIRPLAY_BUILD_EXAMPLES=ON
+          cmake --build build -j
+      - name: Stream with pyatv
+        run: tests/interop/run.sh posix build/airplay_receiver

@@ -1,0 +1,6 @@
+dependencies:
+  espressif/mdns: ">=1.2"
+  mvoss96/airplay-cpp:
+    version: "*"
+    # This repository; in your project use e.g. version: "^0.1"
+    override_path: "../../../"

@@ -1,0 +1,47 @@
+name: Release
+
+# On every version tag: verify the tag matches the manifests and has a CHANGELOG.md section, then publish a
+# GitHub release with that section as its notes.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify tag matches manifest versions
+        run: |
+          TAG=${GITHUB_REF_NAME#v}
+          PROPS=$(grep '^version=' library.properties | cut -d= -f2)
+          JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
+          IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
+          echo "tag=$TAG library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF"
+          test "$TAG" = "$PROPS"
+          test "$TAG" = "$JSON"
+          test "$TAG" = "$IDF"
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '
+            !found && $0 ~ "^## "tag"( |$)" { found=1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md || {
+            echo "::error::CHANGELOG.md has no section '## $GITHUB_REF_NAME'"
+            exit 1
+          }
+          cat release-notes.md
+      - name: Create or complete the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          fi

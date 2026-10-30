@@ -1,0 +1,37 @@
+{
+  "name": "airplay-cpp",
+  "version": "0.1.0",
+  "description": "AirPlay 1 (RAOP) audio receiver in C++17 for ESP32 (ESP-IDF, Arduino), Zephyr and POSIX. ALAC and PCM, encrypted streams, playback synchronized to the sender's clock, volume, track details and remote control. No exceptions, no RTTI, no heap after setup.",
+  "homepage": "https://github.com/mvoss96/airplay-cpp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvoss96/airplay-cpp.git"
+  },
+  "authors": [
+    {
+      "name": "mvoss96",
+      "url": "https://github.com/mvoss96",
+      "maintainer": true
+    }
+  ],
+  "keywords": "airplay, raop, airtunes, audio, receiver, speaker, alac, streaming, esp32, zephyr, arduino",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "airplay.h",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "flags": ["-std=gnu++17"]
+  },
+  "export": {
+    "exclude": [
+      ".devcontainer",
+      ".github",
+      ".gitattributes",
+      ".gitignore",
+      "build",
+      "tests"
+    ]
+  }
+}

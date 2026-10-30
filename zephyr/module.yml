@@ -1,0 +1,4 @@
+name: airplay_cpp
+build:
+  cmake: zephyr
+  kconfig: zephyr/Kconfig

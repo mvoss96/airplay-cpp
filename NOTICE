@@ -1,0 +1,22 @@
+airplay-cpp
+Copyright (c) 2026 mvoss96, MIT License
+
+ALAC decoder
+  src/airplay_alac.cpp follows the Apple Lossless Audio Codec reference decoder,
+  Copyright (c) 2011 Apple Inc., published under the Apache License 2.0
+  (https://github.com/macosforge/alac).
+
+AirPort Express key
+  src/airplay_key.cpp contains the RSA private key of the AirPort Express. It was extracted
+  and published in 2011 and is used by every open source AirPlay 1 receiver; senders use it
+  to authenticate receivers and to encrypt the session key.
+
+Protocol references
+  shairport-sync (https://github.com/mikebrady/shairport-sync), in particular the timing of
+  sync packets and the latency offset of current senders.
+  airplay-esp32 (https://github.com/rbouteiller/airplay-esp32), in particular the position
+  servo that trims single frames.
+
+Trademarks
+  AirPlay is a trademark of Apple Inc., registered in the U.S. and other countries. This
+  project is not affiliated with, authorized or endorsed by Apple Inc.

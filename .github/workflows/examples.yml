@@ -1,0 +1,135 @@
+name: Examples
+
+# Builds every embedded example against its real framework, so examples cannot silently rot.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "tests/interop/**"
+      - "zephyr/**"
+      - "CMakeLists.txt"
+      - "idf_component.yml"
+      - "library.*"
+      - ".github/workflows/examples.yml"
+  pull_request:
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZEPHYR_VERSION: v4.1.0
+
+jobs:
+  esp-idf:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - idf: v5.1
+            target: esp32
+          - idf: v5.4
+            target: esp32
+          - idf: v5.4
+            target: esp32s3
+          - idf: v5.5
+            target: esp32c6
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build example
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf }}
+          target: ${{ matrix.target }}
+          path: examples/esp_idf
+
+  arduino:
+    # arduino-cli is the Arduino IDE's build engine: the repository installed as a library with the current
+    # esp32 core from the board manager index
+    runs-on: ubuntu-latest
+    env:
+      ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    steps:
+      - uses: actions/checkout@v5
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino-cli-esp32-${{ runner.os }}
+      - name: Install esp32 core and library
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX"
+          arduino-cli core install esp32:esp32 --additional-urls "$ESP32_INDEX"
+          mkdir -p ~/Arduino/libraries
+          cp -r "$GITHUB_WORKSPACE" ~/Arduino/libraries/airplay-cpp
+      - name: Build example
+        run: arduino-cli compile --fqbn esp32:esp32:esp32 --warnings more examples/arduino_esp32
+
+  platformio:
+    # The PlatformIO consumer path with pioarduino (Arduino core 3.x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-examples-${{ runner.os }}
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build example
+        run: |
+          mkdir -p pio-example/src
+          cp examples/arduino_esp32/arduino_esp32.ino pio-example/src/main.cpp
+          sed -i '1i #include <Arduino.h>' pio-example/src/main.cpp
+          cat > pio-example/platformio.ini << EOF2
+          [env:esp32dev]
+          platform = https://github.com/pioarduino/platform-espressif32/releases/download/stable/platform-espressif32.zip
+          framework = arduino
+          board = esp32dev
+          lib_deps = symlink://${{ github.workspace }}
+          build_flags = -Wall -Wextra
+          EOF2
+          pio run -d pio-example
+
+  zephyr:
+    # native_sim runs Zephyr as a Linux program with the host's sockets, so the example is also streamed to
+    # with pyatv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: zephyr-ws
+          key: zephyr-${{ env.ZEPHYR_VERSION }}-native-v1
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build gperf device-tree-compiler
+          pip install west pyatv
+      - name: Set up Zephyr workspace
+        run: |
+          if [ ! -d zephyr-ws/.west ]; then
+            (
+              mkdir -p zephyr-ws && cd zephyr-ws
+              git init -q zephyr
+              git -C zephyr fetch -q --depth 1 https://github.com/zephyrproject-rtos/zephyr refs/tags/$ZEPHYR_VERSION
+              git -C zephyr checkout -q FETCH_HEAD
+              west init -l zephyr
+              west update --narrow -o=--depth=1 mbedtls
+            )
+          fi
+          pip install -r zephyr-ws/zephyr/scripts/requirements-base.txt
+      - name: Build example
+        run: |
+          cd zephyr-ws
+          ZEPHYR_TOOLCHAIN_VARIANT=host west build -p always -b native_sim/native/64 "$GITHUB_WORKSPACE/examples/zephyr"
+      - name: Stream with pyatv
+        run: tests/interop/run.sh zephyr zephyr-ws/build/zephyr/zephyr.exe

@@ -1,0 +1,8 @@
+version: "0.1.0"
+description: "AirPlay 1 (RAOP) audio receiver: ALAC and PCM, encrypted streams, playback synchronized to the sender's clock, volume, track details and remote control."
+license: "MIT"
+url: "https://github.com/mvoss96/airplay-cpp"
+repository: "https://github.com/mvoss96/airplay-cpp.git"
+
+dependencies:
+  idf: ">=5.0"
