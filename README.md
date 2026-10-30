@@ -144,7 +144,9 @@ or the session ended.
 To control the sender, find the port of its `_dacp._tcp` mDNS service whose instance name contains
 `RemoteTarget::dacp_id` (`dacp_instance_matches()`), then call
 `send_dacp_command(target, port, airplay::DACP_PAUSE)` from a thread other than the receiver's; it blocks
-for up to 1.5 s. For the volume use `dacp_volume_command()`.
+for up to 1.5 s. For the volume, iTunes and Music on a Mac take an absolute value from `dacp_volume_command()`;
+iPhone and iPad ignore it and only follow `DACP_VOLUME_UP` and `DACP_VOLUME_DOWN`, one `DACP_VOLUME_STEP` (1/16)
+each (`dacp_volume_steps()` counts them). Senders report their new volume back through `Listener::on_volume()`.
 
 `request_disconnect()` ends the current session, e.g. when another audio source takes over the speaker. Pause
 the sender first with DACP, otherwise it may switch to its own speaker and keep playing there.

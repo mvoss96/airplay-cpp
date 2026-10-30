@@ -69,6 +69,11 @@ static void test_dacp() {
   CHECK(!dacp_instance_matches("anything", ""));
 
   char command[64];
+  CHECK(dacp_volume_steps(0.5f, 0.5f) == 0);
+  CHECK(dacp_volume_steps(0.5f, 0.53f) == 0);
+  CHECK(dacp_volume_steps(0.5f, 0.6f) == 2);
+  CHECK(dacp_volume_steps(0.6f, 0.5f) == -2);
+  CHECK(dacp_volume_steps(1.0f, 0.0f) == -16);
   CHECK(dacp_volume_command(1.0f, command, sizeof(command)) > 0);
   CHECK(std::strcmp(command, "setproperty?dmcp.device-volume=0.000000") == 0);
   CHECK(dacp_volume_command(0.5f, command, sizeof(command)) > 0);

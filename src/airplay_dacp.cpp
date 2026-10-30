@@ -31,6 +31,11 @@ size_t dacp_volume_command(float volume, char *buffer, size_t size) {
   return length > 0 && static_cast<size_t>(length) < size ? static_cast<size_t>(length) : 0;
 }
 
+int dacp_volume_steps(float from, float to) {
+  const float steps = (to - from) / DACP_VOLUME_STEP;
+  return static_cast<int>(steps < 0.0f ? steps - 0.5f : steps + 0.5f);
+}
+
 size_t dacp_format_request(const RemoteTarget &target, uint16_t port, const char *command, char *buffer, size_t size) {
   const auto *ip = reinterpret_cast<const uint8_t *>(&target.address);
   const int length = std::snprintf(buffer, size,
