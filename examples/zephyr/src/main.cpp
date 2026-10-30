@@ -77,6 +77,8 @@ int main() {
   std::copy(mac, mac + 6, config.mac);
   config.buffer_ms = 2500;
   config.metadata = true;
+  config.allocate = [](size_t size) { return k_malloc(size); };
+  config.deallocate = k_free;
 
   static airplay::Receiver receiver(config, crypto, runner, output, &listener);
   if (!crypto.init() || !receiver.begin()) {
