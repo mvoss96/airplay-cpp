@@ -15,6 +15,9 @@ that iPhone, iPad, Mac, iTunes and other AirPlay senders can stream to.
 - **Portable**: the protocol core does no I/O of its own. A socket runner covers ESP-IDF, Arduino-ESP32,
   Zephyr, Linux and macOS; for anything else implement a small `Transport` interface
 
+Tested with Music.app on macOS 26 (encrypted ALAC, synchronized playback, volume, pause, seek and track
+details), [pyatv](https://pyatv.dev) and PipeWire's RAOP sink.
+
 AirPlay 2 is not supported: senders show the receiver as an AirPlay (1) speaker. Multi-room grouping of
 several AirPlay 1 speakers from iTunes/Music on a Mac works; the Home app's AirPlay 2 groups do not.
 

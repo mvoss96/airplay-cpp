@@ -1349,6 +1349,9 @@ bool Receiver::start_playback_() {
     } else {
       AIRPLAY_LOGI("Playback not synchronized to the sender");
     }
+  } else {
+    // After a pause, a seek or an underrun
+    AIRPLAY_LOGD("Playback restarted (%s)", this->synced_ ? "synchronized" : "not synchronized");
   }
   this->playback_started_ = true;
   this->servo_error_us_ = 0;
