@@ -212,7 +212,23 @@ static bool contains(const char *begin, const char *end, const char *needle) {
 
 Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
                    Listener *listener)
-    : config_(config), crypto_(crypto), transport_(transport), sink_(sink), listener_(listener) {}
+    : config_(config), crypto_(crypto), transport_(transport), sink_(sink), listener_(listener) {
+  // The set shairport-sync advertises, which current Apple senders accept. cn: codecs (0 = PCM, 1 = ALAC),
+  // et: encryption (0 = none, 1 = RSA), vn: protocol version (65537 = 1.1), sf: status flags
+  static const TxtRecord RECORDS[] = {
+      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},      {"et", "0,1"},         {"ek", "1"},   {"sv", "false"},
+      {"da", "true"},   {"sr", "44100"}, {"ss", "16"},       {"pw", "false"},       {"tp", "UDP"}, {"vn", "65537"},
+      {"vs", "105.1"},  {"sf", "0x4"},   {"fv", "76400.10"}, {"am", "airplay-cpp"},
+  };
+  static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) < MAX_TXT_RECORDS, "No room for md");
+  for (const TxtRecord &record : RECORDS)
+    this->txt_records_[this->txt_record_count_++] = record;
+  // md: which details the receiver takes (0 = text, 1 = cover art)
+  if (config.metadata || config.artwork) {
+    const char *md = config.metadata && config.artwork ? "0,1" : (config.metadata ? "0" : "1");
+    this->txt_records_[this->txt_record_count_++] = TxtRecord{"md", md};
+  }
+}
 
 Receiver::~Receiver() {
   this->free_(this->slots_);
@@ -287,17 +303,8 @@ size_t Receiver::service_instance_name(char *buffer, size_t size) const {
 }
 
 const TxtRecord *Receiver::txt_records(size_t *count) const {
-  // The set shairport-sync advertises, which current Apple senders accept. cn: codecs (0 = PCM, 1 = ALAC),
-  // et: encryption (0 = none, 1 = RSA), vn: protocol version (65537 = 1.1), sf: status flags, md: track
-  // details (0 = text; last, so that it can be left out)
-  static const TxtRecord RECORDS[] = {
-      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},      {"et", "0,1"},         {"ek", "1"},   {"sv", "false"},
-      {"da", "true"},   {"sr", "44100"}, {"ss", "16"},       {"pw", "false"},       {"tp", "UDP"}, {"vn", "65537"},
-      {"vs", "105.1"},  {"sf", "0x4"},   {"fv", "76400.10"}, {"am", "airplay-cpp"}, {"md", "0"},
-  };
-  static constexpr size_t TOTAL = sizeof(RECORDS) / sizeof(RECORDS[0]);
-  *count = this->config_.metadata ? TOTAL : TOTAL - 1;
-  return RECORDS;
+  *count = this->txt_record_count_;
+  return this->txt_records_;
 }
 
 void Receiver::notify_played(uint32_t frames, int64_t timestamp_us) {
@@ -361,11 +368,16 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
     char *buffer = c.buffer;
 
     if (c.discard_remaining > 0) {
-      // Skipping the body of a request that did not fit in the buffer
+      // Skipping the body of a request that did not fit in the buffer; cover art goes to the listener
       const size_t drop = std::min(c.discard_remaining, c.rx_length);
+      const bool artwork = this->artwork_streaming_ && connection == this->session_owner_;
+      if (artwork)
+        this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(buffer), drop);
       std::memmove(buffer, buffer + drop, c.rx_length - drop);
       c.rx_length -= drop;
       c.discard_remaining -= drop;
+      if (artwork && c.discard_remaining == 0)
+        this->end_artwork_(true);
       continue;
     }
 
@@ -394,9 +406,9 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
     bool keep_open;
     if (header_length + content_length > RTSP_BUFFER_SIZE) {
       // Too large to buffer (e.g. cover art): answer without the body and skip it
-      keep_open = this->handle_request_(connection, buffer, header_length, nullptr, 0, now_us);
-      consumed = std::min(c.rx_length, header_length + content_length);
-      c.discard_remaining = header_length + content_length - consumed;
+      keep_open = this->handle_request_(connection, buffer, header_length, nullptr, content_length, now_us);
+      consumed = header_length;
+      c.discard_remaining = content_length;
     } else {
       if (c.rx_length < header_length + content_length)
         return;  // Wait for the rest of the body
@@ -460,7 +472,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
         equals_ignore_case(user_agent, "AirPlay/", 8)) {
       this->sender_version_ = static_cast<uint16_t>(std::strtoul(user_agent + 8, nullptr, 10));
     }
-    if (!this->handle_announce_(body != nullptr ? body : "", body_length)) {
+    if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
       status = 415;
       status_text = "Unsupported Media Type";
     }
@@ -504,8 +516,11 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   } else if (std::strcmp(method, "SET_PARAMETER") == 0) {
     char content_type[48] = "";
     get_header(request, header_length, "Content-Type", content_type, sizeof(content_type));
-    if (is_owner && body != nullptr)
+    if (is_owner && equals_ignore_case(content_type, "image/", 6)) {
+      this->begin_artwork_(content_type, body, body_length);
+    } else if (is_owner && body != nullptr) {
       this->handle_set_parameter_(content_type, body, body_length);
+    }
   } else if (std::strcmp(method, "GET_PARAMETER") == 0) {
     if (body != nullptr && std::strstr(body, "volume") != nullptr)
       std::snprintf(response_body, sizeof(response_body), "volume: %.6f\r\n",
@@ -702,7 +717,7 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
     return;
   }
   if (!equals_ignore_case(content_type, "text/parameters", 15))
-    return;  // Cover art and progress are not used
+    return;  // Progress is not used
 
   const char *volume = std::strstr(body, "volume:");
   if (volume == nullptr)
@@ -727,6 +742,38 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
     if (this->listener_ != nullptr)
       this->listener_->on_mute(false);
   }
+}
+
+void Receiver::begin_artwork_(const char *content_type, const char *body, size_t body_length) {
+  if (!this->config_.artwork || this->listener_ == nullptr)
+    return;
+  ArtworkFormat format{ArtworkFormat::JPEG};
+  if (equals_ignore_case(content_type + 6, "jpeg", 5)) {
+    format = ArtworkFormat::JPEG;
+  } else if (equals_ignore_case(content_type + 6, "png", 4)) {
+    format = ArtworkFormat::PNG;
+  } else {
+    body_length = 0;  // "image/none": the track has no cover art
+  }
+  if (body_length == 0) {
+    AIRPLAY_LOGD("No cover art");
+    this->listener_->on_artwork_clear();
+    return;
+  }
+  AIRPLAY_LOGD("Cover art: %s, %u bytes", content_type, static_cast<unsigned>(body_length));
+  if (!this->listener_->on_artwork_begin(format, body_length))
+    return;
+  if (body == nullptr) {
+    this->artwork_streaming_ = true;  // The rest arrives through process_requests_()
+    return;
+  }
+  this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(body), body_length);
+  this->listener_->on_artwork_end(true);
+}
+
+void Receiver::end_artwork_(bool complete) {
+  this->artwork_streaming_ = false;
+  this->listener_->on_artwork_end(complete);
 }
 
 bool Receiver::add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size) {
@@ -780,8 +827,12 @@ void Receiver::end_session_() {
   this->close_udp_();
   this->session_owner_ = NO_CONNECTION;
   this->codec_ = Codec::NONE;
+  if (this->artwork_streaming_)
+    this->end_artwork_(false);
   if (this->listener_ != nullptr && this->config_.metadata)
     this->listener_->on_metadata(Metadata{});
+  if (this->listener_ != nullptr && this->config_.artwork)
+    this->listener_->on_artwork_clear();
   if (this->airplay_muted_) {
     this->airplay_muted_ = false;
     if (this->listener_ != nullptr)

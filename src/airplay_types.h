@@ -39,6 +39,12 @@ struct Metadata {
   char album[FIELD_SIZE];
 };
 
+/// Image format of cover art
+enum class ArtworkFormat : uint8_t {
+  JPEG = 0,
+  PNG,
+};
+
 /// What is needed to send remote control (DACP) commands to the sender
 struct RemoteTarget {
   static constexpr size_t DACP_ID_SIZE = 17;

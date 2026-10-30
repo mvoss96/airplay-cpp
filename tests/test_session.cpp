@@ -1,5 +1,5 @@
 // A whole session as a sender would run it, with the real mbedTLS backend: Apple-Challenge, encrypted
-// session key and audio, retransmission, flush, volume, metadata, take-over and teardown.
+// session key and audio, retransmission, flush, volume, metadata, cover art, take-over and teardown.
 #include "airplay_crypto_mbedtls.h"
 #include "airplay_util.h"
 #include "fake_network.h"
@@ -90,16 +90,17 @@ static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
 }
 
 struct Fixture {
-  explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500)
-      : sink(SAMPLE_RATE / 5), receiver(make_config(metadata, buffer_ms), crypto, transport, sink, &listener) {
+  explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500, bool artwork = true)
+      : sink(SAMPLE_RATE / 5), receiver(make_config(metadata, buffer_ms, artwork), crypto, transport, sink, &listener) {
     CHECK(this->crypto.init());
     CHECK(this->receiver.begin());
   }
-  static ReceiverConfig make_config(bool metadata, uint32_t buffer_ms) {
+  static ReceiverConfig make_config(bool metadata, uint32_t buffer_ms, bool artwork) {
     ReceiverConfig config;
     config.name = "Kitchen";
     std::memcpy(config.mac, MAC, 6);
     config.metadata = metadata;
+    config.artwork = artwork;
     config.buffer_ms = buffer_ms;
     return config;
   }
@@ -314,12 +315,33 @@ static void test_control() {
   CHECK(std::strcmp(f.listener.metadata.title, "Title") == 0);
   CHECK(std::strcmp(f.listener.metadata.artist, "Artist") == 0);
 
-  // Cover art larger than the buffer, sent in pieces: answered and skipped, the next request still works
-  const std::string art(5000, '\xab');
+  // Cover art larger than the buffer, sent in pieces and passed on in pieces; the next request still works
+  std::string art(5000, '\0');
+  for (size_t i = 0; i < art.size(); i++)
+    art[i] = static_cast<char>(i * 7);
   const std::string big = rtsp_request("SET_PARAMETER", ++f.cseq, "Content-Type: image/jpeg\r\n", art);
   for (size_t i = 0; i < big.size(); i += 700)
     send_request(f.receiver, 0, big.substr(i, 700), f.now_us);
   CHECK(status_code(f.transport.take(0)) == 200);
+  CHECK(f.listener.artwork_begins == 1 && f.listener.artwork_ends == 1 && f.listener.artwork_complete);
+  CHECK(f.listener.artwork_format == ArtworkFormat::JPEG && f.listener.artwork_size == art.size());
+  CHECK(f.listener.artwork == art);
+  CHECK(status_code(f.request(0, "OPTIONS")) == 200);
+
+  // Small cover art arrives in one piece
+  f.request(0, "SET_PARAMETER", "Content-Type: image/png\r\n", "\x89PNG");
+  CHECK(f.listener.artwork_begins == 2 && f.listener.artwork_ends == 2);
+  CHECK(f.listener.artwork_format == ArtworkFormat::PNG && f.listener.artwork == "\x89PNG");
+
+  // Rejected by the listener: skipped
+  f.listener.artwork_limit = 1000;
+  CHECK(status_code(f.request(0, "SET_PARAMETER", "Content-Type: image/jpeg\r\n", art)) == 200);
+  CHECK(f.listener.artwork_begins == 3 && f.listener.artwork_ends == 2 && f.listener.artwork.empty());
+  f.listener.artwork_limit = 100000;
+
+  // No cover art for this track
+  f.request(0, "SET_PARAMETER", "Content-Type: image/none\r\n");
+  CHECK(f.listener.artwork_clears == 1);
   CHECK(status_code(f.request(0, "OPTIONS")) == 200);
 
   // A request sent one byte at a time
@@ -376,6 +398,30 @@ static void test_control() {
   CHECK(f.listener.last_state() == SessionState::NONE);
   CHECK(!f.transport.udp_open);
   CHECK(f.listener.metadata.title[0] == '\0');  // Cleared at the end of the session
+  CHECK(f.listener.artwork_clears == 3);        // Also cleared when the first sender was taken over
+}
+
+static void test_artwork_interrupted() {
+  Fixture f;
+  f.open(0);
+  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 200);
+  // The session ends half-way through a large image
+  const std::string big =
+      rtsp_request("SET_PARAMETER", ++f.cseq, "Content-Type: image/jpeg\r\n", std::string(9000, 'x'));
+  send_request(f.receiver, 0, big.substr(0, 4000), f.now_us);
+  CHECK(f.listener.artwork_begins == 1 && f.listener.artwork_ends == 0);
+  f.receiver.request_disconnect();
+  f.run(1000);
+  CHECK(f.listener.artwork_ends == 1 && !f.listener.artwork_complete);
+  CHECK(f.listener.artwork_clears == 1);
+
+  // Disabled: not passed on
+  Fixture off(true, 500, false);
+  off.open(0);
+  off.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP);
+  off.request(0, "SET_PARAMETER", "Content-Type: image/jpeg\r\n", "abc");
+  off.request(0, "SET_PARAMETER", "Content-Type: image/none\r\n");
+  CHECK(off.listener.artwork_begins == 0 && off.listener.artwork_clears == 0);
 }
 
 static void test_errors_and_disconnect() {
@@ -432,8 +478,14 @@ static void test_mdns() {
   size_t count = 0;
   const TxtRecord *records = with.receiver.txt_records(&count);
   CHECK(count == 17);
-  CHECK(std::strcmp(records[count - 1].key, "md") == 0);
-  Fixture without(false);
+  CHECK(std::strcmp(records[count - 1].key, "md") == 0 && std::strcmp(records[count - 1].value, "0,1") == 0);
+  Fixture text_only(true, 500, false);
+  records = text_only.receiver.txt_records(&count);
+  CHECK(count == 17 && std::strcmp(records[count - 1].value, "0") == 0);
+  Fixture artwork_only(false, 500, true);
+  records = artwork_only.receiver.txt_records(&count);
+  CHECK(count == 17 && std::strcmp(records[count - 1].value, "1") == 0);
+  Fixture without(false, 500, false);
   without.receiver.txt_records(&count);
   CHECK(count == 16);
 }
@@ -443,6 +495,7 @@ int main() {
   test_encrypted_session();
   test_control();
   test_errors_and_disconnect();
+  test_artwork_interrupted();
   test_mdns();
   return finish("test_session");
 }

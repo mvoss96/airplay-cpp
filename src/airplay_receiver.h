@@ -43,6 +43,15 @@ class Listener {
   virtual void on_volume(float /*volume*/) {}
   virtual void on_mute(bool /*muted*/) {}
   virtual void on_metadata(const Metadata & /*metadata*/) {}
+  /// Cover art of the current track (config.artwork). It arrives in pieces: on_artwork_begin(), then
+  /// on_artwork_data() until `size` bytes have been passed, then on_artwork_end(). Return false from
+  /// on_artwork_begin() to skip the image, e.g. when it is too large.
+  virtual bool on_artwork_begin(ArtworkFormat /*format*/, size_t /*size*/) { return false; }
+  virtual void on_artwork_data(const uint8_t * /*data*/, size_t /*length*/) {}
+  /// @param complete false if the session ended before the whole image arrived
+  virtual void on_artwork_end(bool /*complete*/) {}
+  /// The current track has no cover art, or the session ended
+  virtual void on_artwork_clear() {}
   /// The sender's remote control details, see dacp.h
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
 };
@@ -57,6 +66,8 @@ struct ReceiverConfig {
   uint32_t buffer_ms{500};
   /// Advertise and accept track details (Listener::on_metadata)
   bool metadata{false};
+  /// Advertise and accept cover art (Listener::on_artwork_begin)
+  bool artwork{false};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
   void (*deallocate)(void *pointer){nullptr};
@@ -155,6 +166,7 @@ class Receiver {
   static constexpr size_t PACKET_BUFFER_SIZE = 1600;
   static constexpr uint32_t TIMING_SAMPLE_COUNT = 8;
   static constexpr uint8_t NO_CONNECTION = 0xff;
+  static constexpr size_t MAX_TXT_RECORDS = 17;
 
   void *allocate_(size_t size) const;
   void free_(void *pointer) const;
@@ -167,6 +179,9 @@ class Receiver {
   bool handle_announce_(const char *body, size_t body_length);
   bool handle_setup_(uint8_t connection, const char *transport, char *response_headers, size_t size);
   void handle_set_parameter_(const char *content_type, const char *body, size_t body_length);
+  /// Starts receiving cover art. `body` is null if the image is too large to buffer and arrives in pieces.
+  void begin_artwork_(const char *content_type, const char *body, size_t body_length);
+  void end_artwork_(bool complete);
   bool add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size);
   void update_remote_target_(const char *dacp_id, const char *active_remote, uint32_t address);
   void close_connection_(uint8_t connection);
@@ -208,6 +223,8 @@ class Receiver {
   AudioSink &sink_;
   Listener *listener_;
   ALACDecoder decoder_;
+  TxtRecord txt_records_[MAX_TXT_RECORDS];
+  size_t txt_record_count_{0};
 
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};
@@ -238,7 +255,8 @@ class Receiver {
   Endpoint client_timing_{};
   uint16_t initial_seq_{0};
   bool have_initial_seq_{false};
-  uint16_t sender_version_{0};  // From "User-Agent: AirPlay/<version>"
+  uint16_t sender_version_{0};     // From "User-Agent: AirPlay/<version>"
+  bool artwork_streaming_{false};  // Passing the skipped body of the session owner's request to the listener
 
   // Audio session
   bool audio_active_{false};

@@ -4,6 +4,8 @@
 //   ./airplay_receiver "My Speaker" | aplay -f cd
 //   ./airplay_receiver "My Speaker" | ffplay -f s16le -ar 44100 -ch_layout stereo -nodisp -
 //
+// AIRPLAY_ARTWORK=<file> saves the cover art of the latest track to that file.
+//
 // Senders find the receiver through mDNS; the program prints the command that announces it (Avahi or dns-sd).
 #include "airplay.h"
 
@@ -91,6 +93,27 @@ class PrintingListener : public airplay::Listener {
     if (metadata.title[0] != '\0')
       std::fprintf(stderr, "Now playing: %s - %s (%s)\n", metadata.artist, metadata.title, metadata.album);
   }
+  bool on_artwork_begin(airplay::ArtworkFormat format, size_t size) override {
+    if (this->artwork_path == nullptr)
+      return false;
+    std::fprintf(stderr, "Cover art: %s, %zu bytes\n", format == airplay::ArtworkFormat::PNG ? "PNG" : "JPEG", size);
+    this->artwork_file = std::fopen(this->artwork_path, "wb");
+    return this->artwork_file != nullptr;
+  }
+  void on_artwork_data(const uint8_t *data, size_t length) override {
+    std::fwrite(data, 1, length, this->artwork_file);
+  }
+  void on_artwork_end(bool /*complete*/) override {
+    std::fclose(this->artwork_file);
+    this->artwork_file = nullptr;
+  }
+  void on_artwork_clear() override {
+    if (this->artwork_path != nullptr)
+      std::fprintf(stderr, "No cover art\n");
+  }
+
+  const char *artwork_path{nullptr};
+  FILE *artwork_file{nullptr};
 };
 
 int main(int argc, char **argv) {
@@ -125,10 +148,13 @@ int main(int argc, char **argv) {
   std::memcpy(config.mac, mac, sizeof(mac));
   config.buffer_ms = 2500;  // Enough for synchronized playback
   config.metadata = true;
+  const char *artwork_path = std::getenv("AIRPLAY_ARTWORK");
+  config.artwork = artwork_path != nullptr;
 
   airplay::Receiver *receiver_for_output = nullptr;
   PacedOutput sink(output, receiver_for_output);
   PrintingListener listener;
+  listener.artwork_path = artwork_path;
   // AIRPLAY_PORT changes the RTSP port, e.g. on macOS, whose own AirPlay receiver uses 5000 and 7000
   uint16_t port = airplay::Receiver::DEFAULT_PORT;
   if (const char *port_text = std::getenv("AIRPLAY_PORT"))

@@ -92,6 +92,19 @@ class RecordingListener : public Listener {
     this->remote = value;
     this->remote_count++;
   }
+  bool on_artwork_begin(ArtworkFormat format, size_t size) override {
+    this->artwork_format = format;
+    this->artwork_size = size;
+    this->artwork.clear();
+    this->artwork_begins++;
+    return size <= this->artwork_limit;
+  }
+  void on_artwork_data(const uint8_t *data, size_t length) override { this->artwork.append(data, data + length); }
+  void on_artwork_end(bool complete) override {
+    this->artwork_ends++;
+    this->artwork_complete = complete;
+  }
+  void on_artwork_clear() override { this->artwork_clears++; }
   SessionState last_state() const { return this->states.empty() ? SessionState::NONE : this->states.back(); }
 
   std::vector<SessionState> states;
@@ -101,6 +114,14 @@ class RecordingListener : public Listener {
   int metadata_count{0};
   RemoteTarget remote{};
   int remote_count{0};
+  size_t artwork_limit{100000};
+  ArtworkFormat artwork_format{ArtworkFormat::JPEG};
+  size_t artwork_size{0};
+  std::string artwork;
+  int artwork_begins{0};
+  int artwork_ends{0};
+  int artwork_clears{0};
+  bool artwork_complete{false};
 };
 
 /// Crypto for unencrypted streams
