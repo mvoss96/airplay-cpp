@@ -8,8 +8,9 @@ that iPhone, iPad, Mac, iTunes and other AirPlay senders can stream to.
   other AirPlay speakers in the same session; corrects clock drift by dropping or repeating single frames at
   the quietest point
 - **Robust on Wi-Fi**: jitter buffer, retransmission of lost packets, silence for packets that never arrive
-- **Control**: volume and mute from the sender, track title, artist and album, cover art, track position, and
-  remote control of the sender (play, pause, next, previous, volume) over DACP
+- **Control**: volume and mute from the sender, track details (title, artist, album, album artist, year, track
+  number), cover art, track position, and remote control of the sender (play, pause, next, previous, volume) over
+  DACP
 - **Password**: optional, senders ask for it (RTSP Digest authentication)
 - **Embedded friendly**: no exceptions, no RTTI, no heap allocation after `begin()`, buffers optionally in
   external RAM

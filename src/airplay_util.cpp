@@ -73,6 +73,16 @@ void copy_utf8(char *destination, size_t size, const uint8_t *source, size_t len
   destination[count] = '\0';
 }
 
+/// A big endian integer of up to 4 bytes; DMAP stores year and track number as 2 bytes
+static uint32_t read_dmap_integer(const uint8_t *value, size_t length) {
+  if (length > 4)
+    return 0;
+  uint32_t result = 0;
+  for (size_t i = 0; i < length; i++)
+    result = (result << 8) | value[i];
+  return result;
+}
+
 void parse_dmap_metadata(const uint8_t *data, size_t length, Metadata &metadata) {
   // Items: a 4 character tag, a 32-bit big endian length and the value
   size_t position = 0;
@@ -92,6 +102,12 @@ void parse_dmap_metadata(const uint8_t *data, size_t length, Metadata &metadata)
       copy_utf8(metadata.artist, sizeof(metadata.artist), value, item_length);
     } else if (std::memcmp(tag, "asal", 4) == 0) {
       copy_utf8(metadata.album, sizeof(metadata.album), value, item_length);
+    } else if (std::memcmp(tag, "asaa", 4) == 0) {
+      copy_utf8(metadata.album_artist, sizeof(metadata.album_artist), value, item_length);
+    } else if (std::memcmp(tag, "asyr", 4) == 0) {
+      metadata.year = static_cast<uint16_t>(read_dmap_integer(value, item_length));
+    } else if (std::memcmp(tag, "astn", 4) == 0) {
+      metadata.track = static_cast<uint16_t>(read_dmap_integer(value, item_length));
     }
     position += item_length;
   }

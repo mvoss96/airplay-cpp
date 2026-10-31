@@ -15,8 +15,8 @@ size_t base64_decode(const char *input, size_t input_length, uint8_t *output, si
 /// @return Length of the encoded text, or 0 if the output buffer is too small.
 size_t base64_encode_unpadded(const uint8_t *input, size_t input_length, char *output, size_t output_size);
 
-/// @brief Picks title, artist and album out of DMAP data (the body of a SET_PARAMETER with
-/// Content-Type application/x-dmap-tagged). Fields that are not present are left untouched.
+/// @brief Picks title, artist, album, album artist, year and track number out of DMAP data (the body of a SET_PARAMETER
+/// with Content-Type application/x-dmap-tagged). Fields that are not present are left untouched.
 void parse_dmap_metadata(const uint8_t *data, size_t length, Metadata &metadata);
 
 /// @brief Copies UTF-8 text into a fixed buffer, shortened if needed without cutting a character in half.

@@ -37,6 +37,9 @@ struct Metadata {
   char title[FIELD_SIZE];
   char artist[FIELD_SIZE];
   char album[FIELD_SIZE];
+  char album_artist[FIELD_SIZE];
+  uint16_t year;   // 0 when unknown
+  uint16_t track;  // Track number on the album; 0 when unknown
 };
 
 /// Playback position of the current track, as the sender reports it; duration 0 when no track plays

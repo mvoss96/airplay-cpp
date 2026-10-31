@@ -38,13 +38,17 @@ static void test_base64() {
 
 static void test_dmap() {
   const std::string inner = item("mper", std::string(8, '\x01')) + item("asal", "Abbey Road") +
-                            item("asar", "The Beatles") + item("minm", "Here Comes the Sun") + item("caps", "\x01");
+                            item("asar", "The Beatles") + item("minm", "Here Comes the Sun") + item("caps", "\x01") +
+                            item("asaa", "Various") + item("asyr", std::string("\x07\xb1", 2)) +
+                            item("astn", std::string("\x00\x07", 2));
   const std::string body = item("mlit", inner);
   Metadata metadata{};
   parse_dmap_metadata(reinterpret_cast<const uint8_t *>(body.data()), body.size(), metadata);
   CHECK(std::strcmp(metadata.title, "Here Comes the Sun") == 0);
   CHECK(std::strcmp(metadata.artist, "The Beatles") == 0);
   CHECK(std::strcmp(metadata.album, "Abbey Road") == 0);
+  CHECK(std::strcmp(metadata.album_artist, "Various") == 0);
+  CHECK(metadata.year == 1969 && metadata.track == 7);
 
   // Shortening must not split a multi-byte character: 10 x "ä" (2 bytes each) into 8 bytes
   std::string umlauts;
