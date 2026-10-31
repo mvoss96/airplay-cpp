@@ -1,6 +1,7 @@
 #include "airplay_receiver.h"
 
 #include "airplay_log.h"
+#include "airplay_srp.h"
 #include "airplay_util.h"
 
 #include <algorithm>
@@ -150,52 +151,6 @@ static uint32_t fnv1a(const void *data, size_t length, uint32_t hash = 216613626
   return hash;
 }
 
-static bool equals_ignore_case(const char *a, const char *b, size_t length) {
-  for (size_t i = 0; i < length; i++) {
-    char x = a[i];
-    char y = b[i];
-    if (x >= 'A' && x <= 'Z')
-      x = static_cast<char>(x - 'A' + 'a');
-    if (y >= 'A' && y <= 'Z')
-      y = static_cast<char>(y - 'A' + 'a');
-    if (x != y)
-      return false;
-    if (x == '\0')
-      return true;
-  }
-  return true;
-}
-
-/// Copies the value of a header from a raw header block ("Name: value" lines separated by CRLF).
-/// @return true if the header was found
-static bool get_header(const char *block, size_t block_length, const char *name, char *value, size_t value_size) {
-  const size_t name_length = std::strlen(name);
-  const char *end = block + block_length;
-  const char *line = block;
-  while (line < end) {
-    const char *line_end = line;
-    while (line_end < end && *line_end != '\r' && *line_end != '\n')
-      line_end++;
-    if (static_cast<size_t>(line_end - line) > name_length && equals_ignore_case(line, name, name_length) &&
-        line[name_length] == ':') {
-      const char *start = line + name_length + 1;
-      while (start < line_end && (*start == ' ' || *start == '\t'))
-        start++;
-      const char *stop = line_end;
-      while (stop > start && (stop[-1] == ' ' || stop[-1] == '\t'))
-        stop--;
-      const size_t length = std::min(static_cast<size_t>(stop - start), value_size - 1);
-      std::memcpy(value, start, length);
-      value[length] = '\0';
-      return true;
-    }
-    line = line_end;
-    while (line < end && (*line == '\r' || *line == '\n'))
-      line++;
-  }
-  return false;
-}
-
 /// Finds "key=" in a parameter list such as "control_port=6001;timing_port=6002" and parses its number.
 static bool get_numeric_parameter(const char *text, const char *key, uint32_t *value) {
   const size_t key_length = std::strlen(key);
@@ -247,9 +202,23 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
   }
   if (md_length > 0)
     this->txt_records_[this->txt_record_count_++] = TxtRecord{"md", this->md_};
+
+  this->airplay2_ = config.airplay2 && config.random != nullptr && config.password == nullptr;
+  if (this->airplay2_) {
+    this->init_airplay2_();
+    // AirPlay 2 senders also look at the features of the RAOP service
+    this->txt_records_[this->txt_record_count_++] = TxtRecord{"ft", this->features_};
+  }
 }
 
 Receiver::~Receiver() {
+  if (this->srp_ != nullptr) {
+    this->srp_->~SrpServer();
+    this->free_(this->srp_);
+  }
+  this->free_(this->frames_);
+  this->free_(this->send_buffer_);
+  this->free_(this->body_buffer_);
   this->free_(this->slots_);
   this->free_(this->packet_buffer_);
   this->free_(this->output_buffer_);
@@ -310,6 +279,23 @@ bool Receiver::begin() {
   }
   for (size_t i = 0; i < MAX_CONNECTIONS; i++)
     this->connections_[i].buffer = &this->rtsp_buffers_[i * (RTSP_BUFFER_SIZE + 1)];
+
+  if (this->airplay2_) {
+    this->frames_ = static_cast<uint8_t *>(this->allocate_(MAX_CONNECTIONS * HAP_FRAME_SIZE));
+    this->send_buffer_ = static_cast<uint8_t *>(this->allocate_(HAP_FRAME_SIZE));
+    this->body_buffer_ = static_cast<uint8_t *>(this->allocate_(AIRPLAY2_BODY_SIZE));
+    void *srp = this->allocate_(sizeof(SrpServer));
+    if (srp != nullptr)
+      this->srp_ = new (srp) SrpServer();
+    if (this->frames_ == nullptr || this->send_buffer_ == nullptr || this->body_buffer_ == nullptr ||
+        this->srp_ == nullptr) {
+      AIRPLAY_LOGW("Failed to allocate the AirPlay 2 buffers; only AirPlay 1 is offered");
+      this->airplay2_ = false;
+    } else {
+      for (size_t i = 0; i < MAX_CONNECTIONS; i++)
+        this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
+    }
+  }
   AIRPLAY_LOGD("Buffer of %" PRIu32 " packets", this->slot_count_);
   return true;
 }
@@ -346,6 +332,17 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.peer = peer;
   c.local = local;
   c.authenticated = false;
+  c.encrypted = false;
+  c.encrypt_after_response = false;
+  c.event_channel = false;
+  c.frame_length = 0;
+  // An AirPlay 2 sender connects its event connection right after setting up its session
+  if (this->event_channel_pending_ && this->session_owner_ != NO_CONNECTION &&
+      this->connections_[this->session_owner_].peer.address == peer.address) {
+    this->event_channel_pending_ = false;
+    c.event_channel = true;
+    AIRPLAY_LOGD("Event connection");
+  }
   if (this->config_.password != nullptr) {
     // A new nonce for every connection, so that an answer cannot be replayed on another one
     char seed[64];
@@ -364,6 +361,8 @@ void Receiver::connection_closed(uint8_t connection) {
   if (connection >= MAX_CONNECTIONS || !this->connections_[connection].open)
     return;
   AIRPLAY_LOGD("Connection closed");
+  if (connection == this->pairing_connection_)
+    this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_)
     this->end_session_();
   this->connections_[connection].open = false;
@@ -374,6 +373,8 @@ void Receiver::close_connection_(uint8_t connection) {
     return;
   if (connection == this->session_owner_)
     this->end_session_();
+  if (connection == this->pairing_connection_)
+    this->pairing_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;
   this->transport_.close(connection);
 }
@@ -381,6 +382,17 @@ void Receiver::close_connection_(uint8_t connection) {
 void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us) {
   if (connection >= MAX_CONNECTIONS)
     return;
+  Connection &c = this->connections_[connection];
+  if (!c.open || c.event_channel)
+    return;
+  if (c.encrypted) {
+    this->receive_encrypted_(connection, data, length, now_us);
+  } else {
+    this->pass_plain_(connection, data, length, now_us);
+  }
+}
+
+void Receiver::pass_plain_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us) {
   Connection &c = this->connections_[connection];
   while (length > 0 && c.open) {
     const size_t chunk = std::min(length, RTSP_BUFFER_SIZE - c.rx_length);
@@ -485,9 +497,18 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   response_body[0] = '\0';
 
   const bool is_owner = connection == this->session_owner_;
+  Response airplay2_response;
+  airplay2_response.headers = extra_headers;
+  airplay2_response.headers_size = sizeof(extra_headers);
+  bool airplay2 = false;
 
-  if (this->config_.password != nullptr && !c.authenticated && std::strcmp(method, "OPTIONS") != 0 &&
-      !this->check_authorization_(c, method, request, header_length)) {
+  if (this->airplay2_ && this->handle_airplay2_request_(connection, method, request, header_length, body, body_length,
+                                                        airplay2_response)) {
+    airplay2 = true;
+    status = airplay2_response.status;
+    status_text = airplay2_response.status_text;
+  } else if (this->config_.password != nullptr && !c.authenticated && std::strcmp(method, "OPTIONS") != 0 &&
+             !this->check_authorization_(c, method, request, header_length)) {
     status = 401;
     status_text = "Unauthorized";
     std::snprintf(extra_headers, sizeof(extra_headers), "WWW-Authenticate: Digest realm=\"raop\", nonce=\"%s\"\r\n",
@@ -495,19 +516,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   } else if (std::strcmp(method, "OPTIONS") == 0) {
     std::snprintf(extra_headers, sizeof(extra_headers), "%s", PUBLIC_METHODS);
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
-    if (!is_owner && this->session_owner_ != NO_CONNECTION) {
-      AIRPLAY_LOGI("Another sender took over");
-      this->close_connection_(this->session_owner_);
-    }
-    this->stop_audio_();
-    this->session_owner_ = connection;
-    // Senders identify as e.g. "AirPlay/381.13"; the version decides how the latency is computed
-    char user_agent[48] = "";
-    this->sender_version_ = 0;
-    if (get_header(request, header_length, "User-Agent", user_agent, sizeof(user_agent)) &&
-        equals_ignore_case(user_agent, "AirPlay/", 8)) {
-      this->sender_version_ = static_cast<uint16_t>(std::strtoul(user_agent + 8, nullptr, 10));
-    }
+    this->take_session_(connection, request, header_length);
     if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
       status = 415;
       status_text = "Unsupported Media Type";
@@ -589,36 +598,70 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     }
   }
 
+  // Text parameters, or the binary body of an AirPlay 2 response
+  const char *content_type = "text/parameters";
+  const auto *body_data = reinterpret_cast<const uint8_t *>(response_body);
+  size_t body_size = std::strlen(response_body);
+  if (airplay2 && airplay2_response.body != nullptr) {
+    content_type = airplay2_response.content_type;
+    body_data = airplay2_response.body;
+    body_size = airplay2_response.body_length;
+  }
+
   char response[RESPONSE_SIZE];
-  const size_t body_size = std::strlen(response_body);
-  int length = std::snprintf(response, sizeof(response),
-                             "RTSP/1.0 %d %s\r\n"
-                             "CSeq: %s\r\n"
-                             "Server: AirTunes/105.1\r\n"
-                             "Audio-Jack-Status: connected; type=analog\r\n"
-                             "%s",
-                             status, status_text, cseq, extra_headers);
+  int length =
+      std::snprintf(response, sizeof(response),
+                    "RTSP/1.0 %d %s\r\n"
+                    "CSeq: %s\r\n"
+                    "Server: AirTunes/%s\r\n"
+                    "Audio-Jack-Status: connected; type=analog\r\n"
+                    "%s",
+                    status, status_text, cseq, this->airplay2_ ? AIRPLAY2_SOURCE_VERSION : "105.1", extra_headers);
   if (body_size > 0 && length > 0 && static_cast<size_t>(length) < sizeof(response)) {
-    length +=
-        std::snprintf(response + length, sizeof(response) - length,
-                      "Content-Type: text/parameters\r\nContent-Length: %u\r\n", static_cast<unsigned>(body_size));
+    length += std::snprintf(response + length, sizeof(response) - length, "Content-Type: %s\r\nContent-Length: %u\r\n",
+                            content_type, static_cast<unsigned>(body_size));
   }
   if (length > 0 && static_cast<size_t>(length) < sizeof(response))
-    length += std::snprintf(response + length, sizeof(response) - length, "\r\n%s", response_body);
+    length += std::snprintf(response + length, sizeof(response) - length, "\r\n");
   if (length <= 0 || static_cast<size_t>(length) >= sizeof(response)) {
     AIRPLAY_LOGW("Response too large");
     return false;
   }
-  if (!c.open ||
-      !this->transport_.send(connection, reinterpret_cast<const uint8_t *>(response), static_cast<size_t>(length))) {
+  if (!c.open || !this->send_(connection, reinterpret_cast<const uint8_t *>(response), static_cast<size_t>(length)) ||
+      (body_size > 0 && !this->send_(connection, body_data, body_size))) {
     return false;
   }
+  // After pair-setup everything that follows is encrypted, starting with the next request
+  if (c.encrypt_after_response) {
+    c.encrypt_after_response = false;
+    c.encrypted = true;
+    c.read_counter = 0;
+    c.write_counter = 0;
+    c.frame_length = 0;
+  }
   return keep_open;
+}
+
+void Receiver::take_session_(uint8_t connection, const char *request, size_t header_length) {
+  if (connection != this->session_owner_ && this->session_owner_ != NO_CONNECTION) {
+    AIRPLAY_LOGI("Another sender took over");
+    this->close_connection_(this->session_owner_);
+  }
+  this->stop_audio_();
+  this->session_owner_ = connection;
+  // Senders identify as e.g. "AirPlay/381.13"; the version decides how the latency is computed
+  char user_agent[48] = "";
+  this->sender_version_ = 0;
+  if (get_header(request, header_length, "User-Agent", user_agent, sizeof(user_agent)) &&
+      equals_ignore_case(user_agent, "AirPlay/", 8)) {
+    this->sender_version_ = static_cast<uint16_t>(std::strtoul(user_agent + 8, nullptr, 10));
+  }
 }
 
 bool Receiver::handle_announce_(const char *body, size_t body_length) {
   this->codec_ = Codec::NONE;
   this->encrypted_ = false;
+  this->airplay2_audio_ = false;
   bool have_key = false;
   bool have_iv = false;
   bool key_error = false;
@@ -712,10 +755,21 @@ bool Receiver::handle_setup_(uint8_t connection, const char *transport, char *re
   get_numeric_parameter(transport, "control_port", &control_port);
   get_numeric_parameter(transport, "timing_port", &timing_port);
 
+  uint16_t ports[NUM_UDP_CHANNELS] = {};
+  if (!this->open_udp_(connection, control_port, timing_port, ports))
+    return false;
+
+  std::snprintf(response_headers, size,
+                "Transport: RTP/AVP/UDP;unicast;mode=record;server_port=%u;control_port=%u;timing_port=%u\r\n"
+                "Session: 1\r\n",
+                ports[static_cast<size_t>(UdpChannel::AUDIO)], ports[static_cast<size_t>(UdpChannel::CONTROL)],
+                ports[static_cast<size_t>(UdpChannel::TIMING)]);
+  return true;
+}
+
+bool Receiver::open_udp_(uint8_t connection, uint32_t control_port, uint32_t timing_port, uint16_t *ports) {
   this->stop_audio_();
   this->close_udp_();
-
-  uint16_t ports[NUM_UDP_CHANNELS] = {};
   if (!this->transport_.open_udp(ports)) {
     AIRPLAY_LOGW("Failed to open UDP sockets");
     this->transport_.close_udp();
@@ -732,12 +786,6 @@ bool Receiver::handle_setup_(uint8_t connection, const char *transport, char *re
   const uint32_t address = this->connections_[connection].peer.address;
   this->client_control_ = Endpoint{address, static_cast<uint16_t>(control_port)};
   this->client_timing_ = Endpoint{address, static_cast<uint16_t>(timing_port)};
-
-  std::snprintf(response_headers, size,
-                "Transport: RTP/AVP/UDP;unicast;mode=record;server_port=%u;control_port=%u;timing_port=%u\r\n"
-                "Session: 1\r\n",
-                ports[static_cast<size_t>(UdpChannel::AUDIO)], ports[static_cast<size_t>(UdpChannel::CONTROL)],
-                ports[static_cast<size_t>(UdpChannel::TIMING)]);
   return true;
 }
 
@@ -971,6 +1019,16 @@ void Receiver::end_session_() {
   this->close_udp_();
   this->session_owner_ = NO_CONNECTION;
   this->codec_ = Codec::NONE;
+  this->airplay2_audio_ = false;
+  this->event_channel_pending_ = false;
+  // The sender's event connection goes with its session
+  for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
+    Connection &c = this->connections_[i];
+    if (c.open && c.event_channel) {
+      c.open = false;
+      this->transport_.close(i);
+    }
+  }
   if (this->artwork_streaming_)
     this->end_artwork_(false);
   this->metadata_hash_ = 0;
@@ -1100,15 +1158,14 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
   switch (type) {
     case PAYLOAD_AUDIO:
       if (length > RTP_HEADER_SIZE) {
-        this->handle_audio_packet_(read_be16(packet + 2), read_be32(packet + 4), packet + RTP_HEADER_SIZE,
-                                   length - RTP_HEADER_SIZE, to_ms(now_us));
+        this->handle_audio_packet_(packet, packet + RTP_HEADER_SIZE, length - RTP_HEADER_SIZE, to_ms(now_us));
       }
       break;
     case PAYLOAD_RETRANSMIT: {
       // A short header followed by the original RTP packet
       const uint8_t *original = packet + RETRANSMIT_HEADER_SIZE;
       if (length > RETRANSMIT_HEADER_SIZE + RTP_HEADER_SIZE) {
-        this->handle_audio_packet_(read_be16(original + 2), read_be32(original + 4), original + RTP_HEADER_SIZE,
+        this->handle_audio_packet_(original, original + RTP_HEADER_SIZE,
                                    length - RETRANSMIT_HEADER_SIZE - RTP_HEADER_SIZE, to_ms(now_us));
       }
       break;
@@ -1118,8 +1175,9 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
   }
 }
 
-void Receiver::handle_audio_packet_(uint16_t seq, uint32_t rtp, const uint8_t *payload, size_t length,
-                                    uint32_t now_ms) {
+void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms) {
+  const uint16_t seq = read_be16(header + 2);
+  const uint32_t rtp = read_be32(header + 4);
   this->last_packet_ms_ = now_ms;
   if (length > PACKET_BUFFER_SIZE) {
     this->stats_.decode_errors++;
@@ -1158,7 +1216,14 @@ void Receiver::handle_audio_packet_(uint16_t seq, uint32_t rtp, const uint8_t *p
     return;  // Duplicate
 
   const uint8_t *data = payload;
-  if (this->encrypted_) {
+  if (this->airplay2_audio_) {
+    length = this->decrypt_airplay2_audio_(header, payload, length, this->packet_buffer_);
+    if (length == 0) {
+      this->stats_.decode_errors++;
+      return;
+    }
+    data = this->packet_buffer_;
+  } else if (this->encrypted_) {
     // Only whole AES blocks are encrypted, and the IV restarts with every packet
     uint8_t *plain = this->packet_buffer_;
     const size_t encrypted_length = length & ~(AES_BLOCK_SIZE - 1);

@@ -195,4 +195,48 @@ void md5_hex(const char *text, size_t length, char *hex) {
   hex[MD5_SIZE * 2] = '\0';
 }
 
+bool equals_ignore_case(const char *a, const char *b, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    char x = a[i];
+    char y = b[i];
+    if (x >= 'A' && x <= 'Z')
+      x = static_cast<char>(x - 'A' + 'a');
+    if (y >= 'A' && y <= 'Z')
+      y = static_cast<char>(y - 'A' + 'a');
+    if (x != y)
+      return false;
+    if (x == '\0')
+      return true;
+  }
+  return true;
+}
+
+bool get_header(const char *block, size_t block_length, const char *name, char *value, size_t value_size) {
+  const size_t name_length = std::strlen(name);
+  const char *end = block + block_length;
+  const char *line = block;
+  while (line < end) {
+    const char *line_end = line;
+    while (line_end < end && *line_end != '\r' && *line_end != '\n')
+      line_end++;
+    if (static_cast<size_t>(line_end - line) > name_length && equals_ignore_case(line, name, name_length) &&
+        line[name_length] == ':') {
+      const char *start = line + name_length + 1;
+      while (start < line_end && (*start == ' ' || *start == '\t'))
+        start++;
+      const char *stop = line_end;
+      while (stop > start && (stop[-1] == ' ' || stop[-1] == '\t'))
+        stop--;
+      const size_t length = std::min(static_cast<size_t>(stop - start), value_size - 1);
+      std::memcpy(value, start, length);
+      value[length] = '\0';
+      return true;
+    }
+    line = line_end;
+    while (line < end && (*line == '\r' || *line == '\n'))
+      line++;
+  }
+  return false;
+}
+
 }  // namespace airplay

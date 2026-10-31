@@ -21,7 +21,7 @@ jobs:
       - name: Build tests
         run: |
           mkdir -p build
-          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
+          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
           for t in test_util test_alac test_sync test_hap test_session; do
             ${{ matrix.compiler }} $CXXFLAGS_STRICT -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
               -I src tests/$t.cpp $SRC -lmbedcrypto -o build/$t
@@ -80,7 +80,9 @@ jobs:
             g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src -c $f -o /dev/null
           done
           g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src tests/test_sync.cpp \
-            src/airplay_receiver.cpp src/airplay_alac.cpp src/airplay_util.cpp src/airplay_log.cpp -o test_sync
+            src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_alac.cpp src/airplay_util.cpp \
+            src/airplay_log.cpp src/airplay_hap_crypto.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp \
+            src/airplay_plist.cpp -o test_sync
           ./test_sync
 
   ctest:
@@ -126,7 +128,8 @@ jobs:
     # playback must lock to the sender's clock. pyatv (Python, unencrypted, retransmits lost packets) and
     # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
     # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
-    # Digest authentication. pyatv is deliberately unpinned.
+    # Digest authentication. The airplay2 runs make pyatv use AirPlay 2 (transient pairing, encrypted RTSP and
+    # ChaCha20-Poly1305 audio). pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -136,6 +139,10 @@ jobs:
         include:
           - sender: pyatv
             network: password
+          - sender: pyatv
+            network: airplay2
+          - sender: pyatv
+            network: airplay2-lossy
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -145,7 +152,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libmbedtls-dev
           if [ "${{ matrix.sender }}" = pyatv ]; then
-            pip install pyatv
+            pip install pyatv "srptools<2"
           else
             sudo apt-get install -y pipewire pipewire-bin wireplumber dbus-daemon
           fi
@@ -156,9 +163,13 @@ jobs:
           gcc -shared -fPIC -O2 -Wall -Wextra tests/interop/impair.c -o build/impair.so -ldl
       - name: Stream
         run: |
-          if [ "${{ matrix.network }}" = lossy ]; then
-            export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01
-          elif [ "${{ matrix.network }}" = password ]; then
+          case "${{ matrix.network }}" in
+            airplay2*) export AIRPLAY2=1 ;;
+          esac
+          case "${{ matrix.network }}" in
+            *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;
+          esac
+          if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test
           fi
           tests/interop/run.sh posix build/airplay_receiver ${{ matrix.sender }}

@@ -11,6 +11,7 @@ if(CONFIG_AIRPLAY_CPP)
     ${AIRPLAY_DIR}/src/airplay_log.cpp
     ${AIRPLAY_DIR}/src/airplay_plist.cpp
     ${AIRPLAY_DIR}/src/airplay_receiver.cpp
+    ${AIRPLAY_DIR}/src/airplay_receiver_ap2.cpp
     ${AIRPLAY_DIR}/src/airplay_socket_runner.cpp
     ${AIRPLAY_DIR}/src/airplay_srp.cpp
     ${AIRPLAY_DIR}/src/airplay_tlv8.cpp

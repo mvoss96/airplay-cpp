@@ -2,6 +2,7 @@
 
 #include "airplay_alac.h"
 #include "airplay_crypto.h"
+#include "airplay_hap_crypto.h"
 #include "airplay_types.h"
 
 #include <atomic>
@@ -9,6 +10,8 @@
 #include <cstdint>
 
 namespace airplay {
+
+class SrpServer;
 
 /// Network access for the receiver. SocketRunner implements it with BSD sockets; implement it yourself for
 /// other network stacks.
@@ -77,6 +80,11 @@ struct ReceiverConfig {
   bool progress{false};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
+  /// Also offer AirPlay 2 (transient pairing, realtime audio with NTP timing). Needs `random`. Not offered when a
+  /// password is set.
+  bool airplay2{false};
+  /// Fills a buffer with cryptographically secure random bytes; for AirPlay 2 pairing
+  void (*random)(uint8_t *buffer, size_t length){nullptr};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
   void (*deallocate)(void *pointer){nullptr};
@@ -94,13 +102,14 @@ struct ReceiverStats {
   bool synchronized;        // Playing on the sender's timeline
 };
 
-/// AirPlay 1 (RAOP) audio receiver without any I/O of its own: feed it RTSP connections, UDP packets and the
-/// time, and it writes PCM to an AudioSink.
+/// AirPlay 1 (RAOP) and, optionally, AirPlay 2 audio receiver without any I/O of its own: feed it RTSP
+/// connections, UDP packets and the time, and it writes PCM to an AudioSink.
 ///
 /// Threading: everything except the methods marked thread-safe must be called from one thread.
 class Receiver {
  public:
-  static constexpr uint8_t MAX_CONNECTIONS = 2;
+  /// Two senders (one taking over from the other) plus the event connection of an AirPlay 2 sender
+  static constexpr uint8_t MAX_CONNECTIONS = 3;
   static constexpr uint16_t DEFAULT_PORT = 5000;
 
   Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
@@ -140,6 +149,11 @@ class Receiver {
   size_t service_instance_name(char *buffer, size_t size) const;
   /// @brief TXT records of the _raop._tcp service.
   const TxtRecord *txt_records(size_t *count) const;
+  /// @brief Whether AirPlay 2 is offered: config.airplay2, with a random source and without a password.
+  bool airplay2_enabled() const { return this->airplay2_; }
+  /// @brief TXT records of the _airplay._tcp service, which AirPlay 2 senders look for; none if AirPlay 2 is not
+  /// offered. Its instance name is config.name and its port the RTSP port.
+  const TxtRecord *airplay_txt_records(size_t *count) const;
 
  protected:
   enum class Codec : uint8_t {
@@ -157,6 +171,27 @@ class Receiver {
     char *buffer{nullptr};
     bool authenticated{false};
     char nonce[17]{};  // Of the password challenge
+    // AirPlay 2: after pair-setup all data is encrypted in frames
+    bool encrypted{false};
+    bool encrypt_after_response{false};
+    bool event_channel{false};  // A sender's event connection; nothing to read on it
+    uint8_t read_key[CHACHA_KEY_SIZE];
+    uint8_t write_key[CHACHA_KEY_SIZE];
+    uint64_t read_counter{0};
+    uint64_t write_counter{0};
+    uint8_t *frame{nullptr};  // An incoming encrypted frame, until it is complete
+    size_t frame_length{0};
+  };
+
+  /// A response to an AirPlay 2 request
+  struct Response {
+    int status{200};
+    const char *status_text{"OK"};
+    char *headers{nullptr};  // Extra headers
+    size_t headers_size{0};
+    const char *content_type{nullptr};
+    const uint8_t *body{nullptr};
+    size_t body_length{0};
   };
 
   struct PacketSlot {
@@ -178,7 +213,14 @@ class Receiver {
   static constexpr size_t PACKET_BUFFER_SIZE = 1600;
   static constexpr uint32_t TIMING_SAMPLE_COUNT = 8;
   static constexpr uint8_t NO_CONNECTION = 0xff;
-  static constexpr size_t MAX_TXT_RECORDS = 17;
+  static constexpr size_t MAX_TXT_RECORDS = 18;
+  static constexpr size_t MAX_AIRPLAY_TXT_RECORDS = 10;
+  /// An encrypted frame: length, up to 1024 bytes and the tag
+  static constexpr size_t HAP_FRAME_DATA_SIZE = 1024;
+  static constexpr size_t HAP_FRAME_SIZE = 2 + HAP_FRAME_DATA_SIZE + POLY1305_TAG_SIZE;
+  static constexpr size_t AIRPLAY2_BODY_SIZE = 1024;
+  /// Version announced to AirPlay 2 senders
+  static constexpr char AIRPLAY2_SOURCE_VERSION[] = "366.0";
 
   void *allocate_(size_t size) const;
   void free_(void *pointer) const;
@@ -200,6 +242,27 @@ class Receiver {
   void handle_progress_(const char *value, uint32_t now_ms);
   void update_remote_target_(const char *dacp_id, const char *active_remote, uint32_t address);
   void close_connection_(uint8_t connection);
+  /// Sends on a connection, encrypted once it is
+  bool send_(uint8_t connection, const uint8_t *data, size_t length);
+  /// Takes over the session for a sender
+  void take_session_(uint8_t connection, const char *request, size_t header_length);
+  /// Opens the UDP sockets for a session
+  bool open_udp_(uint8_t connection, uint32_t control_port, uint32_t timing_port, uint16_t *ports);
+
+  // AirPlay 2 (airplay_receiver_ap2.cpp)
+  void init_airplay2_();
+  /// @return true if the request is an AirPlay 2 request and `response` is filled in
+  bool handle_airplay2_request_(uint8_t connection, const char *method, const char *request, size_t header_length,
+                                const char *body, size_t body_length, Response &response);
+  void handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response);
+  void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
+                              size_t length, Response &response);
+  void build_info_(Response &response);
+  /// Decrypts an encrypted connection's frames and passes the RTSP data on
+  void receive_encrypted_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
+  void pass_plain_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
+  /// @return the length of the audio in `output`, or 0 if the packet is not authentic
+  size_t decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length, uint8_t *output);
   void end_session_();
   void set_session_state_(SessionState state);
   void close_udp_();
@@ -209,7 +272,8 @@ class Receiver {
   void stop_audio_();
   void flush_(bool have_seq, uint16_t seq);
   void reset_playback_();
-  void handle_audio_packet_(uint16_t seq, uint32_t rtp, const uint8_t *payload, size_t length, uint32_t now_ms);
+  /// @param header The packet's RTP header
+  void handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
   void handle_sync_packet_(const uint8_t *packet, size_t length);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
@@ -249,6 +313,24 @@ class Receiver {
   uint32_t stale_progress_frames_{0};  // Length of the previous track until the new track's progress arrives
   uint32_t last_progress_ms_{0};       // When the last progress arrived
 
+  // AirPlay 2
+  bool airplay2_{false};
+  TxtRecord airplay_txt_records_[MAX_AIRPLAY_TXT_RECORDS];
+  size_t airplay_txt_record_count_{0};
+  char device_id_[18]{};  // MAC as "AA:BB:CC:DD:EE:FF"
+  char features_[24]{};
+  char public_key_hex_[2 * CHACHA_KEY_SIZE + 1]{};
+  char pairing_id_[37]{};
+  uint8_t public_key_[CHACHA_KEY_SIZE]{};
+  SrpServer *srp_{nullptr};
+  uint8_t pairing_connection_{0xff};   // Connection between pair-setup M1 and M3
+  uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
+  uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
+  uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response
+  bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
+  bool event_channel_pending_{false};  // The session owner is about to open its event connection
+  uint8_t audio_key_[CHACHA_KEY_SIZE]{};
+
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};
   std::atomic<uint32_t> played_timestamp_{0};  // Low 32 bits of the time in microseconds; 0 = none
@@ -274,6 +356,7 @@ class Receiver {
   bool encrypted_{false};
   uint8_t aes_iv_[AES_BLOCK_SIZE]{};
   bool udp_open_{false};
+  uint16_t udp_ports_[NUM_UDP_CHANNELS]{};
   Endpoint client_control_{};
   Endpoint client_timing_{};
   uint16_t initial_seq_{0};

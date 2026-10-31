@@ -28,4 +28,11 @@ void md5(const uint8_t *data, size_t length, uint8_t *digest);
 /// @brief MD5 digest of a string as 32 lowercase hex characters plus a terminating zero.
 void md5_hex(const char *text, size_t length, char *hex);
 
+/// @brief Compares up to `length` characters, ignoring the case of ASCII letters.
+bool equals_ignore_case(const char *a, const char *b, size_t length);
+
+/// @brief Copies the value of a header from a raw header block ("Name: value" lines separated by CRLF).
+/// @return true if the header was found
+bool get_header(const char *block, size_t block_length, const char *name, char *value, size_t value_size);
+
 }  // namespace airplay

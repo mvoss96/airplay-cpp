@@ -62,7 +62,8 @@ class SocketRunner final : public Transport {
   int listen_fd_{-1};
   uint16_t port_{0};
   uint16_t udp_base_port_{0};
-  int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1};
+  int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1};
+  static_assert(Receiver::MAX_CONNECTIONS == 3, "Initialize every connection_fds_ entry to -1");
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
   uint8_t udp_buffer_[1600];
 };

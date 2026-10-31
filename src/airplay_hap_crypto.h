@@ -42,8 +42,7 @@ void hkdf_sha512(const uint8_t *salt, size_t salt_length, const uint8_t *secret,
                  const uint8_t *info, size_t info_length, uint8_t *output, size_t output_length);
 
 /// HKDF-SHA512 with text salt and info, and a 32 byte output: a ChaCha20 key
-void hkdf_sha512_key(const char *salt, const char *info, const uint8_t *secret, size_t secret_length,
-                     uint8_t *key);
+void hkdf_sha512_key(const char *salt, const char *info, const uint8_t *secret, size_t secret_length, uint8_t *key);
 
 /// ChaCha20-Poly1305 AEAD (RFC 8439). The output may be the input.
 /// @param tag Receives POLY1305_TAG_SIZE bytes.

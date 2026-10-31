@@ -6,7 +6,8 @@
 #   tests/interop/run.sh zephyr build/zephyr/zephyr.exe [pyatv]          # checks the log of the Zephyr example
 #
 # pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
-#   the receiver asks for it and pyatv logs in.
+#   the receiver asks for it and pyatv logs in. With AIRPLAY2=1 pyatv uses AirPlay 2: transient pairing, an
+#   encrypted RTSP connection and ChaCha20-Poly1305 encrypted audio.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -35,7 +36,8 @@ if [ -n "$IMPAIR_SO" ]; then
   echo "Impaired network: loss=${IMPAIR_LOSS:-0} reorder=${IMPAIR_REORDER:-0} duplicate=${IMPAIR_DUPLICATE:-0}"
 fi
 if [ "$MODE" = posix ]; then
-  AIRPLAY_DEBUG=${AIRPLAY_DEBUG:-1} AIRPLAY_ARTWORK=cover.bin AIRPLAY_PASSWORD=$PASSWORD LD_PRELOAD=$PRELOAD \
+  AIRPLAY_DEBUG=${AIRPLAY_DEBUG:-1} AIRPLAY_ARTWORK=cover.bin AIRPLAY_PASSWORD=$PASSWORD AIRPLAY2=$AIRPLAY2 \
+    LD_PRELOAD=$PRELOAD \
     "$RECEIVER" Interop out.pcm \
     2> receiver.log &
 else
@@ -46,6 +48,9 @@ sleep 2
 
 if [ "$SENDER" = pyatv ]; then
   TXT="txtvers=1 ch=2 cn=0,1 et=0,1 ek=1 sv=false da=true sr=44100 ss=16 pw=$([ -n "$PASSWORD" ] && echo true || echo false) tp=UDP vn=65537 vs=105.1 sf=0x4 md=0,1,2"
+  if [ "$AIRPLAY2" = 1 ]; then
+    TXT="$TXT $(sed -n 's/.*_airplay._tcp.* \(features=[^ ]*\).*/\1/p' receiver.log | sed 's/features=/ft=/')"
+  fi
   AIRPLAY_PASSWORD=$PASSWORD python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
   sleep 2
 else
@@ -76,6 +81,10 @@ cat receiver.log
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = pyatv ]; then
   grep -q "Now playing: pyatv - Ramp" receiver.log
+  if [ "$AIRPLAY2" = 1 ] && [ -z "$PASSWORD" ]; then  # Not offered with a password
+    grep -q "Paired" receiver.log
+    grep -q "Stream: .*, AirPlay 2" receiver.log
+  fi
   if [ "$MODE" = posix ]; then
     cmp artwork.bin cover.bin  # Cover art arrived complete
     grep -q "Position: 0 of 6 s" receiver.log

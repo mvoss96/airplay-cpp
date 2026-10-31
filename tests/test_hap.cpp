@@ -96,8 +96,8 @@ static void test_chacha20_poly1305() {
   CHECK(!chacha20_poly1305_decrypt(key.data(), nonce.data(), aad.data(), aad.size(), ciphertext.data(), length, tag,
                                    decrypted.data()));
   tag[3] ^= 0x20;
-  CHECK(!chacha20_poly1305_decrypt(key.data(), nonce.data(), aad.data(), aad.size() - 1, ciphertext.data(), length,
-                                   tag, decrypted.data()));
+  CHECK(!chacha20_poly1305_decrypt(key.data(), nonce.data(), aad.data(), aad.size() - 1, ciphertext.data(), length, tag,
+                                   decrypted.data()));
   ciphertext[10] ^= 1;
   CHECK(!chacha20_poly1305_decrypt(key.data(), nonce.data(), aad.data(), aad.size(), ciphertext.data(), length, tag,
                                    decrypted.data()));

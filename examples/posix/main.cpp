@@ -160,6 +160,17 @@ int main(int argc, char **argv) {
   config.progress = true;
   const char *password = std::getenv("AIRPLAY_PASSWORD");
   config.password = password != nullptr && password[0] != '\0' ? password : nullptr;
+  // AIRPLAY2=1 also offers AirPlay 2
+  const char *airplay2 = std::getenv("AIRPLAY2");
+  config.airplay2 = airplay2 != nullptr && airplay2[0] == '1';
+  config.random = [](uint8_t *buffer, size_t length) {
+    FILE *random = std::fopen("/dev/urandom", "rb");
+    if (random == nullptr || std::fread(buffer, 1, length, random) != length) {
+      std::fprintf(stderr, "Failed to read /dev/urandom\n");
+      std::abort();
+    }
+    std::fclose(random);
+  };
 
   airplay::Receiver *receiver_for_output = nullptr;
   PacedOutput sink(output, receiver_for_output);
@@ -193,6 +204,13 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < count; i++)
     std::fprintf(stderr, " %s=%s", records[i].key, records[i].value);
   std::fprintf(stderr, "\n");
+  const airplay::TxtRecord *airplay_records = receiver.airplay_txt_records(&count);
+  if (count > 0) {
+    std::fprintf(stderr, "  AirPlay 2, also: avahi-publish-service '%s' _airplay._tcp %u", name, port);
+    for (size_t i = 0; i < count; i++)
+      std::fprintf(stderr, " %s=%s", airplay_records[i].key, airplay_records[i].value);
+    std::fprintf(stderr, "\n");
+  }
 
   while (g_running)
     runner.run_once(100);
