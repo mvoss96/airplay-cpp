@@ -11,7 +11,7 @@
 #include "airplay.h"
 
 #ifndef AIRPLAY_HAS_MBEDTLS
-#error "This example needs mbedTLS 2.28 or 3.x (macOS: brew install mbedtls@3, see README)"
+#error "This example needs mbedTLS 2.28, 3.x or 4.x (Debian/Ubuntu: libmbedtls-dev, macOS: brew install mbedtls)"
 #endif
 
 #include <atomic>

@@ -5,10 +5,14 @@
 #include "fake_network.h"
 #include "test_common.h"
 
+#include <mbedtls/version.h>
+#if MBEDTLS_VERSION_MAJOR >= 4
+#include <psa/crypto.h>
+#else
 #include <mbedtls/aes.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
-#include <mbedtls/version.h>
+#endif
 
 #include <random>
 
@@ -19,13 +23,54 @@ static const uint8_t MAC[6] = {0x24, 0x0a, 0xc4, 0x12, 0x34, 0x56};
 static const uint32_t SENDER_IP = ipv4(192, 168, 1, 20);
 static const uint32_t RECEIVER_IP = ipv4(192, 168, 1, 10);
 
+#if MBEDTLS_VERSION_MAJOR < 4
 static int random_bytes(void *, unsigned char *output, size_t length) {
   static std::mt19937 rng(42);
   for (size_t i = 0; i < length; i++)
     output[i] = static_cast<unsigned char>(rng());
   return 0;
 }
+#endif
 
+#if MBEDTLS_VERSION_MAJOR >= 4
+/// The sender's view of the AirPort key: only the public half is used
+struct SenderKey {
+  SenderKey() {
+    this->ok = psa_crypto_init() == PSA_SUCCESS &&
+               import(PSA_KEY_USAGE_VERIFY_HASH, PSA_ALG_RSA_PKCS1V15_SIGN_RAW, &this->verify_key) &&
+               import(PSA_KEY_USAGE_ENCRYPT, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_1), &this->encrypt_key_id);
+  }
+  ~SenderKey() {
+    psa_destroy_key(this->verify_key);
+    psa_destroy_key(this->encrypt_key_id);
+  }
+  static bool import(psa_key_usage_t usage, psa_algorithm_t algorithm, mbedtls_svc_key_id_t *key) {
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_RSA_KEY_PAIR);
+    psa_set_key_usage_flags(&attributes, usage);
+    psa_set_key_algorithm(&attributes, algorithm);
+    return psa_import_key(&attributes, AIRPORT_PRIVATE_KEY_DER, AIRPORT_PRIVATE_KEY_DER_SIZE, key) == PSA_SUCCESS;
+  }
+
+  /// Checks a raw PKCS#1 v1.5 type 1 signature of 32 bytes
+  bool verify(const uint8_t *signature, const uint8_t *expected) {
+    return psa_verify_hash(this->verify_key, PSA_ALG_RSA_PKCS1V15_SIGN_RAW, expected, 32, signature,
+                           RSA_SIGNATURE_SIZE) == PSA_SUCCESS;
+  }
+
+  bool encrypt_key(const uint8_t *key, uint8_t *output) {
+    size_t length = 0;
+    return psa_asymmetric_encrypt(this->encrypt_key_id, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_1), key, AES_KEY_SIZE, nullptr, 0,
+                                  output, RSA_SIGNATURE_SIZE, &length) == PSA_SUCCESS &&
+           length == RSA_SIGNATURE_SIZE;
+  }
+
+  mbedtls_svc_key_id_t verify_key{MBEDTLS_SVC_KEY_ID_INIT};
+  mbedtls_svc_key_id_t encrypt_key_id{MBEDTLS_SVC_KEY_ID_INIT};
+  bool ok{false};
+};
+
+#else
 /// The sender's view of the AirPort key: only the public half is used
 struct SenderKey {
   SenderKey() {
@@ -70,11 +115,39 @@ struct SenderKey {
   bool ok{false};
 };
 
+#endif
+
 static const uint8_t AES_KEY[16] = {0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
                                     0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f};
 static const uint8_t AES_IV[16] = {0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87,
                                    0x78, 0x69, 0x5a, 0x4b, 0x3c, 0x2d, 0x1e, 0x0f};
 
+#if MBEDTLS_VERSION_MAJOR >= 4
+/// Encrypts whole blocks with AES-128-CBC; the IV restarts with every packet and a partial block stays plain
+static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
+  std::vector<uint8_t> out(plain);
+  const size_t whole = plain.size() & ~static_cast<size_t>(15);
+  if (whole == 0)
+    return out;
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attributes, 128);
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_ENCRYPT);
+  psa_set_key_algorithm(&attributes, PSA_ALG_CBC_NO_PADDING);
+  mbedtls_svc_key_id_t key = MBEDTLS_SVC_KEY_ID_INIT;
+  psa_import_key(&attributes, AES_KEY, sizeof(AES_KEY), &key);
+  psa_cipher_operation_t operation = PSA_CIPHER_OPERATION_INIT;
+  size_t written = 0;
+  size_t finished = 0;
+  psa_cipher_encrypt_setup(&operation, key, PSA_ALG_CBC_NO_PADDING);
+  psa_cipher_set_iv(&operation, AES_IV, sizeof(AES_IV));
+  psa_cipher_update(&operation, plain.data(), whole, out.data(), whole, &written);
+  psa_cipher_finish(&operation, out.data() + written, whole - written, &finished);
+  psa_destroy_key(key);
+  return out;
+}
+
+#else
 /// Encrypts whole blocks with AES-128-CBC; the IV restarts with every packet and a partial block stays plain
 static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
   std::vector<uint8_t> out(plain);
@@ -88,6 +161,8 @@ static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
   mbedtls_aes_free(&aes);
   return out;
 }
+
+#endif
 
 struct Fixture {
   explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500, bool artwork = true, bool progress = false,

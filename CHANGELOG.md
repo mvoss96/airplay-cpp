@@ -12,6 +12,6 @@ First release.
   remote control (DACP) helpers
 - Optional password (RTSP Digest authentication)
 - Sans-I/O core with a BSD socket runner for ESP-IDF, Arduino-ESP32, Zephyr, Linux and macOS
-- mbedTLS 2.28 and 3.x crypto backend
+- mbedTLS crypto backend for 2.28, 3.x and 4.x (PSA crypto API, as in ESP-IDF 6)
 - Examples for ESP-IDF, Arduino ESP32, Zephyr and POSIX
 - `SocketRunner::set_udp_base_port()` for fixed UDP ports (NAT, containers)

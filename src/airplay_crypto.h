@@ -13,6 +13,9 @@ inline constexpr size_t AES_BLOCK_SIZE = 16;
 /// AirPlay 1 receiver. Senders check the Apple-Challenge signature and encrypt the session key with it.
 extern const char AIRPORT_PRIVATE_KEY_PEM[];
 extern const size_t AIRPORT_PRIVATE_KEY_PEM_SIZE;  // Including the terminating null
+/// The same key as DER (PKCS#1 RSAPrivateKey)
+extern const uint8_t AIRPORT_PRIVATE_KEY_DER[];
+extern const size_t AIRPORT_PRIVATE_KEY_DER_SIZE;
 
 /// Cryptography needed by an AirPlay 1 receiver. Implement it for your platform, or use MbedtlsCrypto.
 class Crypto {

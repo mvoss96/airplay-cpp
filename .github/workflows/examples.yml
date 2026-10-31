@@ -37,6 +37,11 @@ jobs:
             target: esp32s3
           - idf: v5.5
             target: esp32c6
+          # ESP-IDF 6 ships mbedTLS 4 with only the PSA crypto API
+          - idf: v6.0
+            target: esp32s3
+          - idf: v6.1
+            target: esp32
     steps:
       - uses: actions/checkout@v5
       - name: Build example

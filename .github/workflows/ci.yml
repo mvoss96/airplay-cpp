@@ -35,6 +35,39 @@ jobs:
           ./build/test_sync --long
           ./build/test_session
 
+  mbedtls4:
+    # mbedTLS 4 (as in ESP-IDF 6) has only the PSA crypto API: unit tests and the encrypted PipeWire stream
+    runs-on: ubuntu-latest
+    env:
+      MBEDTLS_VERSION: v4.0.0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Cache mbedTLS
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/mbedtls4
+          key: mbedtls-${{ env.MBEDTLS_VERSION }}
+      - name: Build mbedTLS
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b $MBEDTLS_VERSION --recurse-submodules --shallow-submodules \
+            https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls
+          cmake -S /tmp/mbedtls -B /tmp/mbedtls/build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/mbedtls4
+          cmake --build /tmp/mbedtls/build -j
+          cmake --install /tmp/mbedtls/build
+      - name: Install PipeWire
+        run: sudo apt-get update && sudo apt-get install -y pipewire pipewire-bin wireplumber dbus-daemon
+      - name: Build and test
+        run: |
+          cmake -S . -B build -DAIRPLAY_BUILD_TESTS=ON -DAIRPLAY_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH=$HOME/mbedtls4
+          grep -q "AIRPLAY_MBEDCRYPTO:FILEPATH=.*mbedtls4" build/CMakeCache.txt
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+      - name: Stream
+        run: tests/interop/run.sh posix build/airplay_receiver pipewire
+
   no-backends:
     # The core must build without mbedTLS and without sockets (bring-your-own Crypto and Transport)
     runs-on: ubuntu-latest

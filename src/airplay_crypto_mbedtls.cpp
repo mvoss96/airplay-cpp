@@ -2,6 +2,97 @@
 
 #ifdef AIRPLAY_HAS_MBEDTLS
 
+#ifdef AIRPLAY_MBEDTLS_PSA
+
+#include <cstring>
+
+namespace airplay {
+
+MbedtlsCrypto::MbedtlsCrypto() = default;
+
+MbedtlsCrypto::~MbedtlsCrypto() {
+  psa_destroy_key(this->aes_key_);
+  psa_destroy_key(this->decrypt_key_);
+  psa_destroy_key(this->sign_key_);
+}
+
+static bool import_rsa_key(psa_key_usage_t usage, psa_algorithm_t algorithm, mbedtls_svc_key_id_t *key) {
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_RSA_KEY_PAIR);
+  psa_set_key_usage_flags(&attributes, usage);
+  psa_set_key_algorithm(&attributes, algorithm);
+  const psa_status_t status = psa_import_key(&attributes, AIRPORT_PRIVATE_KEY_DER, AIRPORT_PRIVATE_KEY_DER_SIZE, key);
+  psa_reset_key_attributes(&attributes);
+  return status == PSA_SUCCESS;
+}
+
+bool MbedtlsCrypto::init() {
+  this->ready_ = psa_crypto_init() == PSA_SUCCESS &&
+                 import_rsa_key(PSA_KEY_USAGE_SIGN_HASH, PSA_ALG_RSA_PKCS1V15_SIGN_RAW, &this->sign_key_) &&
+                 import_rsa_key(PSA_KEY_USAGE_DECRYPT, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_1), &this->decrypt_key_);
+  return this->ready_;
+}
+
+bool MbedtlsCrypto::sign_challenge(const uint8_t *data, size_t length, uint8_t *signature) {
+  if (!this->ready_)
+    return false;
+  size_t signature_length = 0;
+  return psa_sign_hash(this->sign_key_, PSA_ALG_RSA_PKCS1V15_SIGN_RAW, data, length, signature, RSA_SIGNATURE_SIZE,
+                       &signature_length) == PSA_SUCCESS &&
+         signature_length == RSA_SIGNATURE_SIZE;
+}
+
+bool MbedtlsCrypto::decrypt_session_key(const uint8_t *encrypted, size_t length, uint8_t *key) {
+  if (!this->ready_ || length != RSA_SIGNATURE_SIZE)
+    return false;
+  uint8_t plain[RSA_SIGNATURE_SIZE];
+  size_t plain_length = 0;
+  if (psa_asymmetric_decrypt(this->decrypt_key_, PSA_ALG_RSA_OAEP(PSA_ALG_SHA_1), encrypted, length, nullptr, 0, plain,
+                             sizeof(plain), &plain_length) != PSA_SUCCESS ||
+      plain_length != AES_KEY_SIZE) {
+    return false;
+  }
+  std::memcpy(key, plain, AES_KEY_SIZE);
+  return true;
+}
+
+bool MbedtlsCrypto::set_audio_key(const uint8_t *key) {
+  psa_destroy_key(this->aes_key_);
+  this->aes_key_ = MBEDTLS_SVC_KEY_ID_INIT;
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attributes, AES_KEY_SIZE * 8);
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
+  psa_set_key_algorithm(&attributes, PSA_ALG_CBC_NO_PADDING);
+  const psa_status_t status = psa_import_key(&attributes, key, AES_KEY_SIZE, &this->aes_key_);
+  psa_reset_key_attributes(&attributes);
+  return status == PSA_SUCCESS;
+}
+
+bool MbedtlsCrypto::decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *output, size_t length) {
+  if (length == 0)
+    return true;
+  // The IV for a following call is the last cipher block, read before output may overwrite input
+  uint8_t next_iv[AES_BLOCK_SIZE];
+  std::memcpy(next_iv, input + length - AES_BLOCK_SIZE, AES_BLOCK_SIZE);
+  psa_cipher_operation_t operation = PSA_CIPHER_OPERATION_INIT;
+  size_t written = 0;
+  size_t finished = 0;
+  const bool ok = psa_cipher_decrypt_setup(&operation, this->aes_key_, PSA_ALG_CBC_NO_PADDING) == PSA_SUCCESS &&
+                  psa_cipher_set_iv(&operation, iv, AES_BLOCK_SIZE) == PSA_SUCCESS &&
+                  psa_cipher_update(&operation, input, length, output, length, &written) == PSA_SUCCESS &&
+                  psa_cipher_finish(&operation, output + written, length - written, &finished) == PSA_SUCCESS &&
+                  written + finished == length;
+  psa_cipher_abort(&operation);
+  if (ok)
+    std::memcpy(iv, next_iv, AES_BLOCK_SIZE);
+  return ok;
+}
+
+}  // namespace airplay
+
+#else  // mbedTLS 2.28 and 3.x
+
 #include <mbedtls/rsa.h>
 #include <mbedtls/version.h>
 
@@ -101,5 +192,7 @@ bool MbedtlsCrypto::decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *ou
 }
 
 }  // namespace airplay
+
+#endif  // AIRPLAY_MBEDTLS_PSA
 
 #endif  // AIRPLAY_HAS_MBEDTLS

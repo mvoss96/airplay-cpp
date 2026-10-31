@@ -85,10 +85,9 @@ dependencies:
 see [`examples/zephyr/prj.conf`](examples/zephyr/prj.conf) for the network and mbedTLS options
 (`CONFIG_ZVFS_POLL_MAX` must be at least 6).
 
-**CMake**: `add_subdirectory(airplay-cpp)` and `target_link_libraries(app PRIVATE airplay)`. The mbedTLS
-backend is built when `libmbedcrypto` 2.28 or 3.x is found (Debian/Ubuntu: `libmbedtls-dev`). mbedTLS 4 only
-has the PSA crypto API and is not supported yet; on macOS, where Homebrew now installs mbedTLS 4, use
-`brew install mbedtls@3` and configure with `-DCMAKE_PREFIX_PATH=$(brew --prefix mbedtls@3)`.
+**CMake**: `add_subdirectory(airplay-cpp)` and `target_link_libraries(app PRIVATE airplay)`. The mbedTLS backend is
+built when mbedTLS 2.28, 3.x or 4.x is found (Debian/Ubuntu: `libmbedtls-dev`, macOS: `brew install mbedtls`); with
+mbedTLS 4 it uses the PSA crypto API.
 
 ## Audio output
 
@@ -171,7 +170,8 @@ the sender first with DACP, otherwise it may switch to its own speaker and keep 
 
 `Receiver` is a sans-I/O state machine: it gets connections, data, UDP packets and the time from outside and
 sends through the `Transport` interface. `SocketRunner` implements `Transport` with BSD sockets and drives the
-receiver with `select()`. `Crypto` is pluggable as well; `MbedtlsCrypto` works with mbedTLS 2.28 and 3.x.
+receiver with `select()`. `Crypto` is pluggable as well; `MbedtlsCrypto` works with mbedTLS 2.28, 3.x and 4.x (PSA
+crypto, as in ESP-IDF 6).
 
 ## Testing
 
