@@ -13,9 +13,11 @@ set(AIRPLAY_SOURCES
     src/airplay_hap_crypto.cpp
     src/airplay_key.cpp
     src/airplay_log.cpp
+    src/airplay_plist.cpp
     src/airplay_receiver.cpp
     src/airplay_socket_runner.cpp
     src/airplay_srp.cpp
+    src/airplay_tlv8.cpp
     src/airplay_util.cpp
 )
 

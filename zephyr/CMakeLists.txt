@@ -9,9 +9,11 @@ if(CONFIG_AIRPLAY_CPP)
     ${AIRPLAY_DIR}/src/airplay_hap_crypto.cpp
     ${AIRPLAY_DIR}/src/airplay_key.cpp
     ${AIRPLAY_DIR}/src/airplay_log.cpp
+    ${AIRPLAY_DIR}/src/airplay_plist.cpp
     ${AIRPLAY_DIR}/src/airplay_receiver.cpp
     ${AIRPLAY_DIR}/src/airplay_socket_runner.cpp
     ${AIRPLAY_DIR}/src/airplay_srp.cpp
+    ${AIRPLAY_DIR}/src/airplay_tlv8.cpp
     ${AIRPLAY_DIR}/src/airplay_util.cpp
   )
   zephyr_include_directories(${AIRPLAY_DIR}/src)

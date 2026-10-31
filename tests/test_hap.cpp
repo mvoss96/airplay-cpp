@@ -1,6 +1,8 @@
-// Built-in AirPlay 2 cryptography: SHA-512, HMAC, HKDF, ChaCha20-Poly1305 and SRP-6a
+// AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, TLV8 and binary property lists
 #include "airplay_hap_crypto.h"
+#include "airplay_plist.h"
 #include "airplay_srp.h"
+#include "airplay_tlv8.h"
 #include "test_common.h"
 
 #include <cstring>
@@ -159,10 +161,141 @@ static void test_srp() {
   CHECK(!server.verify(a.data(), a.size(), m1.data(), m1.size() - 1, m2));
 }
 
+static void test_tlv8() {
+  uint8_t message[1024];
+  Tlv8Writer writer(message, sizeof(message));
+  uint8_t key[600];
+  for (size_t i = 0; i < sizeof(key); i++)
+    key[i] = static_cast<uint8_t>(i);
+  writer.add_byte(TLV_STATE, 2);
+  writer.add(TLV_PUBLIC_KEY, key, sizeof(key));  // Split into 255 + 255 + 90
+  writer.add(TLV_SALT, key, 16);
+  const size_t length = writer.length();
+  CHECK(length == 3 + (600 + 6) + 18);
+  CHECK(message[3] == TLV_PUBLIC_KEY && message[4] == 255 && message[260] == TLV_PUBLIC_KEY);
+
+  uint8_t value[700];
+  size_t value_length = 0;
+  CHECK(tlv8_find(message, length, TLV_PUBLIC_KEY, value, sizeof(value), &value_length));
+  CHECK(value_length == sizeof(key) && std::memcmp(value, key, sizeof(key)) == 0);
+  CHECK(tlv8_find(message, length, TLV_STATE, value, sizeof(value), &value_length));
+  CHECK(value_length == 1 && value[0] == 2);
+  CHECK(tlv8_find(message, length, TLV_SALT, value, sizeof(value), &value_length));
+  CHECK(value_length == 16 && value[15] == 15);
+  CHECK(!tlv8_find(message, length, TLV_PUBLIC_KEY, value, 100, &value_length));  // Does not fit
+  CHECK(!tlv8_find(message, length, TLV_ERROR, value, sizeof(value), &value_length));
+  CHECK(!tlv8_find(message, length - 5, TLV_SALT, value, sizeof(value), &value_length));  // Truncated
+
+  Tlv8Writer small(message, 10);
+  small.add(TLV_SALT, key, 16);
+  CHECK(small.length() == 0);
+}
+
+// From Python's plistlib: {"streams": [{"type": 96, "ct": 2, "shk": bytes(range(32)), "controlPort": 6001,
+// "spf": 352}], "timingProtocol": "NTP", "timingPort": 6002, "name": "Küche", "latency": 1.25,
+// "isMultiSelectAirPlay": True, "big": -3}
+static const char PLIST[] =
+    "62706c6973743030d70102030405060708090a0b0c1819536269675f101469734d756c746953656c656374416972506c"
+    "6179576c6174656e6379546e616d655773747265616d735a74696d696e67506f72745e74696d696e6750726f746f636f"
+    "6c13fffffffffffffffd09233ff400000000000065004b00fc006300680065a10dd50e0f10111213141516175b636f6e"
+    "74726f6c506f72745263745373686b53737066547479706511177110024f1020000102030405060708090a0b0c0d0e0f"
+    "101112131415161718191a1b1c1d1e1f1101601060111772534e545008171b323a3f4752616a6b747f818c989b9fa3a8"
+    "abadd0d3d5d80000000000000101000000000000001a000000000000000000000000000000dc";
+
+static void test_plist_reader() {
+  const std::vector<uint8_t> data = hex(PLIST);
+  PlistReader reader;
+  CHECK(reader.parse(data.data(), data.size()));
+  const PlistReader::Object root = reader.root();
+  CHECK(reader.count(root) == 7);
+
+  int64_t integer = 0;
+  CHECK(reader.get_integer(reader.get(root, "timingPort"), &integer) && integer == 6002);
+  CHECK(reader.get_integer(reader.get(root, "big"), &integer) && integer == -3);
+  CHECK(reader.string_equals(reader.get(root, "timingProtocol"), "NTP"));
+  const char *text = nullptr;
+  size_t length = 0;
+  CHECK(reader.get_string(reader.get(root, "timingProtocol"), &text, &length) && length == 3);
+  CHECK(!reader.get_string(reader.get(root, "name"), &text, &length));  // UTF-16
+  double real = 0;
+  CHECK(reader.get_real(reader.get(root, "latency"), &real) && real == 1.25);
+  CHECK(reader.get_real(reader.get(root, "timingPort"), &real) && real == 6002.0);
+  bool flag = false;
+  CHECK(reader.get_bool(reader.get(root, "isMultiSelectAirPlay"), &flag) && flag);
+  CHECK(reader.get(root, "missing") == PlistReader::NONE);
+
+  const PlistReader::Object streams = reader.get(root, "streams");
+  CHECK(reader.count(streams) == 1);
+  const PlistReader::Object stream = reader.at(streams, 0);
+  CHECK(reader.at(streams, 1) == PlistReader::NONE);
+  CHECK(reader.get_integer(reader.get(stream, "type"), &integer) && integer == 96);
+  CHECK(reader.get_integer(reader.get(stream, "spf"), &integer) && integer == 352);
+  const uint8_t *bytes = nullptr;
+  CHECK(reader.get_data(reader.get(stream, "shk"), &bytes, &length) && length == 32 && bytes[31] == 31);
+  CHECK(!reader.get_integer(reader.get(stream, "shk"), &integer));
+
+  // Damaged data is rejected, not read out of bounds
+  CHECK(!reader.parse(data.data(), 20));
+  std::vector<uint8_t> damaged = data;
+  damaged[damaged.size() - 1] = 0xff;  // Offset table beyond the end
+  CHECK(!reader.parse(damaged.data(), damaged.size()));
+  damaged = data;
+  damaged[8] = 0xdf;  // Root dictionary with a missing length
+  CHECK(!reader.parse(damaged.data(), damaged.size()) || reader.count(reader.root()) == 0);
+}
+
+static void test_plist_writer() {
+  uint8_t buffer[1024];
+  PlistWriter writer(buffer, sizeof(buffer));
+  writer.begin_dict(3);
+  writer.key("eventPort");
+  writer.integer(7001);
+  writer.key("streams");
+  writer.begin_array(2);
+  writer.begin_dict(2);
+  writer.key("type");
+  writer.integer(96);
+  writer.key("dataPort");
+  writer.integer(50000);
+  writer.begin_dict(0);
+  writer.key("a key longer than fifteen");
+  const uint8_t key[20] = {1, 2, 3};
+  writer.data(key, sizeof(key));
+  const size_t length = writer.finish();
+  CHECK(length > 0);
+
+  PlistReader reader;
+  CHECK(reader.parse(buffer, length));
+  int64_t integer = 0;
+  CHECK(reader.get_integer(reader.get(reader.root(), "eventPort"), &integer) && integer == 7001);
+  const PlistReader::Object streams = reader.get(reader.root(), "streams");
+  CHECK(reader.count(streams) == 2);
+  CHECK(reader.get_integer(reader.get(reader.at(streams, 0), "dataPort"), &integer) && integer == 50000);
+  CHECK(reader.count(reader.at(streams, 1)) == 0);
+  const uint8_t *bytes = nullptr;
+  size_t data_length = 0;
+  CHECK(reader.get_data(reader.get(reader.root(), "a key longer than fifteen"), &bytes, &data_length) &&
+        data_length == 20 && bytes[2] == 3);
+
+  PlistWriter small(buffer, 20);
+  small.begin_dict(1);
+  small.key("x");
+  small.string("too long for the buffer");
+  CHECK(small.finish() == 0);
+  PlistWriter incomplete(buffer, sizeof(buffer));
+  incomplete.begin_dict(2);
+  incomplete.key("x");
+  incomplete.integer(1);
+  CHECK(incomplete.finish() == 0);
+}
+
 int main() {
   test_sha512();
   test_hmac_hkdf();
   test_chacha20_poly1305();
   test_srp();
+  test_tlv8();
+  test_plist_reader();
+  test_plist_writer();
   return finish("test_hap");
 }
