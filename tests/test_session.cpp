@@ -547,8 +547,33 @@ static void test_progress() {
   // Volume still works next to it
   f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "volume: -15.000000\r\n");
   CHECK(f.listener.volumes.size() == 1);
+  // A new track: iOS repeats the previous track's progress first, which is ignored
+  f.now_us += 5000000;
+  const std::string first = std::string("minm\0\0\0\x05", 8) + "First";
+  const std::string second = std::string("minm\0\0\0\x06", 8) + "Second";
+  f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", first);
+  CHECK(f.listener.progress_count == 3 && f.listener.progress.duration_ms == 0);  // Unknown until it arrives
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/0/1323000");
+  CHECK(f.listener.progress_count == 4 && f.listener.progress.duration_ms == 30000);  // Different length: taken
+  f.now_us += 5000000;
+  f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", second);
+  CHECK(f.listener.progress_count == 5 && f.listener.progress.duration_ms == 0);
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/0/1323000");
+  CHECK(f.listener.progress_count == 5);  // The previous track's length: ignored
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/44100/882000");
+  CHECK(f.listener.progress_count == 6 && f.listener.progress.duration_ms == 20000);
+  // Seeking within the same track keeps working
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/441000/882000");
+  CHECK(f.listener.progress_count == 7 && f.listener.progress.position_ms == 10000);
+  // pyatv sends the position of a new track just before its details: it stays
+  f.now_us += 5000000;
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/0/2205000");
+  CHECK(f.listener.progress_count == 8 && f.listener.progress.duration_ms == 50000);
+  f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", first);
+  CHECK(f.listener.progress_count == 8);
+
   f.request(0, "TEARDOWN");
-  CHECK(f.listener.progress_count == 3 && f.listener.progress.duration_ms == 0);  // Cleared at the end
+  CHECK(f.listener.progress_count == 9 && f.listener.progress.duration_ms == 0);  // Cleared at the end
 }
 
 static void test_mdns() {

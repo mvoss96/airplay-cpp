@@ -18,6 +18,8 @@ static constexpr size_t RTSP_MAX_BODY_SIZE = 1024 * 1024;
 static constexpr size_t RESPONSE_SIZE = 1024;
 static constexpr size_t EXTRA_HEADERS_SIZE = 512;
 static constexpr size_t RESPONSE_BODY_SIZE = 64;
+/// A progress this recent when the details of a new track arrive belongs to that track
+static constexpr uint32_t FRESH_PROGRESS_MS = 2000;
 
 /// AirPlay volume is -30 (quiet) to 0 (full) dB, with -144 meaning mute
 static constexpr float AIRPLAY_VOLUME_MIN = -30.0f;
@@ -140,6 +142,13 @@ static void write_ntp_ns(uint8_t *out, int64_t ns) {
 }
 
 static inline int64_t frames_to_us(int64_t frames) { return frames * 1000000 / SAMPLE_RATE; }
+
+static uint32_t fnv1a(const void *data, size_t length, uint32_t hash = 2166136261u) {
+  const auto *bytes = static_cast<const uint8_t *>(data);
+  for (size_t i = 0; i < length; i++)
+    hash = (hash ^ bytes[i]) * 16777619u;
+  return hash;
+}
 
 static bool equals_ignore_case(const char *a, const char *b, size_t length) {
   for (size_t i = 0; i < length; i++) {
@@ -546,7 +555,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     if (is_owner && equals_ignore_case(content_type, "image/", 6)) {
       this->begin_artwork_(content_type, body, body_length);
     } else if (is_owner && body != nullptr) {
-      this->handle_set_parameter_(content_type, body, body_length);
+      this->handle_set_parameter_(content_type, body, body_length, to_ms(now_us));
     }
   } else if (std::strcmp(method, "GET_PARAMETER") == 0) {
     if (body != nullptr && std::strstr(body, "volume") != nullptr)
@@ -732,19 +741,30 @@ bool Receiver::handle_setup_(uint8_t connection, const char *transport, char *re
   return true;
 }
 
-void Receiver::handle_set_parameter_(const char *content_type, const char *body, size_t body_length) {
+void Receiver::handle_set_parameter_(const char *content_type, const char *body, size_t body_length, uint32_t now_ms) {
   if (equals_ignore_case(content_type, "application/x-dmap-tagged", 25)) {
     if (!this->config_.metadata)
       return;
     Metadata metadata{};
     parse_dmap_metadata(reinterpret_cast<const uint8_t *>(body), body_length, metadata);
     // Senders repeat the details of a track several times
-    uint32_t hash = 2166136261u;
-    for (const uint8_t byte : reinterpret_cast<const uint8_t(&)[sizeof(Metadata)]>(metadata))
-      hash = (hash ^ byte) * 16777619u;
+    const uint32_t hash = fnv1a(&metadata, sizeof(metadata));
     if (hash == this->metadata_hash_)
       return;
     this->metadata_hash_ = hash;
+    // A new track: title or artist changed. Some senders send its position just before its details; that position
+    // stays. Otherwise the position is unknown until the new track's arrives, and iOS first sends the previous track's
+    // again, so a progress with that track's length is not taken for this one.
+    const uint32_t track_hash =
+        fnv1a(metadata.artist, sizeof(metadata.artist), fnv1a(metadata.title, sizeof(metadata.title)));
+    if (track_hash != this->track_hash_) {
+      this->track_hash_ = track_hash;
+      if (this->last_progress_frames_ != 0 && now_ms - this->last_progress_ms_ > FRESH_PROGRESS_MS) {
+        this->stale_progress_frames_ = this->last_progress_frames_;
+        if (this->config_.progress && this->listener_ != nullptr)
+          this->listener_->on_progress(Progress{});
+      }
+    }
     AIRPLAY_LOGD("Now playing: %s - %s", metadata.artist, metadata.title);
     if (this->listener_ != nullptr)
       this->listener_->on_metadata(metadata);
@@ -755,7 +775,7 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
 
   if (const char *progress = std::strstr(body, "progress:")) {
     if (this->config_.progress)
-      this->handle_progress_(progress + 9);
+      this->handle_progress_(progress + 9, now_ms);
     return;
   }
   const char *volume = std::strstr(body, "volume:");
@@ -815,7 +835,7 @@ void Receiver::end_artwork_(bool complete) {
   this->listener_->on_artwork_end(complete);
 }
 
-void Receiver::handle_progress_(const char *value) {
+void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
   // "start/current/end" as RTP timestamps
   char *end = nullptr;
   const auto start = static_cast<uint32_t>(std::strtoul(value, &end, 10));
@@ -826,6 +846,13 @@ void Receiver::handle_progress_(const char *value) {
     return;
   const auto finish = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
   const uint32_t duration = finish - start;
+  if (duration == this->stale_progress_frames_) {
+    AIRPLAY_LOGD("Ignoring the progress of the previous track");
+    return;
+  }
+  this->stale_progress_frames_ = 0;
+  this->last_progress_frames_ = duration;
+  this->last_progress_ms_ = now_ms;
   const uint32_t position = std::min(current - start, duration);
   Progress progress{static_cast<uint32_t>(static_cast<uint64_t>(position) * 1000 / SAMPLE_RATE),
                     static_cast<uint32_t>(static_cast<uint64_t>(duration) * 1000 / SAMPLE_RATE)};

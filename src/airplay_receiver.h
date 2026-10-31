@@ -190,14 +190,14 @@ class Receiver {
                        int64_t now_us);
   bool handle_announce_(const char *body, size_t body_length);
   bool handle_setup_(uint8_t connection, const char *transport, char *response_headers, size_t size);
-  void handle_set_parameter_(const char *content_type, const char *body, size_t body_length);
+  void handle_set_parameter_(const char *content_type, const char *body, size_t body_length, uint32_t now_ms);
   /// Starts receiving cover art. `body` is null if the image is too large to buffer and arrives in pieces.
   void begin_artwork_(const char *content_type, const char *body, size_t body_length);
   void end_artwork_(bool complete);
   bool add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size);
   /// @return true if the request carries the right password for the connection's challenge
   bool check_authorization_(Connection &c, const char *method, const char *request, size_t header_length);
-  void handle_progress_(const char *value);
+  void handle_progress_(const char *value, uint32_t now_ms);
   void update_remote_target_(const char *dacp_id, const char *active_remote, uint32_t address);
   void close_connection_(uint8_t connection);
   void end_session_();
@@ -243,6 +243,11 @@ class Receiver {
   char md_[8]{};  // Value of the "md" TXT record
   uint32_t nonce_counter_{0};
   uint32_t metadata_hash_{0};  // Of the last track details passed on
+  // Kept across sessions: iOS starts a new session on a track change
+  uint32_t track_hash_{0};             // Of the details of the current track
+  uint32_t last_progress_frames_{0};   // Length of the track of the last progress
+  uint32_t stale_progress_frames_{0};  // Length of the previous track until the new track's progress arrives
+  uint32_t last_progress_ms_{0};       // When the last progress arrived
 
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};
