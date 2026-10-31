@@ -105,6 +105,10 @@ class RecordingListener : public Listener {
     this->artwork_complete = complete;
   }
   void on_artwork_clear() override { this->artwork_clears++; }
+  void on_progress(const Progress &value) override {
+    this->progress = value;
+    this->progress_count++;
+  }
   SessionState last_state() const { return this->states.empty() ? SessionState::NONE : this->states.back(); }
 
   std::vector<SessionState> states;
@@ -122,6 +126,8 @@ class RecordingListener : public Listener {
   int artwork_ends{0};
   int artwork_clears{0};
   bool artwork_complete{false};
+  Progress progress{};
+  int progress_count{0};
 };
 
 /// Crypto for unencrypted streams

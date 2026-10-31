@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <utility>
 
 namespace airplay {
 
@@ -216,19 +217,27 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
   // The set shairport-sync advertises, which current Apple senders accept. cn: codecs (0 = PCM, 1 = ALAC),
   // et: encryption (0 = none, 1 = RSA), vn: protocol version (65537 = 1.1), sf: status flags
   static const TxtRecord RECORDS[] = {
-      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},   {"et", "0,1"}, {"ek", "1"},
-      {"sv", "false"},  {"da", "true"},  {"sr", "44100"}, {"ss", "16"},  {"pw", "false"},
-      {"tp", "UDP"},    {"vn", "65537"}, {"vs", "105.1"}, {"sf", "0x4"}, {"fv", "76400.10"},
+      {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},   {"et", "0,1"},      {"ek", "1"},
+      {"sv", "false"},  {"da", "true"},  {"sr", "44100"}, {"ss", "16"},       {"tp", "UDP"},
+      {"vn", "65537"},  {"vs", "105.1"}, {"sf", "0x4"},   {"fv", "76400.10"},
   };
-  static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 2 <= MAX_TXT_RECORDS, "No room for am and md");
+  static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 3 <= MAX_TXT_RECORDS, "No room for pw, am and md");
   for (const TxtRecord &record : RECORDS)
     this->txt_records_[this->txt_record_count_++] = record;
+  this->txt_records_[this->txt_record_count_++] = TxtRecord{"pw", config.password != nullptr ? "true" : "false"};
   this->txt_records_[this->txt_record_count_++] = TxtRecord{"am", config.model};
-  // md: which details the receiver takes (0 = text, 1 = cover art)
-  if (config.metadata || config.artwork) {
-    const char *md = config.metadata && config.artwork ? "0,1" : (config.metadata ? "0" : "1");
-    this->txt_records_[this->txt_record_count_++] = TxtRecord{"md", md};
+  // md: which details the receiver takes (0 = text, 1 = cover art, 2 = progress)
+  size_t md_length = 0;
+  for (const auto &[enabled, digit] :
+       {std::pair{config.metadata, '0'}, std::pair{config.artwork, '1'}, std::pair{config.progress, '2'}}) {
+    if (!enabled)
+      continue;
+    if (md_length > 0)
+      this->md_[md_length++] = ',';
+    this->md_[md_length++] = digit;
   }
+  if (md_length > 0)
+    this->txt_records_[this->txt_record_count_++] = TxtRecord{"md", this->md_};
 }
 
 Receiver::~Receiver() {
@@ -327,6 +336,17 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.discard_remaining = 0;
   c.peer = peer;
   c.local = local;
+  c.authenticated = false;
+  if (this->config_.password != nullptr) {
+    // A new nonce for every connection, so that an answer cannot be replayed on another one
+    char seed[64];
+    const int length = std::snprintf(seed, sizeof(seed), "%" PRIu32 ":%" PRIu32 ":%u:%p", this->nonce_counter_++,
+                                     peer.address, peer.port, static_cast<void *>(this));
+    char hex[MD5_SIZE * 2 + 1];
+    md5_hex(seed, length > 0 ? static_cast<size_t>(length) : 0, hex);
+    std::memcpy(c.nonce, hex, sizeof(c.nonce) - 1);
+    c.nonce[sizeof(c.nonce) - 1] = '\0';
+  }
   const auto *ip = reinterpret_cast<const uint8_t *>(&peer.address);
   AIRPLAY_LOGD("Connection from %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
 }
@@ -457,7 +477,13 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
 
   const bool is_owner = connection == this->session_owner_;
 
-  if (std::strcmp(method, "OPTIONS") == 0) {
+  if (this->config_.password != nullptr && !c.authenticated && std::strcmp(method, "OPTIONS") != 0 &&
+      !this->check_authorization_(c, method, request, header_length)) {
+    status = 401;
+    status_text = "Unauthorized";
+    std::snprintf(extra_headers, sizeof(extra_headers), "WWW-Authenticate: Digest realm=\"raop\", nonce=\"%s\"\r\n",
+                  c.nonce);
+  } else if (std::strcmp(method, "OPTIONS") == 0) {
     std::snprintf(extra_headers, sizeof(extra_headers), "%s", PUBLIC_METHODS);
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
     if (!is_owner && this->session_owner_ != NO_CONNECTION) {
@@ -712,14 +738,26 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
       return;
     Metadata metadata{};
     parse_dmap_metadata(reinterpret_cast<const uint8_t *>(body), body_length, metadata);
+    // Senders repeat the details of a track several times
+    uint32_t hash = 2166136261u;
+    for (const uint8_t byte : reinterpret_cast<const uint8_t(&)[sizeof(Metadata)]>(metadata))
+      hash = (hash ^ byte) * 16777619u;
+    if (hash == this->metadata_hash_)
+      return;
+    this->metadata_hash_ = hash;
     AIRPLAY_LOGD("Now playing: %s - %s", metadata.artist, metadata.title);
     if (this->listener_ != nullptr)
       this->listener_->on_metadata(metadata);
     return;
   }
   if (!equals_ignore_case(content_type, "text/parameters", 15))
-    return;  // Progress is not used
+    return;
 
+  if (const char *progress = std::strstr(body, "progress:")) {
+    if (this->config_.progress)
+      this->handle_progress_(progress + 9);
+    return;
+  }
   const char *volume = std::strstr(body, "volume:");
   if (volume == nullptr)
     return;
@@ -777,6 +815,84 @@ void Receiver::end_artwork_(bool complete) {
   this->listener_->on_artwork_end(complete);
 }
 
+void Receiver::handle_progress_(const char *value) {
+  // "start/current/end" as RTP timestamps
+  char *end = nullptr;
+  const auto start = static_cast<uint32_t>(std::strtoul(value, &end, 10));
+  if (end == nullptr || *end != '/')
+    return;
+  const auto current = static_cast<uint32_t>(std::strtoul(end + 1, &end, 10));
+  if (end == nullptr || *end != '/')
+    return;
+  const auto finish = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
+  const uint32_t duration = finish - start;
+  const uint32_t position = std::min(current - start, duration);
+  Progress progress{static_cast<uint32_t>(static_cast<uint64_t>(position) * 1000 / SAMPLE_RATE),
+                    static_cast<uint32_t>(static_cast<uint64_t>(duration) * 1000 / SAMPLE_RATE)};
+  AIRPLAY_LOGD("Progress: %" PRIu32 ":%02" PRIu32 " of %" PRIu32 ":%02" PRIu32, progress.position_ms / 60000,
+               progress.position_ms / 1000 % 60, progress.duration_ms / 60000, progress.duration_ms / 1000 % 60);
+  if (this->listener_ != nullptr)
+    this->listener_->on_progress(progress);
+}
+
+/// Copies the quoted value of a field of a Digest header, e.g. nonce="abc"
+static bool get_digest_field(const char *header, const char *name, char *value, size_t size) {
+  const size_t name_length = std::strlen(name);
+  for (const char *p = header; (p = std::strstr(p, name)) != nullptr; p += name_length) {
+    // Only a whole field name, not the end of another one
+    if (p != header && p[-1] != ' ' && p[-1] != ',')
+      continue;
+    if (p[name_length] != '=' || p[name_length + 1] != '"')
+      continue;
+    const char *start = p + name_length + 2;
+    const char *stop = std::strchr(start, '"');
+    if (stop == nullptr || static_cast<size_t>(stop - start) >= size)
+      return false;
+    std::memcpy(value, start, stop - start);
+    value[stop - start] = '\0';
+    return true;
+  }
+  return false;
+}
+
+bool Receiver::check_authorization_(Connection &c, const char *method, const char *request, size_t header_length) {
+  char header[384];
+  if (!get_header(request, header_length, "Authorization", header, sizeof(header)))
+    return false;
+  char username[64];
+  char realm[32];
+  char nonce[sizeof(c.nonce) + 1];
+  char uri[128];
+  char response[MD5_SIZE * 2 + 1];
+  if (!equals_ignore_case(header, "Digest ", 7) || !get_digest_field(header, "username", username, sizeof(username)) ||
+      !get_digest_field(header, "realm", realm, sizeof(realm)) ||
+      !get_digest_field(header, "nonce", nonce, sizeof(nonce)) || !get_digest_field(header, "uri", uri, sizeof(uri)) ||
+      !get_digest_field(header, "response", response, sizeof(response)) || std::strcmp(nonce, c.nonce) != 0) {
+    return false;
+  }
+  // response = MD5(MD5(username:realm:password):nonce:MD5(method:uri))
+  char text[256];
+  char ha1[MD5_SIZE * 2 + 1];
+  char ha2[MD5_SIZE * 2 + 1];
+  char expected[MD5_SIZE * 2 + 1];
+  int length = std::snprintf(text, sizeof(text), "%s:%s:%s", username, realm, this->config_.password);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(text))
+    return false;
+  md5_hex(text, length, ha1);
+  length = std::snprintf(text, sizeof(text), "%s:%s", method, uri);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(text))
+    return false;
+  md5_hex(text, length, ha2);
+  length = std::snprintf(text, sizeof(text), "%s:%s:%s", ha1, nonce, ha2);
+  md5_hex(text, length, expected);
+  if (std::strlen(response) != MD5_SIZE * 2 || !equals_ignore_case(response, expected, MD5_SIZE * 2)) {
+    AIRPLAY_LOGW("Wrong password");
+    return false;
+  }
+  c.authenticated = true;
+  return true;
+}
+
 bool Receiver::add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size) {
   static constexpr size_t CHALLENGE_SIZE = 16;
   static constexpr size_t SIGNED_SIZE = 32;
@@ -830,10 +946,13 @@ void Receiver::end_session_() {
   this->codec_ = Codec::NONE;
   if (this->artwork_streaming_)
     this->end_artwork_(false);
+  this->metadata_hash_ = 0;
   if (this->listener_ != nullptr && this->config_.metadata)
     this->listener_->on_metadata(Metadata{});
   if (this->listener_ != nullptr && this->config_.artwork)
     this->listener_->on_artwork_clear();
+  if (this->listener_ != nullptr && this->config_.progress)
+    this->listener_->on_progress(Progress{});
   if (this->airplay_muted_) {
     this->airplay_muted_ = false;
     if (this->listener_ != nullptr)

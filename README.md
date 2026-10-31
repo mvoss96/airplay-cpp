@@ -8,8 +8,9 @@ that iPhone, iPad, Mac, iTunes and other AirPlay senders can stream to.
   other AirPlay speakers in the same session; corrects clock drift by dropping or repeating single frames at
   the quietest point
 - **Robust on Wi-Fi**: jitter buffer, retransmission of lost packets, silence for packets that never arrive
-- **Control**: volume and mute from the sender, track title, artist and album, cover art, and remote control
-  of the sender (play, pause, next, previous, volume) over DACP
+- **Control**: volume and mute from the sender, track title, artist and album, cover art, track position, and
+  remote control of the sender (play, pause, next, previous, volume) over DACP
+- **Password**: optional, senders ask for it (RTSP Digest authentication)
 - **Embedded friendly**: no exceptions, no RTTI, no heap allocation after `begin()`, buffers optionally in
   external RAM
 - **Portable**: the protocol core does no I/O of its own. A socket runner covers ESP-IDF, Arduino-ESP32,
@@ -140,6 +141,11 @@ With `config.artwork` set, the receiver also takes the cover art of each track (
 pieces through `on_artwork_data()` until `on_artwork_end()`. Return false from `on_artwork_begin()` to skip
 an image, e.g. one larger than the memory you have for it. `on_artwork_clear()` means the track has no cover
 or the session ended.
+
+With `config.progress` set, `on_progress()` reports the position and length of the track at its start and after
+seeking; the position then advances in real time while the session plays.
+
+`config.password` makes senders ask for a password before they can stream.
 
 To control the sender, find the port of its `_dacp._tcp` mDNS service whose instance name contains
 `RemoteTarget::dacp_id` (`dacp_instance_matches()`), then call

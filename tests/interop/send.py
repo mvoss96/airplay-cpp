@@ -1,4 +1,4 @@
-import asyncio, sys
+import asyncio, os, sys
 import pyatv
 from pyatv.conf import AppleTV, ManualService
 from pyatv.const import Protocol
@@ -8,7 +8,11 @@ async def main():
     loop = asyncio.get_running_loop()
     conf = AppleTV("127.0.0.1", "airplay-cpp test")
     props = dict(kv.split("=", 1) for kv in sys.argv[3:])
-    conf.add_service(ManualService(sys.argv[2], Protocol.RAOP, 5000, props))
+    # AIRPLAY_PASSWORD makes the sender log in with RTSP Digest authentication
+    password = os.environ.get("AIRPLAY_PASSWORD")
+    conf.add_service(
+        ManualService(sys.argv[2], Protocol.RAOP, 5000, props, password=password, requires_password=bool(password))
+    )
     atv = await pyatv.connect(conf, loop)
     try:
         await atv.audio.set_volume(40)

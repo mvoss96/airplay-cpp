@@ -4,7 +4,8 @@
 //   ./airplay_receiver "My Speaker" | aplay -f cd
 //   ./airplay_receiver "My Speaker" | ffplay -f s16le -ar 44100 -ch_layout stereo -nodisp -
 //
-// AIRPLAY_ARTWORK=<file> saves the cover art of the latest track to that file.
+// AIRPLAY_ARTWORK=<file> saves the cover art of the latest track to that file, AIRPLAY_PASSWORD=<password> makes
+// senders ask for a password.
 //
 // Senders find the receiver through mDNS; the program prints the command that announces it (Avahi or dns-sd).
 #include "airplay.h"
@@ -107,6 +108,12 @@ class PrintingListener : public airplay::Listener {
     std::fclose(this->artwork_file);
     this->artwork_file = nullptr;
   }
+  void on_progress(const airplay::Progress &progress) override {
+    if (progress.duration_ms > 0) {
+      std::fprintf(stderr, "Position: %u of %u s\n", static_cast<unsigned>(progress.position_ms / 1000),
+                   static_cast<unsigned>(progress.duration_ms / 1000));
+    }
+  }
   void on_artwork_clear() override {
     if (this->artwork_path != nullptr)
       std::fprintf(stderr, "No cover art\n");
@@ -150,6 +157,9 @@ int main(int argc, char **argv) {
   config.metadata = true;
   const char *artwork_path = std::getenv("AIRPLAY_ARTWORK");
   config.artwork = artwork_path != nullptr;
+  config.progress = true;
+  const char *password = std::getenv("AIRPLAY_PASSWORD");
+  config.password = password != nullptr && password[0] != '\0' ? password : nullptr;
 
   airplay::Receiver *receiver_for_output = nullptr;
   PacedOutput sink(output, receiver_for_output);

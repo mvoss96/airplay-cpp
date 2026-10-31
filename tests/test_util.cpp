@@ -100,8 +100,30 @@ static void test_dacp() {
   CHECK(dacp_parse_status("HTTP/1.1 2", 10) == 0);
 }
 
+static void test_md5() {
+  struct Vector {
+    const char *text;
+    const char *digest;
+  };
+  static const Vector VECTORS[] = {
+      {"", "d41d8cd98f00b204e9800998ecf8427e"},
+      {"abc", "900150983cd24fb0d6963f7d28e17f72"},
+      {"The quick brown fox jumps over the lazy dog", "9e107d9d372bb6826bd81d3542a419d6"},
+      // 56 to 64 bytes need a second padding block, 80 bytes a whole block first
+      {"12345678901234567890123456789012345678901234567890123456", "49f193adce178490e34d1b3a4ec0064c"},
+      {"12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+       "57edf4a22be3c955ac49da2e2107b67a"},
+  };
+  for (const Vector &vector : VECTORS) {
+    char hex[MD5_SIZE * 2 + 1];
+    md5_hex(vector.text, std::strlen(vector.text), hex);
+    CHECK(std::strcmp(hex, vector.digest) == 0);
+  }
+}
+
 int main() {
   test_base64();
+  test_md5();
   test_dmap();
   test_dacp();
   return finish("test_util");

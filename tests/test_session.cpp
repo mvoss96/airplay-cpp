@@ -90,17 +90,22 @@ static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
 }
 
 struct Fixture {
-  explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500, bool artwork = true)
-      : sink(SAMPLE_RATE / 5), receiver(make_config(metadata, buffer_ms, artwork), crypto, transport, sink, &listener) {
+  explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500, bool artwork = true, bool progress = false,
+                   const char *password = nullptr)
+      : sink(SAMPLE_RATE / 5),
+        receiver(make_config(metadata, buffer_ms, artwork, progress, password), crypto, transport, sink, &listener) {
     CHECK(this->crypto.init());
     CHECK(this->receiver.begin());
   }
-  static ReceiverConfig make_config(bool metadata, uint32_t buffer_ms, bool artwork) {
+  static ReceiverConfig make_config(bool metadata, uint32_t buffer_ms, bool artwork, bool progress,
+                                    const char *password) {
     ReceiverConfig config;
     config.name = "Kitchen";
     std::memcpy(config.mac, MAC, 6);
     config.metadata = metadata;
     config.artwork = artwork;
+    config.progress = progress;
+    config.password = password;
     config.buffer_ms = buffer_ms;
     return config;
   }
@@ -313,6 +318,8 @@ static void test_control() {
   f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", dmap);
   CHECK(f.listener.metadata_count == 1);
   CHECK(std::strcmp(f.listener.metadata.title, "Title") == 0);
+  f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", dmap);  // Repeated: not passed on
+  CHECK(f.listener.metadata_count == 1);
   CHECK(std::strcmp(f.listener.metadata.artist, "Artist") == 0);
 
   // Cover art larger than the buffer, sent in pieces and passed on in pieces; the next request still works
@@ -469,6 +476,81 @@ static void test_errors_and_disconnect() {
   CHECK(f.transport.closed[0] == 2);
 }
 
+/// The Authorization header a sender sends for a request
+static std::string digest_authorization(const char *method, const std::string &nonce, const char *password) {
+  char ha1[MD5_SIZE * 2 + 1];
+  char ha2[MD5_SIZE * 2 + 1];
+  char response[MD5_SIZE * 2 + 1];
+  const std::string user = std::string("iTunes:raop:") + password;
+  md5_hex(user.data(), user.size(), ha1);
+  const std::string request = std::string(method) + ":rtsp://192.168.1.10/1234";
+  md5_hex(request.data(), request.size(), ha2);
+  const std::string combined = std::string(ha1) + ":" + nonce + ":" + ha2;
+  md5_hex(combined.data(), combined.size(), response);
+  return "Authorization: Digest username=\"iTunes\", realm=\"raop\", nonce=\"" + nonce +
+         "\", uri=\"rtsp://192.168.1.10/1234\", response=\"" + response + "\"\r\n";
+}
+
+static void test_password() {
+  Fixture f(true, 500, true, false, "secret");
+  size_t count = 0;
+  const TxtRecord *records = f.receiver.txt_records(&count);
+  bool pw = false;
+  for (size_t i = 0; i < count; i++)
+    pw |= std::strcmp(records[i].key, "pw") == 0 && std::strcmp(records[i].value, "true") == 0;
+  CHECK(pw);
+
+  f.open(0);
+  CHECK(status_code(f.request(0, "OPTIONS")) == 200);  // Needs no password
+  std::string response = f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP);
+  CHECK(status_code(response) == 401);
+  CHECK(!f.receiver.is_session_owner(0));
+  const std::string challenge = header_value(response, "WWW-Authenticate");
+  const size_t start = challenge.find("nonce=\"");
+  CHECK(challenge.rfind("Digest realm=\"raop\"", 0) == 0 && start != std::string::npos);
+  const std::string nonce = challenge.substr(start + 7, challenge.find('"', start + 7) - start - 7);
+  CHECK(nonce.size() == 16);
+
+  // Wrong password, then the right one
+  CHECK(status_code(f.request(0, "ANNOUNCE",
+                              "Content-Type: application/sdp\r\n" + digest_authorization("ANNOUNCE", nonce, "wrong"),
+                              PCM_SDP)) == 401);
+  CHECK(status_code(f.request(0, "ANNOUNCE",
+                              "Content-Type: application/sdp\r\n" + digest_authorization("ANNOUNCE", nonce, "secret"),
+                              PCM_SDP)) == 200);
+  CHECK(f.receiver.is_session_owner(0));
+  // The connection stays authenticated
+  CHECK(status_code(f.request(0, "SETUP", "Transport: RTP/AVP/UDP;control_port=6001;timing_port=6002\r\n")) == 200);
+
+  // A new connection gets a new nonce; the old answer does not work there
+  f.open(1);
+  response = f.request(
+      1, "ANNOUNCE", "Content-Type: application/sdp\r\n" + digest_authorization("ANNOUNCE", nonce, "secret"), PCM_SDP);
+  CHECK(status_code(response) == 401);
+  CHECK(header_value(response, "WWW-Authenticate").find(nonce) == std::string::npos);
+  CHECK(f.receiver.is_session_owner(0));
+}
+
+static void test_progress() {
+  Fixture f(true, 500, true, true);
+  size_t count = 0;
+  const TxtRecord *records = f.receiver.txt_records(&count);
+  CHECK(std::strcmp(records[count - 1].key, "md") == 0 && std::strcmp(records[count - 1].value, "0,1,2") == 0);
+  f.open(0);
+  f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP);
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 1000/45100/2647000\r\n");
+  CHECK(f.listener.progress_count == 1);
+  CHECK(f.listener.progress.position_ms == 1000 && f.listener.progress.duration_ms == 60000);
+  // RTP timestamps that wrap around
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 4294960000/36804/433704");
+  CHECK(f.listener.progress.position_ms == 1000 && f.listener.progress.duration_ms == 10000);
+  // Volume still works next to it
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "volume: -15.000000\r\n");
+  CHECK(f.listener.volumes.size() == 1);
+  f.request(0, "TEARDOWN");
+  CHECK(f.listener.progress_count == 3 && f.listener.progress.duration_ms == 0);  // Cleared at the end
+}
+
 static void test_mdns() {
   Fixture with(true);
   char name[64];
@@ -496,6 +578,8 @@ int main() {
   test_control();
   test_errors_and_disconnect();
   test_artwork_interrupted();
+  test_password();
+  test_progress();
   test_mdns();
   return finish("test_session");
 }

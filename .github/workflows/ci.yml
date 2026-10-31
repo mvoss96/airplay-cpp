@@ -91,13 +91,17 @@ jobs:
     # Independent senders stream a test signal to the POSIX example: every sample must arrive in order and
     # playback must lock to the sender's clock. pyatv (Python, unencrypted, retransmits lost packets) and
     # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
-    # duplicate 5/2/1 % of the UDP packets the receiver gets. pyatv is deliberately unpinned.
+    # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
+    # Digest authentication. pyatv is deliberately unpinned.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         sender: [pyatv, pipewire]
         network: [clean, lossy]
+        include:
+          - sender: pyatv
+            network: password
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -120,5 +124,7 @@ jobs:
         run: |
           if [ "${{ matrix.network }}" = lossy ]; then
             export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01
+          elif [ "${{ matrix.network }}" = password ]; then
+            export PASSWORD=airplay-test
           fi
           tests/interop/run.sh posix build/airplay_receiver ${{ matrix.sender }}

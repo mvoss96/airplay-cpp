@@ -22,4 +22,10 @@ void parse_dmap_metadata(const uint8_t *data, size_t length, Metadata &metadata)
 /// @brief Copies UTF-8 text into a fixed buffer, shortened if needed without cutting a character in half.
 void copy_utf8(char *destination, size_t size, const uint8_t *source, size_t length);
 
+inline constexpr size_t MD5_SIZE = 16;
+/// @brief MD5 digest (RFC 1321), for the password check of RTSP Digest authentication.
+void md5(const uint8_t *data, size_t length, uint8_t *digest);
+/// @brief MD5 digest of a string as 32 lowercase hex characters plus a terminating zero.
+void md5_hex(const char *text, size_t length, char *hex);
+
 }  // namespace airplay

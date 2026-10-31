@@ -52,6 +52,9 @@ class Listener {
   virtual void on_artwork_end(bool /*complete*/) {}
   /// The current track has no cover art, or the session ended
   virtual void on_artwork_clear() {}
+  /// Position and length of the current track (config.progress), sent at the start of a track and after seeking.
+  /// The position then advances in real time while the session plays.
+  virtual void on_progress(const Progress & /*progress*/) {}
   /// The sender's remote control details, see dacp.h
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
 };
@@ -70,6 +73,10 @@ struct ReceiverConfig {
   bool metadata{false};
   /// Advertise and accept cover art (Listener::on_artwork_begin)
   bool artwork{false};
+  /// Advertise and accept the track position (Listener::on_progress)
+  bool progress{false};
+  /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
+  const char *password{nullptr};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
   void (*deallocate)(void *pointer){nullptr};
@@ -148,6 +155,8 @@ class Receiver {
     Endpoint peer{};
     Endpoint local{};
     char *buffer{nullptr};
+    bool authenticated{false};
+    char nonce[17]{};  // Of the password challenge
   };
 
   struct PacketSlot {
@@ -186,6 +195,9 @@ class Receiver {
   void begin_artwork_(const char *content_type, const char *body, size_t body_length);
   void end_artwork_(bool complete);
   bool add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size);
+  /// @return true if the request carries the right password for the connection's challenge
+  bool check_authorization_(Connection &c, const char *method, const char *request, size_t header_length);
+  void handle_progress_(const char *value);
   void update_remote_target_(const char *dacp_id, const char *active_remote, uint32_t address);
   void close_connection_(uint8_t connection);
   void end_session_();
@@ -228,6 +240,9 @@ class Receiver {
   ALACDecoder decoder_;
   TxtRecord txt_records_[MAX_TXT_RECORDS];
   size_t txt_record_count_{0};
+  char md_[8]{};  // Value of the "md" TXT record
+  uint32_t nonce_counter_{0};
+  uint32_t metadata_hash_{0};  // Of the last track details passed on
 
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};

@@ -39,6 +39,12 @@ struct Metadata {
   char album[FIELD_SIZE];
 };
 
+/// Playback position of the current track, as the sender reports it; duration 0 when no track plays
+struct Progress {
+  uint32_t position_ms;
+  uint32_t duration_ms;
+};
+
 /// Image format of cover art
 enum class ArtworkFormat : uint8_t {
   JPEG = 0,

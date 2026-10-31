@@ -5,7 +5,8 @@
 #   tests/interop/run.sh posix  build/airplay_receiver [pyatv|pipewire]  # checks every sample of the output
 #   tests/interop/run.sh zephyr build/zephyr/zephyr.exe [pyatv]          # checks the log of the Zephyr example
 #
-# pyatv: Python sender; sends track details, cover art and volume, unencrypted.
+# pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
+#   the receiver asks for it and pyatv logs in.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -34,7 +35,8 @@ if [ -n "$IMPAIR_SO" ]; then
   echo "Impaired network: loss=${IMPAIR_LOSS:-0} reorder=${IMPAIR_REORDER:-0} duplicate=${IMPAIR_DUPLICATE:-0}"
 fi
 if [ "$MODE" = posix ]; then
-  AIRPLAY_DEBUG=${AIRPLAY_DEBUG:-1} AIRPLAY_ARTWORK=cover.bin LD_PRELOAD=$PRELOAD "$RECEIVER" Interop out.pcm \
+  AIRPLAY_DEBUG=${AIRPLAY_DEBUG:-1} AIRPLAY_ARTWORK=cover.bin AIRPLAY_PASSWORD=$PASSWORD LD_PRELOAD=$PRELOAD \
+    "$RECEIVER" Interop out.pcm \
     2> receiver.log &
 else
   LD_PRELOAD=$PRELOAD "$RECEIVER" > receiver.log 2>&1 &
@@ -43,8 +45,8 @@ RECEIVER_PID=$!
 sleep 2
 
 if [ "$SENDER" = pyatv ]; then
-  TXT="txtvers=1 ch=2 cn=0,1 et=0,1 ek=1 sv=false da=true sr=44100 ss=16 pw=false tp=UDP vn=65537 vs=105.1 sf=0x4 md=0,1"
-  python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
+  TXT="txtvers=1 ch=2 cn=0,1 et=0,1 ek=1 sv=false da=true sr=44100 ss=16 pw=$([ -n "$PASSWORD" ] && echo true || echo false) tp=UDP vn=65537 vs=105.1 sf=0x4 md=0,1,2"
+  AIRPLAY_PASSWORD=$PASSWORD python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
   sleep 2
 else
   export XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/config"
@@ -76,6 +78,7 @@ if [ "$SENDER" = pyatv ]; then
   grep -q "Now playing: pyatv - Ramp" receiver.log
   if [ "$MODE" = posix ]; then
     cmp artwork.bin cover.bin  # Cover art arrived complete
+    grep -q "Position: 0 of 6 s" receiver.log
   fi
   MAX_SKIPPED=0
 else
