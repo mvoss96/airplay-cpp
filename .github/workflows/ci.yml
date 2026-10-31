@@ -21,8 +21,8 @@ jobs:
       - name: Build tests
         run: |
           mkdir -p build
-          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_receiver.cpp src/airplay_socket_runner.cpp src/airplay_util.cpp"
-          for t in test_util test_alac test_sync test_session; do
+          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_receiver.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_util.cpp"
+          for t in test_util test_alac test_sync test_hap test_session; do
             ${{ matrix.compiler }} $CXXFLAGS_STRICT -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
               -I src tests/$t.cpp $SRC -lmbedcrypto -o build/$t
           done
@@ -33,6 +33,7 @@ jobs:
           ./build/test_util
           ./build/test_alac tests/vectors
           ./build/test_sync --long
+          ./build/test_hap
           ./build/test_session
 
   mbedtls4:

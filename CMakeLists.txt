@@ -10,10 +10,12 @@ set(AIRPLAY_SOURCES
     src/airplay_alac.cpp
     src/airplay_crypto_mbedtls.cpp
     src/airplay_dacp.cpp
+    src/airplay_hap_crypto.cpp
     src/airplay_key.cpp
     src/airplay_log.cpp
     src/airplay_receiver.cpp
     src/airplay_socket_runner.cpp
+    src/airplay_srp.cpp
     src/airplay_util.cpp
 )
 
@@ -51,7 +53,7 @@ set(AIRPLAY_WARNINGS -fno-exceptions -fno-rtti -Wall -Wextra)
 if(AIRPLAY_BUILD_TESTS)
     enable_testing()
     target_compile_options(airplay PRIVATE ${AIRPLAY_WARNINGS})
-    foreach(t IN ITEMS test_util test_alac test_sync)
+    foreach(t IN ITEMS test_util test_alac test_sync test_hap)
         add_executable(${t} tests/${t}.cpp)
         target_link_libraries(${t} PRIVATE airplay)
         target_compile_options(${t} PRIVATE ${AIRPLAY_WARNINGS})
@@ -59,6 +61,7 @@ if(AIRPLAY_BUILD_TESTS)
     add_test(NAME test_util COMMAND test_util)
     add_test(NAME test_alac COMMAND test_alac ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors)
     add_test(NAME test_sync COMMAND test_sync --long)
+    add_test(NAME test_hap COMMAND test_hap)
     if(AIRPLAY_MBEDCRYPTO)
         add_executable(test_session tests/test_session.cpp)
         target_link_libraries(test_session PRIVATE airplay)
