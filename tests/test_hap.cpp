@@ -1,4 +1,5 @@
 // AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, TLV8 and binary property lists
+#include "airplay_crypto_mbedtls.h"
 #include "airplay_fairplay.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
@@ -152,6 +153,26 @@ static void test_srp() {
   CHECK(server.verify(a.data(), a.size(), m1.data(), m1.size(), m2));
   CHECK(same(m2, SRP_M2));
   CHECK(same(server.session_key(), SRP_K));
+
+  // A later exchange with the same credentials keeps the salt and verifier: the same secret gives the same key
+  const std::vector<uint8_t> other_salt(SRP_SALT_SIZE, 0x55);
+  server.begin("Pair-Setup", "3939", other_salt.data(), secret.data());
+  CHECK(std::memcmp(server.salt(), salt.data(), SRP_SALT_SIZE) == 0);
+  CHECK(same(server.public_key(), SRP_B));
+  CHECK(server.verify(a.data(), a.size(), m1.data(), m1.size(), m2));
+  CHECK(same(m2, SRP_M2));
+
+#if defined(AIRPLAY_HAS_MBEDTLS) && !defined(AIRPLAY_MBEDTLS_PSA)
+  // The same with mbedTLS doing the exponentiations
+  static SrpServer accelerated;
+  MbedtlsCrypto crypto;
+  accelerated.set_crypto(&crypto);
+  accelerated.begin("Pair-Setup", "3939", salt.data(), secret.data());
+  CHECK(same(accelerated.public_key(), SRP_B));
+  CHECK(accelerated.verify(a.data(), a.size(), m1.data(), m1.size(), m2));
+  CHECK(same(m2, SRP_M2));
+  CHECK(same(accelerated.session_key(), SRP_K));
+#endif
 
   // A wrong proof, as from a wrong PIN
   m1[0] ^= 1;

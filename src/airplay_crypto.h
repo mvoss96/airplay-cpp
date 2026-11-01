@@ -37,6 +37,15 @@ class Crypto {
   /// @param iv AES_BLOCK_SIZE bytes; updated like a CBC chain.
   /// @param length A multiple of AES_BLOCK_SIZE.
   virtual bool decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *output, size_t length) = 0;
+
+  /// @brief Optional: result = base ^ exponent mod modulus, numbers big endian, base, modulus and result of `size`
+  /// bytes. AirPlay 2 pairing needs a few of these with a 3072-bit modulus, which a hardware accelerator does much
+  /// faster than the built-in arithmetic.
+  /// @return false if not available; the built-in arithmetic is used then.
+  virtual bool mod_exp(const uint8_t * /*base*/, const uint8_t * /*exponent*/, size_t /*exponent_length*/,
+                       const uint8_t * /*modulus*/, size_t /*size*/, uint8_t * /*result*/) {
+    return false;
+  }
 };
 
 }  // namespace airplay

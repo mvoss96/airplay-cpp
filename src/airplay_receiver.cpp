@@ -85,7 +85,13 @@ static constexpr int32_t SERVO_INNOVATION_CLAMP_US = 1500;
 static constexpr int32_t SERVO_ENGAGE_US = 5000;
 static constexpr int32_t SERVO_DISENGAGE_US = 1500;
 static constexpr uint32_t SERVO_TRIM_INTERVAL = 4;
-static constexpr int32_t SERVO_FAST_US = 10000;
+static constexpr int32_t SERVO_FAST_US = 5000;
+/// Above SERVO_LARGE_US, one frame per SERVO_FAST_FRAME_US of error is dropped or repeated in each packet, up to
+/// MAX_TRIM_FRAMES: an error of 20 ms, e.g. from the output's latency when playback starts, is gone in a few
+/// seconds instead of half a minute
+static constexpr int32_t SERVO_LARGE_US = 10000;
+static constexpr int32_t SERVO_FAST_FRAME_US = 2500;
+static constexpr int32_t MAX_TRIM_FRAMES = 8;
 
 // Unsynchronized playback: the buffer level is kept on target instead
 /// Buffer level for unsynchronized playback, at most 500 ms
@@ -265,7 +271,7 @@ bool Receiver::begin() {
   this->packet_buffer_ = static_cast<uint8_t *>(this->allocate_(PACKET_BUFFER_SIZE));
   // One spare frame, used when a frame is repeated to correct clock drift
   this->output_buffer_ =
-      static_cast<int16_t *>(this->allocate_((FRAMES_PER_PACKET + 1) * NUM_CHANNELS * sizeof(int16_t)));
+      static_cast<int16_t *>(this->allocate_((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
   // One extra byte per connection so that headers and body can be null terminated in place
   this->rtsp_buffers_ = static_cast<char *>(this->allocate_(MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1)));
   if (this->slots_ == nullptr || this->packet_buffer_ == nullptr || this->output_buffer_ == nullptr ||
@@ -293,8 +299,10 @@ bool Receiver::begin() {
     this->send_buffer_ = static_cast<uint8_t *>(this->allocate_(HAP_FRAME_SIZE));
     this->body_buffer_ = static_cast<uint8_t *>(this->allocate_(AIRPLAY2_BODY_SIZE));
     void *srp = this->allocate_(sizeof(SrpServer));
-    if (srp != nullptr)
+    if (srp != nullptr) {
       this->srp_ = new (srp) SrpServer();
+      this->srp_->set_crypto(&this->crypto_);
+    }
     if (this->frames_ == nullptr || this->send_buffer_ == nullptr || this->body_buffer_ == nullptr ||
         this->srp_ == nullptr) {
       AIRPLAY_LOGW("Failed to allocate the AirPlay 2 buffers; only AirPlay 1 is offered");
@@ -1543,12 +1551,13 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
   uint32_t frames = slot.frames;
   std::memcpy(samples, slot.samples, frames * BYTES_PER_FRAME);
 
-  if (trim != 0 && frames > 2) {
-    this->stats_.trimmed_frames++;
-    // Drop or repeat one frame where the audio is quietest, which makes the seam inaudible
+  const auto count = static_cast<uint32_t>(std::min(std::abs(trim), MAX_TRIM_FRAMES));
+  if (count > 0 && frames > count + 2) {
+    this->stats_.trimmed_frames += count;
+    // Drop or repeat frames where the audio is quietest, which makes the seam inaudible
     uint32_t quietest = 1;
     int32_t quietest_level = INT32_MAX;
-    for (uint32_t i = 1; i + 1 < frames; i++) {
+    for (uint32_t i = 1; i + count + 1 < frames; i++) {
       const int32_t level = std::abs(samples[i * NUM_CHANNELS]) + std::abs(samples[i * NUM_CHANNELS + 1]);
       if (level < quietest_level) {
         quietest_level = level;
@@ -1556,13 +1565,14 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
       }
     }
     int16_t *at = samples + quietest * NUM_CHANNELS;
-    const size_t tail_bytes = (frames - quietest - 1) * BYTES_PER_FRAME;
     if (trim < 0) {
-      std::memmove(at, at + NUM_CHANNELS, tail_bytes);
-      frames--;
+      std::memmove(at, at + count * NUM_CHANNELS, (frames - quietest - count) * BYTES_PER_FRAME);
+      frames -= count;
     } else {
-      std::memmove(at + NUM_CHANNELS, at, tail_bytes + BYTES_PER_FRAME);
-      frames++;
+      std::memmove(at + (count + 1) * NUM_CHANNELS, at + NUM_CHANNELS, (frames - quietest - 1) * BYTES_PER_FRAME);
+      for (uint32_t i = 1; i <= count; i++)
+        std::memcpy(at + i * NUM_CHANNELS, at, BYTES_PER_FRAME);
+      frames += count;
     }
   }
   this->output_offset_ = 0;
@@ -1813,7 +1823,14 @@ bool Receiver::synced_step_(int64_t now_us) {
   int32_t trim = 0;
   if (this->servo_engaged_ && ++this->trim_counter_ >= interval) {
     this->trim_counter_ = 0;
-    trim = this->servo_error_us_ > 0 ? 1 : -1;  // Early: repeat a frame; late: drop one
+    // Large errors several frames at once. The current reading limits it too, so that it stops in time when the
+    // filtered error lags behind.
+    int32_t frames = 1;
+    if (magnitude > SERVO_LARGE_US && (error_us > 0) == (this->servo_error_us_ > 0)) {
+      const auto smaller = static_cast<int32_t>(std::min<int64_t>(magnitude, std::abs(error_us)));
+      frames = std::clamp<int32_t>(smaller / SERVO_FAST_FRAME_US, 1, MAX_TRIM_FRAMES);
+    }
+    trim = this->servo_error_us_ > 0 ? frames : -frames;  // Early: repeat frames; late: drop some
   }
 
   this->queue_packet_output_(slot, trim);

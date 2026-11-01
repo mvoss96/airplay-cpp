@@ -93,6 +93,7 @@ bool MbedtlsCrypto::decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *ou
 
 #else  // mbedTLS 2.28 and 3.x
 
+#include <mbedtls/bignum.h>
 #include <mbedtls/rsa.h>
 #include <mbedtls/version.h>
 
@@ -189,6 +190,24 @@ bool MbedtlsCrypto::set_audio_key(const uint8_t *key) {
 
 bool MbedtlsCrypto::decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *output, size_t length) {
   return mbedtls_aes_crypt_cbc(&this->aes_, MBEDTLS_AES_DECRYPT, length, iv, input, output) == 0;
+}
+
+bool MbedtlsCrypto::mod_exp(const uint8_t *base, const uint8_t *exponent, size_t exponent_length,
+                            const uint8_t *modulus, size_t size, uint8_t *result) {
+  mbedtls_mpi a, e, n, x;
+  mbedtls_mpi_init(&a);
+  mbedtls_mpi_init(&e);
+  mbedtls_mpi_init(&n);
+  mbedtls_mpi_init(&x);
+  const bool ok = mbedtls_mpi_read_binary(&a, base, size) == 0 &&
+                  mbedtls_mpi_read_binary(&e, exponent, exponent_length) == 0 &&
+                  mbedtls_mpi_read_binary(&n, modulus, size) == 0 &&
+                  mbedtls_mpi_exp_mod(&x, &a, &e, &n, nullptr) == 0 && mbedtls_mpi_write_binary(&x, result, size) == 0;
+  mbedtls_mpi_free(&a);
+  mbedtls_mpi_free(&e);
+  mbedtls_mpi_free(&n);
+  mbedtls_mpi_free(&x);
+  return ok;
 }
 
 }  // namespace airplay

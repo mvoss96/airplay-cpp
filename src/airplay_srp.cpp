@@ -99,6 +99,9 @@ void SrpServer::init_() {
     if (carry != 0 || at_least_prime(r))
       subtract_prime(r);
   }
+  std::memset(this->one_.limb, 0, sizeof(this->one_.limb));
+  this->one_.limb[0] = 1;
+  to_bytes(PRIME, this->modulus_);
 }
 
 void SrpServer::mont_mul_(Number &out, const Number &a, const Number &b) {
@@ -147,33 +150,61 @@ void SrpServer::mod_pow_(Number &out, const Number &base, const uint8_t *exponen
   }
 }
 
+void SrpServer::pow_(Number &out, const Number &base, const uint8_t *exponent, size_t exponent_length) {
+  if (this->crypto_ != nullptr) {
+    to_bytes(base.limb, this->scratch_[0]);
+    if (this->crypto_->mod_exp(this->scratch_[0], exponent, exponent_length, this->modulus_, SRP_KEY_SIZE,
+                               this->scratch_[1])) {
+      from_bytes(out.limb, this->scratch_[1], SRP_KEY_SIZE);
+      return;
+    }
+    this->crypto_ = nullptr;  // Not available: the built-in arithmetic from now on
+  }
+  this->mont_mul_(this->pow_base_, base, this->r2_);
+  this->mod_pow_(out, this->pow_base_, exponent, exponent_length);
+  this->mont_mul_(out, out, this->one_);
+}
+
+void SrpServer::mul_(Number &out, const Number &a, const Number &b) {
+  this->mont_mul_(out, a, b);
+  this->mont_mul_(out, out, this->r2_);
+}
+
 void SrpServer::begin(const char *username, const char *password, const uint8_t *salt, const uint8_t *secret) {
-  this->init_();
-  std::memcpy(this->salt_, salt, SRP_SALT_SIZE);
-  if (this->salt_[0] == 0)
-    this->salt_[0] = 1;
+  if (!this->initialized_) {
+    this->init_();
+    this->initialized_ = true;
+  }
   std::memcpy(this->secret_, secret, SRP_SECRET_SIZE);
-  sha512(reinterpret_cast<const uint8_t *>(username), std::strlen(username), this->username_hash_);
 
-  // x = H(salt | H(username ":" password)), v = g^x
-  uint8_t digest[SHA512_SIZE];
-  Sha512 credentials;
-  credentials.update(reinterpret_cast<const uint8_t *>(username), std::strlen(username));
-  credentials.update(reinterpret_cast<const uint8_t *>(":"), 1);
-  credentials.update(reinterpret_cast<const uint8_t *>(password), std::strlen(password));
-  credentials.finish(digest);
-  Sha512 x_hash;
-  x_hash.update(this->salt_, sizeof(this->salt_));
-  x_hash.update(digest, sizeof(digest));
-  x_hash.finish(digest);
+  uint8_t credentials[SHA512_SIZE];
+  Sha512 credentials_hash;
+  credentials_hash.update(reinterpret_cast<const uint8_t *>(username), std::strlen(username));
+  credentials_hash.update(reinterpret_cast<const uint8_t *>(":"), 1);
+  credentials_hash.update(reinterpret_cast<const uint8_t *>(password), std::strlen(password));
+  credentials_hash.finish(credentials);
 
-  Number &generator = this->work_[0];
+  Number &generator = this->work_[2];
   std::memset(generator.limb, 0, sizeof(generator.limb));
   generator.limb[0] = GENERATOR;
-  this->mont_mul_(generator, generator, this->r2_);
-  this->mod_pow_(this->verifier_, generator, digest, sizeof(digest));
+  if (!this->verifier_ready_ || std::memcmp(credentials, this->credentials_hash_, sizeof(credentials)) != 0) {
+    std::memcpy(this->salt_, salt, SRP_SALT_SIZE);
+    if (this->salt_[0] == 0)
+      this->salt_[0] = 1;
+    sha512(reinterpret_cast<const uint8_t *>(username), std::strlen(username), this->username_hash_);
+    std::memcpy(this->credentials_hash_, credentials, sizeof(credentials));
+    // x = H(salt | H(username ":" password)), v = g^x
+    uint8_t x[SHA512_SIZE];
+    Sha512 x_hash;
+    x_hash.update(this->salt_, sizeof(this->salt_));
+    x_hash.update(credentials, sizeof(credentials));
+    x_hash.finish(x);
+    this->pow_(this->verifier_, generator, x, sizeof(x));
+    this->verifier_ready_ = true;
+  }
 
   // k = H(N | PAD(g))
+  uint8_t digest[SHA512_SIZE];
   Sha512 k_hash;
   hash_padded(k_hash, PRIME, LIMBS);
   uint32_t padded_generator[LIMBS] = {GENERATOR};
@@ -183,10 +214,9 @@ void SrpServer::begin(const char *username, const char *password, const uint8_t 
   // B = k * v + g^b
   Number &public_key = this->work_[1];
   from_bytes(public_key.limb, digest, sizeof(digest));
-  this->mont_mul_(public_key, public_key, this->r2_);
-  this->mont_mul_(public_key, public_key, this->verifier_);
-  Number &power = this->work_[2];
-  this->mod_pow_(power, generator, this->secret_, sizeof(this->secret_));
+  this->mul_(public_key, public_key, this->verifier_);
+  Number &power = this->work_[0];
+  this->pow_(power, generator, this->secret_, sizeof(this->secret_));
   uint64_t carry = 0;
   for (size_t i = 0; i < LIMBS; i++) {
     const uint64_t sum = static_cast<uint64_t>(public_key.limb[i]) + power.limb[i] + carry;
@@ -195,16 +225,13 @@ void SrpServer::begin(const char *username, const char *password, const uint8_t 
   }
   if (carry != 0 || at_least_prime(public_key.limb))
     subtract_prime(public_key.limb);
-  Number &one = this->work_[2];
-  std::memset(one.limb, 0, sizeof(one.limb));
-  one.limb[0] = 1;
-  this->mont_mul_(public_key, public_key, one);
   to_bytes(public_key.limb, this->public_key_);
 }
 
 bool SrpServer::verify(const uint8_t *client_key, size_t client_key_length, const uint8_t *client_proof,
                        size_t client_proof_length, uint8_t *server_proof) {
-  if (client_key_length == 0 || client_key_length > SRP_KEY_SIZE || client_proof_length != SHA512_SIZE)
+  if (!this->verifier_ready_ || client_key_length == 0 || client_key_length > SRP_KEY_SIZE ||
+      client_proof_length != SHA512_SIZE)
     return false;
   // A must be below the prime and not 0 (mod N), or the session key would be predictable
   Number &a = this->work_[0];
@@ -225,16 +252,11 @@ bool SrpServer::verify(const uint8_t *client_key, size_t client_key_length, cons
   u_hash.finish(u);
 
   // S = (A * v^u)^b, K = H(S)
-  this->mont_mul_(a, a, this->r2_);
   Number &base = this->work_[1];
-  this->mod_pow_(base, this->verifier_, u, sizeof(u));
-  this->mont_mul_(base, base, a);
+  this->pow_(base, this->verifier_, u, sizeof(u));
+  this->mul_(base, base, a);
   Number &shared = this->work_[2];
-  this->mod_pow_(shared, base, this->secret_, sizeof(this->secret_));
-  Number &one = this->work_[0];
-  std::memset(one.limb, 0, sizeof(one.limb));
-  one.limb[0] = 1;
-  this->mont_mul_(shared, shared, one);
+  this->pow_(shared, base, this->secret_, sizeof(this->secret_));
   uint8_t shared_bytes[SRP_KEY_SIZE];
   to_bytes(shared.limb, shared_bytes);
   size_t shared_length = sizeof(shared_bytes);

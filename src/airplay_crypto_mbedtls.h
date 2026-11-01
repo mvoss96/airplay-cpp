@@ -45,6 +45,12 @@ class MbedtlsCrypto final : public Crypto {
   bool decrypt_session_key(const uint8_t *encrypted, size_t length, uint8_t *key) override;
   bool set_audio_key(const uint8_t *key) override;
   bool decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *output, size_t length) override;
+#ifndef AIRPLAY_MBEDTLS_PSA
+  /// With mbedTLS's bignum functions, which use the hardware accelerator on ESP32 chips. mbedTLS 4 no longer offers
+  /// them, so the built-in arithmetic is used there.
+  bool mod_exp(const uint8_t *base, const uint8_t *exponent, size_t exponent_length, const uint8_t *modulus,
+               size_t size, uint8_t *result) override;
+#endif
 
  private:
 #ifdef AIRPLAY_MBEDTLS_PSA

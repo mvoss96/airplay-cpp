@@ -2,8 +2,8 @@
 
 Usage: check.py out.pcm <frames sent> [--max-skipped N] [--allow-lost-packets] [--max-start N]
 
-Steps of 0 or 2 are single frames that the receiver repeated or dropped to follow the sender's clock. Larger
-steps forward are audio that was lost; with --max-skipped up to N frames may be lost in total (some senders
+Steps of 0 or 2 to 9 are frames that the receiver repeated or dropped (up to 8 at once) to follow the sender's clock.
+Larger steps forward are audio that was lost; with --max-skipped up to N frames may be lost in total (some senders
 drop samples themselves). With --allow-lost-packets, gaps of whole packets (352 frames, give or take the single
 frames above) are counted as lost packets instead: the receiver plays silence for packets that never arrive,
 e.g. when the sender does not retransmit. Steps backward are never allowed. --max-start is the latest first
@@ -19,6 +19,7 @@ max_skipped = int(sys.argv[sys.argv.index("--max-skipped") + 1]) if "--max-skipp
 allow_lost_packets = "--allow-lost-packets" in sys.argv
 max_start = int(sys.argv[sys.argv.index("--max-start") + 1]) if "--max-start" in sys.argv else 1000
 FRAMES_PER_PACKET = 352
+MAX_TRIM_FRAMES = 8  # The receiver repeats or drops up to this many frames at once to catch up with a large error
 
 first = last = None
 heard = trims = skipped = backward = lost_packets = 0
@@ -30,7 +31,7 @@ for i in range(len(data) // 4):
     heard += 1
     if last is not None:
         step = index - last
-        if step in (0, 2):
+        if step == 0 or 2 <= step <= MAX_TRIM_FRAMES + 1:
             trims += 1
         elif step < 0:
             backward += 1

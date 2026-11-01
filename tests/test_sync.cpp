@@ -29,6 +29,8 @@ struct Scenario {
   bool sync_before_record = false;  // Like pyatv: the first sync packet comes before RECORD
   int lost_first_syncs = 0;         // The first sync packets after RECORD never arrive
   double duration_s = 60;
+  double measure_from_s = 8;         // Errors are measured from this time on, once playback has settled
+  double output_start_delay_ms = 0;  // The output plays its first audio this long after it got it (DMA buffers)
   uint32_t report_chunk_frames = 441;
   // Limits
   bool expect_synced = true;
@@ -158,6 +160,10 @@ struct Sim : Transport {
   }
 
   void output_tick(int64_t step_us) {
+    if (this->output_start_us == 0 && !this->sink.queue.empty())
+      this->output_start_us = this->now_us + static_cast<int64_t>(this->sc.output_start_delay_ms * 1000);
+    if (this->output_start_us == 0 || this->now_us < this->output_start_us)
+      return;
     this->output_phase += static_cast<double>(step_us) * 44100e-6 * (1 + this->sc.output_ppm * 1e-6);
     while (this->output_phase >= 1) {
       this->output_phase -= 1;
@@ -178,8 +184,8 @@ struct Sim : Transport {
       const uint32_t full = marked_rtp(frame) | (RTP0 & ~0x1fffffffu);
       if (this->last_heard_rtp != 0) {
         const auto step = static_cast<int32_t>(full - this->last_heard_rtp);
-        if (step == 0 || step == 2) {
-          this->trims++;
+        if (step == 0 || (step >= 2 && step <= 9)) {
+          this->trims++;  // Frames repeated or dropped (up to 8 at once) to follow the sender's clock
         } else if (step != 1) {
           this->discontinuities++;
         }
@@ -237,7 +243,7 @@ struct Sim : Transport {
                  "RTP-Info: seq=" + std::to_string(this->next_seq) + ";rtptime=" + std::to_string(RTP0) + "\r\n");
     this->receiver.request_output_restart();
 
-    this->measure_from_us = this->now_us + 8000000;
+    this->measure_from_us = this->now_us + static_cast<int64_t>(this->sc.measure_from_s * 1e6);
     bool seeked = false;
 
     const int64_t start = this->now_us;
@@ -305,6 +311,7 @@ struct Sim : Transport {
   int syncs_sent{0};
 
   double output_phase{0};
+  int64_t output_start_us{0};
   uint32_t unreported{0};
   int64_t measure_from_us{0};
   uint32_t last_heard_rtp{0};
@@ -323,6 +330,16 @@ int main(int argc, char **argv) {
   std::vector<Scenario> scenarios;
   scenarios.push_back({.name = "ideal network"});
   scenarios.push_back({.name = "jitter, 1% loss", .loss = 0.01, .jitter_ms = 4});
+  // Round trips of 10 to 40 ms as over Wi-Fi: the clock estimate must be good soon after the start, or playback
+  // drifts while it improves
+  scenarios.push_back({.name = "Wi-Fi round trips", .jitter_ms = 8, .duration_s = 40, .measure_from_s = 3});
+  // An output that starts playing 20 ms after it got its first audio, as with I2S DMA buffers: the error is only
+  // seen once the output reports, and must be corrected within a few seconds
+  scenarios.push_back({.name = "output start delay",
+                       .jitter_ms = 2,
+                       .duration_s = 30,
+                       .measure_from_s = 4,
+                       .output_start_delay_ms = 20});
   scenarios.push_back({.name = "5% loss, stalls",
                        .loss = 0.05,
                        .jitter_ms = 4,
