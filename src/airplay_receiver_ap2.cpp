@@ -613,7 +613,32 @@ void Receiver::update_event_channel_ready_() {
   this->event_channel_ready_.store(ready, std::memory_order_release);
 }
 
-void Receiver::send_sender_volume_(float volume) {
+bool Receiver::request_sender_command(SenderCommand command) {
+  if (!this->event_channel_ready_.load(std::memory_order_acquire))
+    return false;
+  this->sender_command_requests_.fetch_or(static_cast<uint8_t>(1u << static_cast<uint8_t>(command)),
+                                          std::memory_order_acq_rel);
+  return true;
+}
+
+void Receiver::send_sender_requests_() {
+  const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
+  if (volume >= 0.0f) {
+    AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
+    this->send_media_remote_command_("dvlc", volume);
+  }
+  const uint8_t commands = this->sender_command_requests_.exchange(0, std::memory_order_acq_rel);
+  // The codes a HomePod sends for its buttons, in the order of SenderCommand
+  static constexpr const char *CODES[] = {"play", "paus", "plps", "nitm", "pitm"};
+  for (uint8_t i = 0; i < sizeof(CODES) / sizeof(CODES[0]); i++) {
+    if ((commands & (1u << i)) != 0) {
+      AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
+      this->send_media_remote_command_(CODES[i], -1.0f);
+    }
+  }
+}
+
+void Receiver::send_media_remote_command_(const char *value, float volume) {
   if (this->session_owner_ == NO_CONNECTION)
     return;
   const uint32_t address = this->connections_[this->session_owner_].peer.address;
@@ -621,21 +646,23 @@ void Receiver::send_sender_volume_(float volume) {
     const Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
-    // A media remote command, as a HomePod sends when its volume is changed on the device. The volume is given at
-    // the top level and in the parameters; senders read either.
+    // A volume is given at the top level and in the parameters; senders read either
     uint8_t body[192];
     PlistWriter writer(body, sizeof(body));
-    writer.begin_dict(4);
+    const bool with_volume = volume >= 0.0f;
+    writer.begin_dict(with_volume ? 4 : 2);
     writer.key("type");
     writer.string("sendMediaRemoteCommand");
     writer.key("value");
-    writer.string("dvlc");
-    writer.key("volume");
-    writer.real(volume);
-    writer.key("params");
-    writer.begin_dict(1);
-    writer.key("volume");
-    writer.real(volume);
+    writer.string(value);
+    if (with_volume) {
+      writer.key("volume");
+      writer.real(volume);
+      writer.key("params");
+      writer.begin_dict(1);
+      writer.key("volume");
+      writer.real(volume);
+    }
     const size_t body_length = writer.finish();
     if (body_length == 0)
       return;
@@ -647,7 +674,6 @@ void Receiver::send_sender_volume_(float volume) {
     if (header_length <= 0 || static_cast<size_t>(header_length) + body_length > sizeof(message))
       return;
     std::memcpy(message + header_length, body, body_length);
-    AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
     this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
     return;
   }

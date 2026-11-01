@@ -42,6 +42,15 @@ class AudioSink {
   virtual size_t write(const int16_t *samples, size_t frames) = 0;
 };
 
+/// Playback commands for an AirPlay 2 sender (Receiver::request_sender_command)
+enum class SenderCommand : uint8_t {
+  SENDER_COMMAND_PLAY = 0,
+  SENDER_COMMAND_PAUSE,
+  SENDER_COMMAND_PLAY_PAUSE,
+  SENDER_COMMAND_NEXT,
+  SENDER_COMMAND_PREVIOUS,
+};
+
 /// Cover art data that may still arrive after Listener::artwork_room() fell below it: the receiver's request
 /// buffer and one read of the transport (at most 2 KB)
 inline constexpr size_t ARTWORK_RESERVE = 6 * 1024;
@@ -173,6 +182,9 @@ class Receiver {
   /// @param volume 0 to 1, as Listener::on_volume() reports it.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_volume(float volume);
+  /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
+  /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
+  bool request_sender_command(SenderCommand command);
 
   // ===== mDNS =====
   /// @brief Instance name of the _raop._tcp service: "<MAC>@<name>".
@@ -315,7 +327,9 @@ class Receiver {
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
   void update_event_channel_ready_();
-  void send_sender_volume_(float volume);
+  void send_sender_requests_();
+  /// Sends a media remote command on the playing sender's event connection; the volume only if not below 0
+  void send_media_remote_command_(const char *value, float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
   void forget_timeline_() {
     this->anchor_valid_ = false;
@@ -430,6 +444,7 @@ class Receiver {
   std::atomic<bool> disconnect_requested_{false};
   std::atomic<bool> event_channel_ready_{false};     // The playing sender has an event connection
   std::atomic<float> sender_volume_request_{-1.0f};  // For the sender's slider; below 0 when none
+  std::atomic<uint8_t> sender_command_requests_{0};  // Bit per SenderCommand
 
   // Buffers
   char *rtsp_buffers_{nullptr};

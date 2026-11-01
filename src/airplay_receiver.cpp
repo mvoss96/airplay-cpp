@@ -1676,9 +1676,7 @@ void Receiver::poll(int64_t now_us) {
   }
 
   this->update_event_channel_ready_();
-  const float sender_volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
-  if (sender_volume >= 0.0f)
-    this->send_sender_volume_(sender_volume);
+  this->send_sender_requests_();
 
   // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again
   if (this->artwork_paused_ != NO_CONNECTION && this->listener_->artwork_room() >= ARTWORK_RESERVE + RTSP_BUFFER_SIZE)
