@@ -360,6 +360,16 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       std::memcpy(c.pair_secret, secret, sizeof(c.pair_secret));
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
+      // For working out a sender's stream encryption offline; transient pairing secrets are new for every
+      // connection. Here rather than with the packet dump, which comes in a burst.
+      if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+        for (size_t offset = 0; offset < SHA512_SIZE; offset += 16) {
+          const uint8_t *p = c.pair_secret + offset;
+          AIRPLAY_LOGD("Pairing secret %u: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                       static_cast<unsigned>(offset), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10],
+                       p[11], p[12], p[13], p[14], p[15]);
+        }
+      }
     } else {
       AIRPLAY_LOGW("Pairing failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
@@ -830,7 +840,6 @@ size_t Receiver::detect_plain_audio_(const uint8_t *header, const uint8_t *paylo
         // To work out the sender's encryption offline; pairing secrets are new for every connection
         log_hex("RTP header", header, REALTIME_RTP_HEADER_SIZE);
         log_hex("Payload", payload, std::min<size_t>(length, 128));
-        log_hex("Pairing secret", this->connections_[this->session_owner_].pair_secret, SHA512_SIZE);
         if (this->have_session_stream_key_)
           log_hex("Session stream key", this->session_stream_key_, CHACHA_KEY_SIZE);
       }
