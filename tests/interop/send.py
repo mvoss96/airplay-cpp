@@ -43,7 +43,8 @@ def stream_without_key(mode):
                 airplayv2.EVENTS_SALT, airplayv2.EVENTS_WRITE_INFO, airplayv2.EVENTS_READ_INFO
             )
             key = key[0:32]
-            offer = {"streams": [{"type": 103, "ct": 4, "spf": 1024, "audioFormat": 0x400000, "shk": key}]}
+            # 48 kHz AAC, which the receiver turns down
+            offer = {"streams": [{"type": 103, "ct": 4, "spf": 1024, "audioFormat": 0x1000000, "shk": key}]}
             response = await self.rtsp.exchange("SETUP", body=offer, allow_error=True)
             assert response.code != 200, "The buffered stream should be turned down"
         original_setup = self.rtsp.setup

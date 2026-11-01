@@ -9,6 +9,9 @@
 //
 // Senders find the receiver through mDNS; the program prints the command that announces it (Avahi or dns-sd).
 #include "airplay.h"
+#ifdef AIRPLAY_EXAMPLE_FAAD
+#include "aac_decoder_faad.h"
+#endif
 
 #ifndef AIRPLAY_HAS_MBEDTLS
 #error "This example needs mbedTLS 2.28, 3.x or 4.x (Debian/Ubuntu: libmbedtls-dev, macOS: brew install mbedtls)"
@@ -160,6 +163,11 @@ int main(int argc, char **argv) {
   config.progress = true;
   const char *password = std::getenv("AIRPLAY_PASSWORD");
   config.password = password != nullptr && password[0] != '\0' ? password : nullptr;
+#ifdef AIRPLAY_EXAMPLE_FAAD
+  // AirPlay 2 buffered audio (AAC)
+  static FaadDecoder aac_decoder;
+  config.aac_decoder = &aac_decoder;
+#endif
   // AIRPLAY2=1 also offers AirPlay 2
   const char *airplay2 = std::getenv("AIRPLAY2");
   config.airplay2 = airplay2 != nullptr && airplay2[0] == '1';

@@ -277,8 +277,8 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
   size_t count = 0;
   for (int fd : this->udp_fds_)
     fds[count++] = fd;
-  for (int fd : this->connection_fds_)
-    fds[count++] = fd;
+  for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++)
+    fds[count++] = this->receive_paused_[i] ? -1 : this->connection_fds_[i];
   fds[count++] = this->listen_fd_;
   if (net::wait(fds, count, wait_ms, ready)) {
     for (size_t i = 0; i < NUM_UDP_CHANNELS; i++) {
@@ -313,7 +313,7 @@ void SocketRunner::accept_connection_() {
   if (slot < 0) {
     // All slots are taken: drop the connection that is not playing
     for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
-      if (!this->receiver_->is_session_owner(i)) {
+      if (!this->receiver_->is_session_connection(i)) {
         close_fd(&this->connection_fds_[i]);
         this->receiver_->connection_closed(i);
         slot = i;
@@ -347,6 +347,7 @@ void SocketRunner::accept_connection_() {
   net::getsockname(fd, reinterpret_cast<struct sockaddr *>(&local), &local_length);
 
   this->connection_fds_[slot] = fd;
+  this->receive_paused_[slot] = false;
   this->receiver_->connection_opened(static_cast<uint8_t>(slot), Endpoint{peer.sin_addr.s_addr, ntohs(peer.sin_port)},
                                      Endpoint{local.sin_addr.s_addr, ntohs(local.sin_port)});
 }
@@ -394,6 +395,11 @@ bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) 
 void SocketRunner::close(uint8_t connection) {
   if (connection < Receiver::MAX_CONNECTIONS)
     close_fd(&this->connection_fds_[connection]);
+}
+
+void SocketRunner::pause_receiving(uint8_t connection, bool paused) {
+  if (connection < Receiver::MAX_CONNECTIONS)
+    this->receive_paused_[connection] = paused;
 }
 
 bool SocketRunner::open_udp(uint16_t *ports) {

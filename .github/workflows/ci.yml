@@ -21,7 +21,7 @@ jobs:
       - name: Build tests
         run: |
           mkdir -p build
-          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_fairplay.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
+          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_dacp.cpp src/airplay_fairplay.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_packet_queue.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
           for t in test_util test_alac test_sync test_hap test_session; do
             ${{ matrix.compiler }} $CXXFLAGS_STRICT -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
               -I src tests/$t.cpp $SRC -lmbedcrypto -o build/$t
@@ -81,7 +81,7 @@ jobs:
           done
           g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src tests/test_sync.cpp \
             src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_alac.cpp src/airplay_util.cpp \
-            src/airplay_log.cpp src/airplay_hap_crypto.cpp src/airplay_srp.cpp src/airplay_fairplay.cpp src/airplay_tlv8.cpp \
+            src/airplay_log.cpp src/airplay_hap_crypto.cpp src/airplay_srp.cpp src/airplay_fairplay.cpp src/airplay_packet_queue.cpp src/airplay_tlv8.cpp \
             src/airplay_plist.cpp -o test_sync
           ./test_sync
 
@@ -129,7 +129,8 @@ jobs:
     # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
     # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
     # Digest authentication. The airplay2 runs make pyatv use AirPlay 2 (transient pairing, encrypted RTSP and
-    # ChaCha20-Poly1305 audio), one of them in the order iOS uses. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
+    # ChaCha20-Poly1305 audio), one of them in the order iOS uses. The buffered runs send AirPlay 2 buffered audio
+    # (AAC over TCP, as iOS streams most apps) and compare the output with ffmpeg's decoding. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -145,6 +146,10 @@ jobs:
             network: airplay2-lossy
           - sender: pyatv
             network: airplay2-record-first
+          - sender: buffered
+            network: clean
+          - sender: buffered
+            network: pause
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -155,6 +160,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libmbedtls-dev
           if [ "${{ matrix.sender }}" = pyatv ]; then
             pip install pyatv "srptools<2"
+          elif [ "${{ matrix.sender }}" = buffered ]; then
+            # AAC: ffmpeg encodes the test file and decodes the reference, FAAD2 decodes in the receiver
+            sudo apt-get install -y ffmpeg libfaad-dev
+            pip install pyatv "srptools<2" numpy
           else
             sudo apt-get install -y pipewire pipewire-bin wireplumber dbus-daemon
           fi
@@ -176,6 +185,9 @@ jobs:
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;
           esac
+          if [ "${{ matrix.network }}" = pause ]; then
+            export PAUSE=1
+          fi
           if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test
           fi

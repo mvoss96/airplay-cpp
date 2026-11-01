@@ -40,9 +40,13 @@ static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key"
 
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
+static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
 /// Compression types ("ct") of a stream
 static constexpr int64_t COMPRESSION_PCM = 1;
 static constexpr int64_t COMPRESSION_ALAC = 2;
+static constexpr int64_t COMPRESSION_AAC = 4;
+/// "audioFormat" of AAC-LC, 44.1 kHz, stereo
+static constexpr int64_t AUDIO_FORMAT_AAC_44100 = 0x400000;
 
 /// Encrypted audio ends with the tag and the last 8 bytes of the nonce
 static constexpr size_t AUDIO_NONCE_SIZE = 8;
@@ -247,6 +251,22 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       response.content_type = CONTENT_TYPE_OCTET_STREAM;
       response.body = this->body_buffer_;
       response.body_length = writer.length();
+    } else if (path_is(request, "/feedback") && this->buffered_stream_) {
+      // Keeps buffered streams alive while paused
+      PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+      writer.begin_dict(1);
+      writer.key("streams");
+      writer.begin_array(1);
+      writer.begin_dict(2);
+      writer.key("type");
+      writer.integer(STREAM_TYPE_BUFFERED);
+      writer.key("sr");
+      writer.real(SAMPLE_RATE);
+      response.body_length = writer.finish();
+      if (response.body_length > 0) {
+        response.content_type = CONTENT_TYPE_PLIST;
+        response.body = this->body_buffer_;
+      }
     } else if (!path_is(request, "/pair-pin-start") && !path_is(request, "/feedback") &&
                !path_is(request, "/command") && !path_is(request, "/audioMode")) {
       return false;
@@ -265,11 +285,23 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       return false;
     AIRPLAY_LOGI("Stream stopped");
     this->stop_audio_();
+    this->stop_buffered_audio_();
     if (this->session_state_ == SessionState::PLAYING)
       this->set_session_state_(SessionState::PAUSED);
     return true;
   }
-  return false;
+  if (std::strcmp(method, "SETRATEANCHORTIME") == 0) {
+    if (connection == this->session_owner_ && data != nullptr)
+      this->handle_rate_anchor_(data, body_length);
+    return true;
+  }
+  if (std::strcmp(method, "FLUSHBUFFERED") == 0) {
+    if (connection == this->session_owner_ && data != nullptr)
+      this->handle_flush_buffered_(data, body_length);
+    return true;
+  }
+  // Timing peers for PTP, which is not used
+  return std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0;
 }
 
 void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response) {
@@ -360,6 +392,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     this->take_session_(connection, request, header_length);
+    this->stop_buffered_audio_();
     this->airplay2_recording_ = false;
     this->have_session_stream_key_ = false;
     this->codec_ = Codec::NONE;
@@ -398,62 +431,104 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       std::memcpy(this->session_stream_key_, key, sizeof(this->session_stream_key_));
       this->have_session_stream_key_ = true;
     }
-    if (type != STREAM_TYPE_REALTIME) {
+    if (type == STREAM_TYPE_BUFFERED) {
+      int64_t audio_format = 0;
+      reader.get_integer(reader.get(stream, "audioFormat"), &audio_format);
+      if (this->buffered_storage_ == nullptr) {
+        AIRPLAY_LOGW("Buffered audio needs an AAC decoder");
+        return;
+      }
+      if (compression != COMPRESSION_AAC || audio_format != AUDIO_FORMAT_AAC_44100 ||
+          frames_per_packet != AAC_FRAMES_PER_PACKET || (key == nullptr && !this->have_session_stream_key_)) {
+        AIRPLAY_LOGW("Unsupported buffered stream (ct %" PRId64 ", format 0x%" PRIx64 ")", compression, audio_format);
+        return;
+      }
+      this->stop_audio_();
+      this->stop_buffered_audio_();
+      if (!this->config_.aac_decoder->begin()) {
+        AIRPLAY_LOGW("Failed to start the AAC decoder");
+        return;
+      }
+      std::memcpy(this->audio_key_, key != nullptr ? key : this->session_stream_key_, sizeof(this->audio_key_));
+      this->codec_ = Codec::AAC;
+      this->buffered_stream_ = true;
+      this->airplay2_audio_ = false;
+      this->encrypted_ = false;
+      this->buffered_next_seq_ = 0;
+      // The sender connects to the RTSP port for the audio, as for its events
+      this->data_channel_pending_ = true;
+      AIRPLAY_LOGD("Stream: AAC, AirPlay 2 buffered");
+      if (this->airplay2_recording_ && this->start_audio_(now_us))
+        AIRPLAY_LOGI("Playback started");
+
+      writer.begin_dict(1);
+      writer.key("streams");
+      writer.begin_array(1);
+      writer.begin_dict(3);
+      writer.key("type");
+      writer.integer(STREAM_TYPE_BUFFERED);
+      writer.key("dataPort");
+      writer.integer(c.local.port);
+      writer.key("audioBufferSize");
+      writer.integer(static_cast<int64_t>(this->buffered_queue_.size()));
+    } else if (type != STREAM_TYPE_REALTIME) {
       AIRPLAY_LOGW("Unsupported stream type %" PRId64, type);
       return;
-    }
-    if ((key != nullptr && key_length != CHACHA_KEY_SIZE) || sample_rate != SAMPLE_RATE || frames_per_packet <= 0 ||
-        frames_per_packet > FRAMES_PER_PACKET) {
-      AIRPLAY_LOGW("Unsupported stream parameters");
-      return;
-    }
-    this->stop_audio_();
-    this->codec_ = Codec::NONE;
-    if (compression == COMPRESSION_ALAC) {
-      ALACConfig alac;
-      alac.frame_length = static_cast<uint32_t>(frames_per_packet);
-      if (this->decoder_.configure(alac))
-        this->codec_ = Codec::ALAC;
-    } else if (compression == COMPRESSION_PCM) {
-      this->codec_ = Codec::PCM;
-    }
-    if (this->codec_ == Codec::NONE) {
-      AIRPLAY_LOGW("Unsupported audio format %" PRId64, compression);
-      return;
-    }
-    // iOS leaves the key out of realtime streams. Whether their audio is then encrypted with a zero key (as
-    // openairplay/airplay2-receiver assumes) or not at all is told by the first packet.
-    if (key != nullptr) {
-      std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
-      this->audio_encryption_ = AudioEncryption::KEY;
     } else {
-      // Tried in this order: the key of an earlier stream of the session, a zero key, no encryption
-      if (this->have_session_stream_key_) {
-        std::memcpy(this->audio_key_, this->session_stream_key_, sizeof(this->audio_key_));
-      } else {
-        std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+      if ((key != nullptr && key_length != CHACHA_KEY_SIZE) || sample_rate != SAMPLE_RATE || frames_per_packet <= 0 ||
+          frames_per_packet > FRAMES_PER_PACKET) {
+        AIRPLAY_LOGW("Unsupported stream parameters");
+        return;
       }
-      this->audio_encryption_ = AudioEncryption::UNKNOWN;
-    }
-    this->airplay2_audio_ = true;
-    this->encrypted_ = false;
-    this->client_control_.port = static_cast<uint16_t>(control_port);
-    AIRPLAY_LOGD("Stream: %s, AirPlay 2", this->codec_ == Codec::ALAC ? "ALAC" : "PCM");
-    if (this->airplay2_recording_ && this->start_audio_(now_us)) {
-      AIRPLAY_LOGI("Playback started");
-      this->set_session_state_(SessionState::PLAYING);
-    }
+      this->stop_audio_();
+      this->stop_buffered_audio_();
+      this->codec_ = Codec::NONE;
+      if (compression == COMPRESSION_ALAC) {
+        ALACConfig alac;
+        alac.frame_length = static_cast<uint32_t>(frames_per_packet);
+        if (this->decoder_.configure(alac))
+          this->codec_ = Codec::ALAC;
+      } else if (compression == COMPRESSION_PCM) {
+        this->codec_ = Codec::PCM;
+      }
+      if (this->codec_ == Codec::NONE) {
+        AIRPLAY_LOGW("Unsupported audio format %" PRId64, compression);
+        return;
+      }
+      // iOS leaves the key out of realtime streams. Whether their audio is then encrypted with a zero key (as
+      // openairplay/airplay2-receiver assumes) or not at all is told by the first packet.
+      if (key != nullptr) {
+        std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
+        this->audio_encryption_ = AudioEncryption::KEY;
+      } else {
+        // Tried in this order: the key of an earlier stream of the session, a zero key, no encryption
+        if (this->have_session_stream_key_) {
+          std::memcpy(this->audio_key_, this->session_stream_key_, sizeof(this->audio_key_));
+        } else {
+          std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+        }
+        this->audio_encryption_ = AudioEncryption::UNKNOWN;
+      }
+      this->airplay2_audio_ = true;
+      this->encrypted_ = false;
+      this->client_control_.port = static_cast<uint16_t>(control_port);
+      AIRPLAY_LOGD("Stream: %s, AirPlay 2", this->codec_ == Codec::ALAC ? "ALAC" : "PCM");
+      if (this->airplay2_recording_ && this->start_audio_(now_us)) {
+        AIRPLAY_LOGI("Playback started");
+        this->set_session_state_(SessionState::PLAYING);
+      }
 
-    writer.begin_dict(1);
-    writer.key("streams");
-    writer.begin_array(1);
-    writer.begin_dict(3);
-    writer.key("type");
-    writer.integer(STREAM_TYPE_REALTIME);
-    writer.key("dataPort");
-    writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::AUDIO)]);
-    writer.key("controlPort");
-    writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::CONTROL)]);
+      writer.begin_dict(1);
+      writer.key("streams");
+      writer.begin_array(1);
+      writer.begin_dict(3);
+      writer.key("type");
+      writer.integer(STREAM_TYPE_REALTIME);
+      writer.key("dataPort");
+      writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::AUDIO)]);
+      writer.key("controlPort");
+      writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::CONTROL)]);
+    }
   }
 
   response.body_length = writer.finish();
@@ -542,6 +617,225 @@ size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint
   this->audio_encryption_ = AudioEncryption::NONE;
   std::memcpy(output, payload, length);
   return length;
+}
+
+// ===== Buffered audio =====
+
+/// A buffered stream sends each packet as its length (2 bytes, big endian, including these 2), the RTP header, the
+/// encrypted audio, the tag and the last 8 bytes of the nonce
+static constexpr size_t BUFFERED_LENGTH_SIZE = 2;
+static constexpr size_t BUFFERED_RTP_HEADER_SIZE = 12;
+/// The connection is paused while less than this is free in the buffer, and resumed once twice as much is
+static constexpr size_t BUFFERED_PAUSE_BYTES = 8 * 1024;
+/// Packets decoded per poll, to spread the work
+static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 2;
+static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
+
+/// Whether 24-bit sequence number a comes before b
+static bool seq24_before(uint32_t a, uint32_t b) { return ((a - b) & 0xffffff) > 0x800000; }
+
+void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms) {
+  Connection &c = this->connections_[connection];
+  auto *packet = reinterpret_cast<uint8_t *>(c.buffer);
+  this->last_packet_ms_ = now_ms;
+  while (length > 0 && c.open) {
+    size_t needed = BUFFERED_LENGTH_SIZE;
+    if (c.rx_length >= BUFFERED_LENGTH_SIZE) {
+      needed = (static_cast<size_t>(packet[0]) << 8) | packet[1];
+      if (needed < BUFFERED_LENGTH_SIZE + BUFFERED_RTP_HEADER_SIZE + POLY1305_TAG_SIZE + AUDIO_NONCE_SIZE ||
+          needed > RTSP_BUFFER_SIZE) {
+        AIRPLAY_LOGW("Invalid buffered audio packet (%u bytes)", static_cast<unsigned>(needed));
+        this->close_connection_(connection);
+        return;
+      }
+    }
+    const size_t take = std::min(needed - c.rx_length, length);
+    std::memcpy(packet + c.rx_length, data, take);
+    c.rx_length += take;
+    data += take;
+    length -= take;
+    if (c.rx_length < needed || needed == BUFFERED_LENGTH_SIZE)
+      continue;
+    c.rx_length = 0;
+
+    uint8_t *rtp_packet = packet + BUFFERED_LENGTH_SIZE;
+    const size_t rtp_length = needed - BUFFERED_LENGTH_SIZE;
+    const uint32_t seq =
+        (static_cast<uint32_t>(rtp_packet[1]) << 16) | (static_cast<uint32_t>(rtp_packet[2]) << 8) | rtp_packet[3];
+    const uint32_t rtp = (static_cast<uint32_t>(rtp_packet[4]) << 24) | (static_cast<uint32_t>(rtp_packet[5]) << 16) |
+                         (static_cast<uint32_t>(rtp_packet[6]) << 8) | rtp_packet[7];
+    if (this->flush_active_) {
+      if (seq24_before(seq, this->flush_until_seq_))
+        continue;  // Flushed
+      this->flush_active_ = false;
+    }
+    const size_t audio_length = rtp_length - BUFFERED_RTP_HEADER_SIZE - POLY1305_TAG_SIZE - AUDIO_NONCE_SIZE;
+    uint8_t *audio = rtp_packet + BUFFERED_RTP_HEADER_SIZE;
+    uint8_t nonce[CHACHA_NONCE_SIZE] = {};
+    std::memcpy(nonce + 4, rtp_packet + rtp_length - AUDIO_NONCE_SIZE, AUDIO_NONCE_SIZE);
+    if (!chacha20_poly1305_decrypt(this->audio_key_, nonce, rtp_packet + 4, 8, audio, audio_length,
+                                   audio + audio_length, audio)) {
+      if (this->buffered_dropped_++ == 0)
+        AIRPLAY_LOGW("Failed to decrypt buffered audio (packet %" PRIu32 ")", seq);
+      continue;
+    }
+    if (!this->buffered_queue_.push(rtp, seq, audio, static_cast<uint16_t>(audio_length))) {
+      if (this->buffered_dropped_++ == 0)
+        AIRPLAY_LOGW("Buffered audio dropped: the buffer is full");
+    }
+  }
+  this->update_receive_pause_();
+}
+
+void Receiver::update_receive_pause_() {
+  if (this->data_connection_ == NO_CONNECTION)
+    return;
+  const size_t free_bytes = this->buffered_queue_.free_bytes();
+  if (!this->receive_paused_ && free_bytes < BUFFERED_PAUSE_BYTES) {
+    this->receive_paused_ = true;
+    this->transport_.pause_receiving(this->data_connection_, true);
+  } else if (this->receive_paused_ && free_bytes >= 2 * BUFFERED_PAUSE_BYTES) {
+    this->receive_paused_ = false;
+    this->transport_.pause_receiving(this->data_connection_, false);
+  }
+}
+
+void Receiver::decode_buffered_audio_(uint32_t now_ms) {
+  if (!this->audio_active_)
+    return;
+  const uint32_t pieces = (AAC_FRAMES_PER_PACKET + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
+  for (uint32_t i = 0; i < BUFFERED_DECODES_PER_POLL; i++) {
+    // Room in the jitter buffer for the pieces of one packet
+    if (this->have_seq_ &&
+        static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)
+      break;
+    uint32_t rtp;
+    uint32_t seq;
+    const uint8_t *data;
+    uint16_t length;
+    if (!this->buffered_queue_.front(&rtp, &seq, &data, &length))
+      break;
+    const size_t frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
+    this->buffered_queue_.pop();
+    this->last_packet_ms_ = now_ms;
+    if (frames == 0 || frames > AAC_FRAMES_PER_PACKET) {
+      if (this->stats_.decode_errors++ == 0)
+        AIRPLAY_LOGW("Failed to decode buffered audio (packet %" PRIu32 ", %u bytes)", seq, length);
+      continue;
+    }
+    // Into the jitter buffer in pieces of at most FRAMES_PER_PACKET
+    for (size_t offset = 0; offset < frames; offset += FRAMES_PER_PACKET) {
+      const uint16_t piece_seq = this->buffered_next_seq_++;
+      if (!this->have_seq_) {
+        this->have_seq_ = true;
+        this->next_seq_ = piece_seq;
+        this->highest_seq_ = piece_seq - 1;
+        this->head_slot_ = 0;
+      }
+      const int32_t ahead = static_cast<int16_t>(piece_seq - this->next_seq_);
+      if (ahead < 0 || static_cast<uint32_t>(ahead) >= this->slot_count_) {
+        this->stats_.late_packets++;
+        continue;
+      }
+      PacketSlot &slot = this->slots_[(this->head_slot_ + static_cast<uint32_t>(ahead)) % this->slot_count_];
+      const size_t piece_frames = std::min<size_t>(frames - offset, FRAMES_PER_PACKET);
+      std::memcpy(slot.samples, this->aac_samples_ + offset * NUM_CHANNELS, piece_frames * BYTES_PER_FRAME);
+      slot.seq = piece_seq;
+      slot.rtp = rtp + static_cast<uint32_t>(offset);
+      slot.frames = static_cast<uint16_t>(piece_frames);
+      slot.valid = true;
+      slot.missing_since_ms = 0;
+      this->highest_seq_ = piece_seq;
+    }
+  }
+  this->update_receive_pause_();
+}
+
+void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
+  PlistReader reader;
+  if (!reader.parse(body, length))
+    return;
+  const PlistReader::Object root = reader.root();
+  int64_t seconds = 0;
+  int64_t fraction = 0;
+  int64_t rtp = 0;
+  if (reader.get_integer(reader.get(root, "networkTimeSecs"), &seconds) &&
+      reader.get_integer(reader.get(root, "rtpTime"), &rtp)) {
+    reader.get_integer(reader.get(root, "networkTimeFrac"), &fraction);
+    // The fraction is of a second in 64 bits
+    const uint64_t fraction_ns = ((static_cast<uint64_t>(fraction) >> 32) * 1000000000ULL) >> 32;
+    // The NTP timeline counts from 1900; a time from 1970 is moved onto it
+    if (seconds < NTP_UNIX_OFFSET_S)
+      seconds += NTP_UNIX_OFFSET_S;
+    this->anchor_rtp_ = static_cast<uint32_t>(rtp);
+    this->anchor_remote_ns_ = seconds * 1000000000LL + static_cast<int64_t>(fraction_ns);
+    this->anchor_valid_ = true;
+    this->sender_latency_frames_ = 0;
+  }
+  int64_t rate = 0;
+  double real_rate = 0;
+  if (!reader.get_integer(reader.get(root, "rate"), &rate) && reader.get_real(reader.get(root, "rate"), &real_rate))
+    rate = real_rate > 0 ? 1 : 0;
+  const bool playing = (rate & 1) != 0;
+  AIRPLAY_LOGD("Rate %d from %" PRIu32, playing ? 1 : 0, this->anchor_rtp_);
+  if (playing != this->buffered_playing_) {
+    this->buffered_playing_ = playing;
+    this->playback_started_ = false;  // Lines up with the new anchor
+    this->set_session_state_(playing ? SessionState::PLAYING : SessionState::PAUSED);
+  }
+}
+
+void Receiver::handle_flush_buffered_(const uint8_t *body, size_t length) {
+  PlistReader reader;
+  if (!reader.parse(body, length))
+    return;
+  const PlistReader::Object root = reader.root();
+  int64_t until = 0;
+  if (!reader.get_integer(reader.get(root, "flushUntilSeq"), &until))
+    return;
+  int64_t from = 0;
+  const bool has_from = reader.get_integer(reader.get(root, "flushFromSeq"), &from);
+  AIRPLAY_LOGD("Flush until %" PRId64 "%s", until, has_from ? " (from a later packet)" : "");
+  const auto until_seq = static_cast<uint32_t>(until) & 0xffffff;
+  // Queued packets before the flush point are dropped; with a start of the flush, those before it stay
+  uint32_t rtp;
+  uint32_t seq;
+  const uint8_t *data;
+  uint16_t queued;
+  while (this->buffered_queue_.front(&rtp, &seq, &data, &queued) && seq24_before(seq, until_seq) &&
+         (!has_from || !seq24_before(seq, static_cast<uint32_t>(from) & 0xffffff))) {
+    this->buffered_queue_.pop();
+  }
+  if (!has_from) {
+    // Decoded audio goes too; the next anchor tells where playback continues
+    this->reset_playback_();
+  }
+  this->flush_until_seq_ = until_seq;
+  this->flush_active_ = true;
+  this->update_receive_pause_();
+}
+
+void Receiver::stop_buffered_audio_() {
+  if (this->buffered_stream_)
+    this->config_.aac_decoder->end();
+  this->buffered_stream_ = false;
+  this->buffered_playing_ = false;
+  this->data_channel_pending_ = false;
+  this->flush_active_ = false;
+  this->buffered_dropped_ = 0;
+  this->buffered_queue_.clear();
+  if (this->codec_ == Codec::AAC)
+    this->codec_ = Codec::NONE;
+  if (this->data_connection_ != NO_CONNECTION) {
+    const uint8_t connection = this->data_connection_;
+    this->data_connection_ = NO_CONNECTION;
+    if (this->connections_[connection].open) {
+      this->connections_[connection].open = false;
+      this->connections_[connection].audio_data = false;
+      this->transport_.close(connection);
+    }
+  }
+  this->receive_paused_ = false;
 }
 
 }  // namespace airplay

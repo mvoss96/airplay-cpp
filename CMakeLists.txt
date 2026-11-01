@@ -14,6 +14,7 @@ set(AIRPLAY_SOURCES
     src/airplay_hap_crypto.cpp
     src/airplay_key.cpp
     src/airplay_log.cpp
+    src/airplay_packet_queue.cpp
     src/airplay_plist.cpp
     src/airplay_receiver.cpp
     src/airplay_receiver_ap2.cpp
@@ -78,4 +79,12 @@ if(AIRPLAY_BUILD_EXAMPLES AND AIRPLAY_MBEDCRYPTO)
     add_executable(airplay_receiver examples/posix/main.cpp)
     target_link_libraries(airplay_receiver PRIVATE airplay)
     target_compile_options(airplay_receiver PRIVATE ${AIRPLAY_WARNINGS})
+    # AirPlay 2 buffered audio needs an AAC decoder; the example uses FAAD2 when found
+    find_path(AIRPLAY_FAAD_INCLUDE neaacdec.h)
+    find_library(AIRPLAY_FAAD NAMES faad)
+    if(AIRPLAY_FAAD_INCLUDE AND AIRPLAY_FAAD)
+        target_include_directories(airplay_receiver PRIVATE ${AIRPLAY_FAAD_INCLUDE})
+        target_link_libraries(airplay_receiver PRIVATE ${AIRPLAY_FAAD})
+        target_compile_definitions(airplay_receiver PRIVATE AIRPLAY_EXAMPLE_FAAD)
+    endif()
 endif()

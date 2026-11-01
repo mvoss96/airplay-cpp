@@ -1,8 +1,10 @@
 #pragma once
 
+#include "airplay_aac.h"
 #include "airplay_alac.h"
 #include "airplay_crypto.h"
 #include "airplay_hap_crypto.h"
+#include "airplay_packet_queue.h"
 #include "airplay_types.h"
 
 #include <atomic>
@@ -26,6 +28,9 @@ class Transport {
   virtual bool open_udp(uint16_t *ports) = 0;
   virtual void close_udp() = 0;
   virtual void send_udp(UdpChannel channel, const Endpoint &to, const uint8_t *data, size_t length) = 0;
+  /// Stops or resumes reading a connection, so that a sender that sends audio ahead waits while the receiver's
+  /// buffer is full. Without it the receiver drops what does not fit.
+  virtual void pause_receiving(uint8_t /*connection*/, bool /*paused*/) {}
 };
 
 /// Audio output. Must not block.
@@ -87,6 +92,12 @@ struct ReceiverConfig {
   void (*random)(uint8_t *buffer, size_t length){nullptr};
   /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
   uint64_t airplay2_features{0};
+  /// Decoder for AirPlay 2 buffered audio (AAC), which iOS uses for most apps; not offered without one. Must stay
+  /// valid while the receiver exists.
+  AacDecoder *aac_decoder{nullptr};
+  /// Buffer for the compressed audio that buffered streams send ahead (at 256 kbit/s, 32 KB per second). The audio
+  /// is decoded into the jitter buffer (buffer_ms) as that has room.
+  uint32_t buffered_audio_bytes{128 * 1024};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
   void (*deallocate)(void *pointer){nullptr};
@@ -110,8 +121,9 @@ struct ReceiverStats {
 /// Threading: everything except the methods marked thread-safe must be called from one thread.
 class Receiver {
  public:
-  /// Two senders (one taking over from the other) plus the event connection of an AirPlay 2 sender
-  static constexpr uint8_t MAX_CONNECTIONS = 3;
+  /// Two senders (one taking over from the other) plus the event and buffered audio connections of an AirPlay 2
+  /// sender
+  static constexpr uint8_t MAX_CONNECTIONS = 4;
   static constexpr uint16_t DEFAULT_PORT = 5000;
 
   Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
@@ -133,6 +145,8 @@ class Receiver {
   void poll(int64_t now_us);
 
   bool is_session_owner(uint8_t connection) const { return this->session_owner_ == connection; }
+  /// @brief Whether a connection belongs to the playing sender: its RTSP, event or buffered audio connection.
+  bool is_session_connection(uint8_t connection) const;
   bool needs_fast_polling() const { return this->audio_active_; }
   SessionState session_state() const { return this->session_state_; }
   const ReceiverStats &stats() const { return this->stats_; }
@@ -162,6 +176,7 @@ class Receiver {
     NONE,
     ALAC,
     PCM,
+    AAC,  // AirPlay 2 buffered audio
   };
 
   struct Connection {
@@ -177,6 +192,7 @@ class Receiver {
     bool encrypted{false};
     bool encrypt_after_response{false};
     bool event_channel{false};  // A sender's event connection; nothing to read on it
+    bool audio_data{false};     // A sender's buffered audio connection
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint64_t read_counter{0};
@@ -265,6 +281,14 @@ class Receiver {
   void pass_plain_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
   /// @return the length of the audio in `output`, or 0 if the packet is not authentic
   size_t decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length, uint8_t *output);
+  // Buffered audio (airplay_receiver_ap2.cpp)
+  void receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms);
+  /// Decodes queued audio into the jitter buffer while it has room
+  void decode_buffered_audio_(uint32_t now_ms);
+  void handle_rate_anchor_(const uint8_t *body, size_t length);
+  void handle_flush_buffered_(const uint8_t *body, size_t length);
+  void stop_buffered_audio_();
+  void update_receive_pause_();
   /// Takes a packet that did not decrypt with the zero key as unencrypted audio from now on
   size_t detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output);
 
@@ -347,6 +371,19 @@ class Receiver {
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
   AudioEncryption audio_encryption_{AudioEncryption::KEY};
+  // Buffered audio
+  PacketQueue buffered_queue_;
+  uint8_t *buffered_storage_{nullptr};
+  int16_t *aac_samples_{nullptr};  // One decoded AAC frame
+  bool buffered_stream_{false};    // The session's audio stream is buffered (AAC over TCP)
+  bool buffered_playing_{false};   // Rate 1 from SETRATEANCHORTIME
+  bool data_channel_pending_{false};
+  bool receive_paused_{false};
+  uint8_t data_connection_{0xff};
+  uint16_t buffered_next_seq_{0};  // Sequence number of the next piece of decoded audio in the jitter buffer
+  uint32_t flush_until_seq_{0};    // Packets before this one are dropped (24-bit sequence numbers)
+  bool flush_active_{false};
+  uint32_t buffered_dropped_{0};
   uint8_t session_stream_key_[CHACHA_KEY_SIZE]{};  // The last key a stream setup of the session carried
   bool have_session_stream_key_{false};
 

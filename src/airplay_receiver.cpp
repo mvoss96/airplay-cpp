@@ -105,6 +105,8 @@ static constexpr int32_t FILL_SMOOTHING_SHIFT = 8;
 static constexpr uint32_t OUTPUT_RESTART_SETTLE_MS = 20;
 /// The session shows as paused when a playing sender sends no audio for this long
 static constexpr uint32_t SENDER_IDLE_MS = 10000;
+/// The buffer for buffered audio holds at least this much, so that pausing the connection leaves room
+static constexpr size_t MIN_BUFFERED_AUDIO_BYTES = 32 * 1024;
 /// Statistics are logged at debug level this often during playback
 static constexpr uint32_t STATS_LOG_INTERVAL_MS = 10000;
 
@@ -222,6 +224,8 @@ Receiver::~Receiver() {
   }
   this->free_(this->frames_);
   this->free_(this->send_buffer_);
+  this->free_(this->buffered_storage_);
+  this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
   this->free_(this->slots_);
   this->free_(this->packet_buffer_);
@@ -300,6 +304,21 @@ bool Receiver::begin() {
         this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
     }
   }
+  if (this->airplay2_ && this->config_.aac_decoder != nullptr) {
+    const size_t bytes = std::max<size_t>(this->config_.buffered_audio_bytes, MIN_BUFFERED_AUDIO_BYTES);
+    this->buffered_storage_ = static_cast<uint8_t *>(this->allocate_(bytes));
+    this->aac_samples_ =
+        static_cast<int16_t *>(this->allocate_(AAC_FRAMES_PER_PACKET * NUM_CHANNELS * sizeof(int16_t)));
+    if (this->buffered_storage_ == nullptr || this->aac_samples_ == nullptr) {
+      AIRPLAY_LOGW("Failed to allocate the buffer for buffered audio; it is not offered");
+      this->free_(this->buffered_storage_);
+      this->free_(this->aac_samples_);
+      this->buffered_storage_ = nullptr;
+      this->aac_samples_ = nullptr;
+    } else {
+      this->buffered_queue_.init(this->buffered_storage_, bytes);
+    }
+  }
   AIRPLAY_LOGD("Buffer of %" PRIu32 " packets", this->slot_count_);
   return true;
 }
@@ -339,6 +358,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.encrypted = false;
   c.encrypt_after_response = false;
   c.event_channel = false;
+  c.audio_data = false;
   c.frame_length = 0;
   // An AirPlay 2 sender connects its event connection right after setting up its session
   if (this->event_channel_pending_ && this->session_owner_ != NO_CONNECTION &&
@@ -346,6 +366,14 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
     this->event_channel_pending_ = false;
     c.event_channel = true;
     AIRPLAY_LOGD("Event connection");
+  } else if (this->data_channel_pending_ && this->session_owner_ != NO_CONNECTION &&
+             this->connections_[this->session_owner_].peer.address == peer.address) {
+    // The same for the buffered audio connection after the stream setup
+    this->data_channel_pending_ = false;
+    c.audio_data = true;
+    this->data_connection_ = connection;
+    this->receive_paused_ = false;
+    AIRPLAY_LOGD("Buffered audio connection");
   }
   if (this->config_.password != nullptr) {
     // A new nonce for every connection, so that an answer cannot be replayed on another one
@@ -367,6 +395,8 @@ void Receiver::connection_closed(uint8_t connection) {
   AIRPLAY_LOGD("Connection closed");
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
+  if (connection == this->data_connection_)
+    this->data_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_)
     this->end_session_();
   this->connections_[connection].open = false;
@@ -379,8 +409,19 @@ void Receiver::close_connection_(uint8_t connection) {
     this->end_session_();
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
+  if (connection == this->data_connection_)
+    this->data_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;
   this->transport_.close(connection);
+}
+
+bool Receiver::is_session_connection(uint8_t connection) const {
+  if (connection >= MAX_CONNECTIONS || this->session_owner_ == NO_CONNECTION)
+    return false;
+  const Connection &c = this->connections_[connection];
+  return connection == this->session_owner_ ||
+         (c.open && (c.event_channel || c.audio_data) &&
+          c.peer.address == this->connections_[this->session_owner_].peer.address);
 }
 
 void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us) {
@@ -389,6 +430,10 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
   Connection &c = this->connections_[connection];
   if (!c.open || c.event_channel)
     return;
+  if (c.audio_data) {
+    this->receive_buffered_audio_(connection, data, length, to_ms(now_us));
+    return;
+  }
   if (c.encrypted) {
     this->receive_encrypted_(connection, data, length, now_us);
   } else {
@@ -1048,10 +1093,11 @@ void Receiver::end_session_() {
   this->event_channel_pending_ = false;
   this->airplay2_recording_ = false;
   this->have_session_stream_key_ = false;
+  this->stop_buffered_audio_();
   // The sender's event connection goes with its session
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
-    if (c.open && c.event_channel) {
+    if (c.open && (c.event_channel || c.audio_data)) {
       c.open = false;
       this->transport_.close(i);
     }
@@ -1179,7 +1225,7 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     default:
       break;
   }
-  if (!this->audio_active_)
+  if (!this->audio_active_ || this->buffered_stream_)
     return;
 
   switch (type) {
@@ -1577,7 +1623,9 @@ void Receiver::poll(int64_t now_us) {
   if (!this->audio_active_)
     return;
 
-  if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
+  if (this->buffered_stream_) {
+    this->decode_buffered_audio_(now_ms);
+  } else if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
     this->last_resend_scan_ms_ = now_ms;
     this->retry_resends_(now_ms);
   }
@@ -1623,6 +1671,9 @@ void Receiver::playback_step_(int64_t now_us) {
 
   if (!this->have_seq_)
     return;
+  // Buffered audio plays only between SETRATEANCHORTIME with rate 1 and the next with rate 0
+  if (this->buffered_stream_ && !this->buffered_playing_)
+    return;
   if (!this->playback_started_ && !this->start_playback_())
     return;
 
@@ -1645,6 +1696,8 @@ void Receiver::playback_step_(int64_t now_us) {
 
 bool Receiver::start_playback_() {
   const uint32_t buffered = this->buffered_packets_();
+  if (buffered == 0)
+    return false;  // Nothing to play, e.g. at the end of a stream
   const uint32_t capacity_frames = this->slot_count_ * FRAMES_PER_PACKET;
   const bool fits = capacity_frames >= this->sender_latency_frames_ + SYNC_MARGIN_FRAMES;
 

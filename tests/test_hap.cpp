@@ -1,12 +1,15 @@
 // AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, TLV8 and binary property lists
 #include "airplay_fairplay.h"
 #include "airplay_hap_crypto.h"
+#include "airplay_packet_queue.h"
 #include "airplay_plist.h"
 #include "airplay_srp.h"
 #include "airplay_tlv8.h"
 #include "test_common.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -314,6 +317,51 @@ static void test_fairplay_setup() {
   CHECK(fairplay_setup_reply(message, 164, reply, sizeof(reply)) == 0);
 }
 
+static void test_packet_queue() {
+  // Random pushes and pops against a simple model, in buffers of several sizes
+  struct Packet {
+    uint32_t rtp;
+    uint32_t seq;
+    std::vector<uint8_t> data;
+  };
+  for (size_t size : {64u, 1000u, 4096u}) {
+    std::vector<uint8_t> storage(size);
+    PacketQueue queue;
+    queue.init(storage.data(), size);
+    std::deque<Packet> model;
+    std::srand(static_cast<unsigned>(size));
+    bool ok = true;
+    for (int step = 0; step < 20000 && ok; step++) {
+      if (std::rand() % 2 == 0) {
+        Packet packet{static_cast<uint32_t>(std::rand()), static_cast<uint32_t>(std::rand()),
+                      std::vector<uint8_t>(static_cast<size_t>(std::rand()) % (size / 3 + 1))};
+        for (uint8_t &byte : packet.data)
+          byte = static_cast<uint8_t>(std::rand());
+        if (queue.push(packet.rtp, packet.seq, packet.data.data(), static_cast<uint16_t>(packet.data.size()))) {
+          model.push_back(packet);
+        } else {
+          ok = !model.empty();  // A packet that fits the buffer always fits an empty queue
+        }
+      } else {
+        uint32_t rtp, seq;
+        const uint8_t *data;
+        uint16_t length;
+        const bool found = queue.front(&rtp, &seq, &data, &length);
+        ok = found == !model.empty();
+        if (found && ok) {
+          const Packet &expected = model.front();
+          ok = rtp == expected.rtp && seq == expected.seq && length == expected.data.size() &&
+               (length == 0 || std::memcmp(data, expected.data.data(), length) == 0);
+          queue.pop();
+          model.pop_front();
+        }
+      }
+      ok = ok && queue.empty() == model.empty();
+    }
+    CHECK(ok);
+  }
+}
+
 int main() {
   test_sha512();
   test_hmac_hkdf();
@@ -323,5 +371,6 @@ int main() {
   test_plist_reader();
   test_plist_writer();
   test_fairplay_setup();
+  test_packet_queue();
   return finish("test_hap");
 }

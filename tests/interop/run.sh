@@ -11,6 +11,9 @@
 #   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero or
 #   earlier leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
 #   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
+# buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder
+#   (the POSIX example with FAAD2). Its output is compared with ffmpeg's decoding of the same file. PAUSE=1 pauses
+#   in the middle.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -27,11 +30,18 @@ if [ "$SENDER" = pipewire ] && [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
   exec dbus-run-session -- "$0" "$@"  # WirePlumber needs a D-Bus session
 fi
 
-WORK=$(mktemp -d)
+WORK=${WORK:-$(mktemp -d)}
 cd "$WORK"
 IMPAIR_SO=${IMPAIR_SO:+$(realpath "$OLDPWD/$IMPAIR_SO" 2> /dev/null || realpath "$IMPAIR_SO")}
 FRAMES=264600  # 6 s
-python3 "$HERE/make_wav.py" ramp.wav $FRAMES
+if [ "$SENDER" = buffered ]; then
+  AIRPLAY2=1
+  python3 "$HERE/make_signal.py" signal.wav 6
+  ffmpeg -loglevel error -y -i signal.wav -c:a aac -b:a 256k -f adts signal.aac
+  ffmpeg -loglevel error -y -i signal.aac -f s16le -ac 2 -ar 44100 reference.pcm
+else
+  python3 "$HERE/make_wav.py" ramp.wav $FRAMES
+fi
 
 PRELOAD=""
 if [ -n "$IMPAIR_SO" ]; then
@@ -49,7 +59,11 @@ fi
 RECEIVER_PID=$!
 sleep 2
 
-if [ "$SENDER" = pyatv ]; then
+if [ "$SENDER" = buffered ]; then
+  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) ||
+    echo "The sender failed"
+  sleep 1
+elif [ "$SENDER" = pyatv ]; then
   TXT="txtvers=1 ch=2 cn=0,1 et=0,1 ek=1 sv=false da=true sr=44100 ss=16 pw=$([ -n "$PASSWORD" ] && echo true || echo false) tp=UDP vn=65537 vs=105.1 sf=0x4 md=0,1,2"
   if [ "$AIRPLAY2" = 1 ]; then
     TXT="$TXT $(sed -n 's/.*_airplay._tcp.* \(features=[^ ]*\).*/\1/p' receiver.log | sed 's/features=/ft=/')"
@@ -82,6 +96,11 @@ kill -KILL $RECEIVER_PID 2> /dev/null || true
 cat receiver.log
 
 grep -q "Playback synchronized to the sender" receiver.log
+if [ "$SENDER" = buffered ]; then
+  grep -q "Stream: AAC, AirPlay 2 buffered" receiver.log
+  python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] && echo --pause)
+  exit 0
+fi
 if [ "$SENDER" = pyatv ]; then
   grep -q "Now playing: pyatv - Ramp" receiver.log
   if [ "$AIRPLAY2" = 1 ] && [ -z "$PASSWORD" ]; then  # Not offered with a password

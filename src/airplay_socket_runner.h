@@ -49,6 +49,7 @@ class SocketRunner final : public Transport {
   // Transport
   bool send(uint8_t connection, const uint8_t *data, size_t length) override;
   void close(uint8_t connection) override;
+  void pause_receiving(uint8_t connection, bool paused) override;
   bool open_udp(uint16_t *ports) override;
   void close_udp() override;
   void send_udp(UdpChannel channel, const Endpoint &to, const uint8_t *data, size_t length) override;
@@ -62,8 +63,9 @@ class SocketRunner final : public Transport {
   int listen_fd_{-1};
   uint16_t port_{0};
   uint16_t udp_base_port_{0};
-  int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1};
-  static_assert(Receiver::MAX_CONNECTIONS == 3, "Initialize every connection_fds_ entry to -1");
+  int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1, -1};
+  static_assert(Receiver::MAX_CONNECTIONS == 4, "Initialize every connection_fds_ entry to -1");
+  bool receive_paused_[Receiver::MAX_CONNECTIONS]{};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
   uint8_t udp_buffer_[1600];
 };
