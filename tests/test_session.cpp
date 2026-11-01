@@ -688,15 +688,19 @@ static void test_progress() {
   // Seeking within the same track keeps working
   f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/441000/882000");
   CHECK(f.listener.progress_count == 7 && f.listener.progress.position_ms == 10000);
+  // A length that differs by a fraction of a second (as YouTube reports it) is kept steady
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 4410/485100/890820");
+  CHECK(f.listener.progress_count == 8 && f.listener.progress.duration_ms == 20000);
+  CHECK(f.listener.progress.position_ms == 10900);
   // pyatv sends the position of a new track just before its details: it stays
   f.now_us += 5000000;
   f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 0/0/2205000");
-  CHECK(f.listener.progress_count == 8 && f.listener.progress.duration_ms == 50000);
+  CHECK(f.listener.progress_count == 9 && f.listener.progress.duration_ms == 50000);
   f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", first);
-  CHECK(f.listener.progress_count == 8);
+  CHECK(f.listener.progress_count == 9);
 
   f.request(0, "TEARDOWN");
-  CHECK(f.listener.progress_count == 9 && f.listener.progress.duration_ms == 0);  // Cleared at the end
+  CHECK(f.listener.progress_count == 10 && f.listener.progress.duration_ms == 0);  // Cleared at the end
 }
 
 static void test_mdns() {

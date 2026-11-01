@@ -1048,19 +1048,25 @@ void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
   if (end == nullptr || *end != '/')
     return;
   const auto finish = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
-  const uint32_t duration = finish - start;
+  uint32_t duration = finish - start;
   if (duration == this->stale_progress_frames_) {
     AIRPLAY_LOGD("Ignoring the progress of the previous track");
     return;
   }
+  // Some senders (e.g. YouTube) report the length of the same track a fraction of a second differently each time;
+  // it is kept, so that a shown remaining time does not jump
+  if (this->stale_progress_frames_ == 0 && this->last_progress_frames_ != 0 &&
+      static_cast<uint32_t>(std::abs(static_cast<int32_t>(duration - this->last_progress_frames_))) <= SAMPLE_RATE)
+    duration = this->last_progress_frames_;
   this->stale_progress_frames_ = 0;
   this->last_progress_frames_ = duration;
   this->last_progress_ms_ = now_ms;
   const uint32_t position = std::min(current - start, duration);
   Progress progress{static_cast<uint32_t>(static_cast<uint64_t>(position) * 1000 / SAMPLE_RATE),
                     static_cast<uint32_t>(static_cast<uint64_t>(duration) * 1000 / SAMPLE_RATE)};
-  AIRPLAY_LOGD("Progress: %" PRIu32 ":%02" PRIu32 " of %" PRIu32 ":%02" PRIu32, progress.position_ms / 60000,
-               progress.position_ms / 1000 % 60, progress.duration_ms / 60000, progress.duration_ms / 1000 % 60);
+  AIRPLAY_LOGD("Progress: %" PRIu32 ":%02" PRIu32 " of %" PRIu32 ":%02" PRIu32 " (%" PRIu32 "/%" PRIu32 "/%" PRIu32 ")",
+               progress.position_ms / 60000, progress.position_ms / 1000 % 60, progress.duration_ms / 60000,
+               progress.duration_ms / 1000 % 60, start, current, finish);
   if (this->listener_ != nullptr)
     this->listener_->on_progress(progress);
 }
