@@ -20,11 +20,11 @@
 namespace airplay {
 
 // Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), FairPlay (14), audio formats
-// (18-20, 22), unified advertiser info (30), control channel encryption (38), NTP timing (45), HomeKit pairing and
-// peer management (46, 47) and transient pairing (48). Without buffered audio (40) and PTP timing (41) senders
-// stream realtime audio; the experiments noted in openairplay/airplay2-receiver found that bit 45 makes iOS do
-// that with NTP timing. iOS only streams to receivers with bit 14, after the FairPlay setup.
-static constexpr uint64_t DEFAULT_FEATURES = 0x1E040405C4A00ULL;
+// (18-20, 22), unified advertiser info (30), control channel encryption (38), buffered audio (40), NTP timing (45),
+// HomeKit pairing and peer management (46, 47) and transient pairing (48). iOS streams only to receivers with
+// FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
+// of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
+static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405C4A00ULL;
 /// Status flags: an audio receiver
 static constexpr int64_t STATUS_FLAGS = 0x4;
 
