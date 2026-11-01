@@ -3,9 +3,11 @@
 Pairing and the encrypted RTSP connection come from pyatv; the buffered stream (stream type 103), which pyatv
 cannot send, is done here.
 
-Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-control]
+Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-control] [--second-session] [--handover]
 
 --remote-control opens a second session during playback, only to control it, as iOS does; playback goes on.
+--second-session sets up a second audio session during playback without a stream, as iOS sometimes does; playback
+goes on. --handover lets that session take over: it sets up its own stream and sends the rest of the file.
 """
 import asyncio
 import os
@@ -67,37 +69,44 @@ async def main():
     host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     pause = "--pause" in sys.argv
     remote_control = "--remote-control" in sys.argv
+    second_session = "--second-session" in sys.argv or "--handover" in sys.argv
+    handover = "--handover" in sys.argv
     frames = read_adts(path)
     loop = asyncio.get_running_loop()
 
-    connection = await http_connect(host, port)
-    rtsp = RtspSession(connection)
-    await verify_connection(TRANSIENT_CREDENTIALS, connection)  # Transient pairing, then encrypted
-    timing, _ = await loop.create_datagram_endpoint(TimingServer, local_addr=(connection.local_ip, 0))
+    timing, _ = await loop.create_datagram_endpoint(TimingServer, local_addr=("127.0.0.1", 0))
     timing_port = timing.get_extra_info("socket").getsockname()[1]
 
-    session = await exchange(
-        rtsp,
-        "SETUP",
-        {"deviceID": "AA:BB:CC:DD:EE:FF", "sessionUUID": str(uuid.uuid4()).upper(), "timingPort": timing_port,
-         "timingProtocol": "NTP", "name": "buffered test", "model": "iPhone17,3"},
-    )
-    _, events = await asyncio.open_connection(host, session["eventPort"])
-    await asyncio.sleep(0.2)
-    await exchange(rtsp, "RECORD")
+    async def open_session():
+        """Pairs and sets up a session with its event connection, then RECORD, as iOS does"""
+        connection = await http_connect(host, port)
+        rtsp = RtspSession(connection)
+        await verify_connection(TRANSIENT_CREDENTIALS, connection)  # Transient pairing, then encrypted
+        session = await exchange(
+            rtsp,
+            "SETUP",
+            {"deviceID": "AA:BB:CC:DD:EE:FF", "sessionUUID": str(uuid.uuid4()).upper(), "timingPort": timing_port,
+             "timingProtocol": "NTP", "name": "buffered test", "model": "iPhone17,3"},
+        )
+        _, events = await asyncio.open_connection(host, session["eventPort"])
+        await asyncio.sleep(0.2)
+        await exchange(rtsp, "RECORD")
+        return connection, rtsp, events
 
-    key = os.urandom(32)
-    stream = await exchange(
-        rtsp,
-        "SETUP",
-        {"streams": [{"type": 103, "ct": 4, "audioFormat": 0x400000, "spf": FRAMES_PER_PACKET, "shk": key,
-                      "audioMode": "default", "isMedia": True, "supportsDynamicStreamID": True}]},
-    )
-    data_port = stream["streams"][0]["dataPort"]
-    print("buffer size", stream["streams"][0].get("audioBufferSize"))
-    _, data = await asyncio.open_connection(host, data_port)
+    async def open_stream(rtsp):
+        key = os.urandom(32)
+        stream = await exchange(
+            rtsp,
+            "SETUP",
+            {"streams": [{"type": 103, "ct": 4, "audioFormat": 0x400000, "spf": FRAMES_PER_PACKET, "shk": key,
+                          "audioMode": "default", "isMedia": True, "supportsDynamicStreamID": True}]},
+        )
+        print("buffer size", stream["streams"][0].get("audioBufferSize"))
+        _, data = await asyncio.open_connection(host, stream["streams"][0]["dataPort"])
+        return ChaCha20Poly1305(key), data
 
-    cipher = ChaCha20Poly1305(key)
+    connection, rtsp, events = await open_session()
+    cipher, data = await open_stream(rtsp)
     ssrc = 0x12345678
     first_rtp = 1000000
 
@@ -121,6 +130,17 @@ async def main():
     for i in range(20, len(frames)):
         if i == 100:
             await send(i, b"")  # As iOS sends after a flush: no audio, to be skipped
+        if i == 140 and second_session:
+            second_connection, second_rtsp, second_events = await open_session()
+            if handover:
+                # The second session takes over with its own stream from here on
+                cipher, data = await open_stream(second_rtsp)
+                connection, rtsp = second_connection, second_rtsp
+                seconds, fraction = network_time(0.3)
+                await exchange(rtsp, "SETRATEANCHORTIME", {"rate": 1, "rtpTime": first_rtp + i * FRAMES_PER_PACKET,
+                                                            "networkTimeSecs": seconds, "networkTimeFrac": fraction,
+                                                            "networkTimeTimelineID": 1})
+                start = time.time() + 0.3 - i * FRAMES_PER_PACKET / SAMPLE_RATE
         if i == 120 and remote_control:
             control = await http_connect(host, port)
             control_rtsp = RtspSession(control)

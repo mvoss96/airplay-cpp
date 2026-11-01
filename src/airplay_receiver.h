@@ -121,9 +121,9 @@ struct ReceiverStats {
 /// Threading: everything except the methods marked thread-safe must be called from one thread.
 class Receiver {
  public:
-  /// Two senders (one taking over from the other) plus the event and buffered audio connections of an AirPlay 2
-  /// sender
-  static constexpr uint8_t MAX_CONNECTIONS = 4;
+  /// An AirPlay 2 sender's session (RTSP, event and buffered audio connections) and its second session (RTSP and
+  /// event), or a second sender taking over, plus one for short requests such as GET /info
+  static constexpr uint8_t MAX_CONNECTIONS = 6;
   static constexpr uint16_t DEFAULT_PORT = 5000;
 
   Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
@@ -193,6 +193,10 @@ class Receiver {
     bool encrypt_after_response{false};
     bool event_channel{false};  // A sender's event connection; nothing to read on it
     bool audio_data{false};     // A sender's buffered audio connection
+    // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
+    bool session_pending{false};
+    bool pending_recording{false};
+    uint16_t pending_timing_port{0};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint64_t read_counter{0};
@@ -264,6 +268,12 @@ class Receiver {
   bool send_(uint8_t connection, const uint8_t *data, size_t length);
   /// Takes over the session for a sender
   void take_session_(uint8_t connection, const char *request, size_t header_length);
+  /// Hands the session to the sender's other session on `connection`, keeping the UDP sockets
+  void adopt_session_(uint8_t connection, const char *request, size_t header_length);
+  /// When the session owner goes: hands the session to a waiting session of the same sender
+  /// @return false if there is none
+  bool promote_pending_session_(uint8_t leaving);
+  void read_sender_version_(const char *request, size_t header_length);
   /// Opens the UDP sockets for a session
   bool open_udp_(uint8_t connection, uint32_t control_port, uint32_t timing_port, uint16_t *ports);
 

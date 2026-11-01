@@ -12,7 +12,7 @@ import sys
 import numpy as np
 
 BLOCK = 4410  # 100 ms
-TRIM_SHIFT = 6  # Frames the receiver may have repeated or dropped within a block
+TRIM_SHIFT = 12  # Frames the receiver may have repeated or dropped within a block (up to 8 at once)
 DRIFT = 20  # Frames a block may have moved against the end of the previous one
 
 out = np.frombuffer(open(sys.argv[1], "rb").read(), dtype="<i2").reshape(-1, 2).astype(np.float64)

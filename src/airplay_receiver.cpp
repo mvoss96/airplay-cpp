@@ -367,6 +367,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.encrypt_after_response = false;
   c.event_channel = false;
   c.audio_data = false;
+  c.session_pending = false;
+  c.pending_recording = false;
   c.frame_length = 0;
   // An AirPlay 2 sender connects its event connection right after setting up its session
   if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
@@ -404,7 +406,7 @@ void Receiver::connection_closed(uint8_t connection) {
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
-  if (connection == this->session_owner_)
+  if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
     this->end_session_();
   this->connections_[connection].open = false;
 }
@@ -412,7 +414,7 @@ void Receiver::connection_closed(uint8_t connection) {
 void Receiver::close_connection_(uint8_t connection) {
   if (connection >= MAX_CONNECTIONS || !this->connections_[connection].open)
     return;
-  if (connection == this->session_owner_)
+  if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
     this->end_session_();
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
@@ -427,7 +429,7 @@ bool Receiver::is_session_connection(uint8_t connection) const {
     return false;
   const Connection &c = this->connections_[connection];
   return connection == this->session_owner_ ||
-         (c.open && (c.event_channel || c.audio_data) &&
+         (c.open && (c.event_channel || c.audio_data || c.session_pending) &&
           c.peer.address == this->connections_[this->session_owner_].peer.address);
 }
 
@@ -594,7 +596,11 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     const bool airplay2_session = is_owner && c.encrypted;
     if (airplay2_session)
       this->airplay2_recording_ = true;
-    if (is_owner && this->start_audio_(now_us)) {
+    if (!is_owner && c.session_pending) {
+      // The sender's other session plays on until this one sets up its stream
+      c.pending_recording = true;
+      std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
+    } else if (is_owner && this->start_audio_(now_us)) {
       AIRPLAY_LOGI("Playback started");
       this->set_session_state_(SessionState::PLAYING);
       // The same value as shairport-sync and the AirPort Express
@@ -711,10 +717,59 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
 void Receiver::take_session_(uint8_t connection, const char *request, size_t header_length) {
   if (connection != this->session_owner_ && this->session_owner_ != NO_CONNECTION) {
     AIRPLAY_LOGI("Another sender took over");
-    this->close_connection_(this->session_owner_);
+    const uint8_t previous = this->session_owner_;
+    this->session_owner_ = NO_CONNECTION;  // Ends the session rather than handing it to a waiting one
+    this->end_session_();
+    this->close_connection_(previous);
   }
   this->stop_audio_();
   this->session_owner_ = connection;
+  this->read_sender_version_(request, header_length);
+}
+
+void Receiver::adopt_session_(uint8_t connection, const char *request, size_t header_length) {
+  Connection &c = this->connections_[connection];
+  const uint8_t previous = this->session_owner_;
+  AIRPLAY_LOGI("The sender's other session took over");
+  this->stop_audio_();
+  this->stop_buffered_audio_();
+  // The new owner first, so that closing the previous one keeps the session and its sockets
+  this->session_owner_ = connection;
+  if (previous != NO_CONNECTION && previous != connection)
+    this->close_connection_(previous);
+  c.session_pending = false;
+  this->airplay2_recording_ = c.pending_recording;
+  this->have_session_stream_key_ = false;
+  this->codec_ = Codec::NONE;
+  this->airplay2_audio_ = false;
+  this->encrypted_ = false;
+  this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+  this->read_sender_version_(request, header_length);
+}
+
+bool Receiver::promote_pending_session_(uint8_t leaving) {
+  for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
+    Connection &c = this->connections_[i];
+    if (i == leaving || !c.open || !c.session_pending)
+      continue;
+    AIRPLAY_LOGI("The sender's other session took over");
+    this->stop_audio_();
+    this->stop_buffered_audio_();
+    this->session_owner_ = i;
+    c.session_pending = false;
+    this->airplay2_recording_ = c.pending_recording;
+    this->have_session_stream_key_ = false;
+    this->codec_ = Codec::NONE;
+    this->airplay2_audio_ = false;
+    this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+    if (this->session_state_ == SessionState::PLAYING)
+      this->set_session_state_(SessionState::PAUSED);
+    return true;
+  }
+  return false;
+}
+
+void Receiver::read_sender_version_(const char *request, size_t header_length) {
   // Senders identify as e.g. "AirPlay/381.13"; the version decides how the latency is computed
   char user_agent[48] = "";
   this->sender_version_ = 0;

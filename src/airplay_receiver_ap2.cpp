@@ -410,6 +410,29 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     }
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
+    if (this->session_owner_ != NO_CONNECTION && this->session_owner_ != connection && this->udp_open_ &&
+        this->connections_[this->session_owner_].peer.address == c.peer.address) {
+      // iOS sets up another session while one plays. The playing one goes on until this one sets up a stream.
+      AIRPLAY_LOGD("Another session of the sender; it takes over once it sets up a stream");
+      c.session_pending = true;
+      c.pending_recording = false;
+      c.pending_timing_port = static_cast<uint16_t>(timing_port);
+      this->event_channel_pending_ = true;
+      this->event_channel_address_ = c.peer.address;
+      writer.begin_dict(2);
+      writer.key("eventPort");
+      writer.integer(c.local.port);
+      writer.key("timingPort");
+      writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+      response.body_length = writer.finish();
+      if (response.body_length > 0) {
+        response.status = 200;
+        response.status_text = "OK";
+        response.content_type = CONTENT_TYPE_PLIST;
+        response.body = this->body_buffer_;
+      }
+      return;
+    }
     this->take_session_(connection, request, header_length);
     this->stop_buffered_audio_();
     this->airplay2_recording_ = false;
@@ -429,6 +452,8 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
   } else {
     // An audio stream
+    if (c.session_pending && this->udp_open_)
+      this->adopt_session_(connection, request, header_length);
     if (connection != this->session_owner_ || !this->udp_open_)
       return;
     const PlistReader::Object stream = reader.at(streams, 0);

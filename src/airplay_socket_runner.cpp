@@ -76,10 +76,11 @@ inline void set_timeouts(int fd, uint32_t timeout_ms) {
 /// Waits until one of the sockets is readable (or writable) and marks them in `ready`. False on timeout.
 inline bool wait(const int *fds, size_t count, uint32_t timeout_ms, bool *ready, bool for_writing = false) {
   // Only open sockets: each entry counts against CONFIG_ZVFS_POLL_MAX
-  struct zsock_pollfd poll_fds[8];
-  size_t index[8];
+  static constexpr size_t MAX_POLL = 16;
+  struct zsock_pollfd poll_fds[MAX_POLL];
+  size_t index[MAX_POLL];
   size_t used = 0;
-  for (size_t i = 0; i < count && used < 8; i++) {
+  for (size_t i = 0; i < count && used < MAX_POLL; i++) {
     ready[i] = false;
     if (fds[i] < 0)
       continue;

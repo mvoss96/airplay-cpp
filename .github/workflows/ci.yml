@@ -150,6 +150,10 @@ jobs:
             network: clean
           - sender: buffered
             network: pause
+          - sender: buffered
+            network: second-session
+          - sender: buffered
+            network: handover
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -185,9 +189,11 @@ jobs:
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;
           esac
-          if [ "${{ matrix.network }}" = pause ]; then
-            export PAUSE=1 REMOTE_CONTROL=1
-          fi
+          case "${{ matrix.network }}" in
+            pause) export PAUSE=1 REMOTE_CONTROL=1 ;;
+            second-session) export SECOND_SESSION=1 ;;
+            handover) export HANDOVER=1 ;;
+          esac
           if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test
           fi

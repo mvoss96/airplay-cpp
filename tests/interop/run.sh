@@ -13,7 +13,8 @@
 #   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
 # buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder
 #   (the POSIX example with FAAD2). Its output is compared with ffmpeg's decoding of the same file. PAUSE=1 pauses
-#   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does.
+#   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
+#   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -61,7 +62,8 @@ sleep 2
 
 if [ "$SENDER" = buffered ]; then
   python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) \
-    $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) ||
+    $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
+    $([ "$HANDOVER" = 1 ] && echo --handover) ||
     echo "The sender failed"
   sleep 1
 elif [ "$SENDER" = pyatv ]; then
@@ -99,7 +101,7 @@ cat receiver.log
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
   grep -q "Stream: AAC, AirPlay 2 buffered" receiver.log
-  python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] && echo --pause)
+  python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] && echo --pause)
   exit 0
 fi
 if [ "$SENDER" = pyatv ]; then
