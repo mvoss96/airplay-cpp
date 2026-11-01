@@ -213,7 +213,7 @@ class Receiver {
   static constexpr size_t PACKET_BUFFER_SIZE = 1600;
   static constexpr uint32_t TIMING_SAMPLE_COUNT = 8;
   static constexpr uint8_t NO_CONNECTION = 0xff;
-  static constexpr size_t MAX_TXT_RECORDS = 18;
+  static constexpr size_t MAX_TXT_RECORDS = 20;
   static constexpr size_t MAX_AIRPLAY_TXT_RECORDS = 10;
   /// An encrypted frame: length, up to 1024 bytes and the tag
   static constexpr size_t HAP_FRAME_DATA_SIZE = 1024;

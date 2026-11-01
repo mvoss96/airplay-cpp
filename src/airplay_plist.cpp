@@ -1,5 +1,9 @@
 #include "airplay_plist.h"
 
+#include <algorithm>
+#include <cinttypes>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 namespace airplay {
@@ -206,6 +210,79 @@ bool PlistReader::string_equals(Object object, const char *text) const {
       return false;
   }
   return true;
+}
+
+static void append(char *text, size_t size, size_t &length, const char *format, ...) {
+  if (length + 1 >= size)
+    return;
+  va_list args;
+  va_start(args, format);
+  const int written = std::vsnprintf(text + length, size - length, format, args);
+  va_end(args);
+  if (written > 0)
+    length = std::min(length + static_cast<size_t>(written), size - 1);
+}
+
+void PlistReader::describe_(Object object, char *text, size_t size, size_t &length, int depth) const {
+  int64_t integer;
+  double real;
+  bool flag;
+  const uint8_t *data;
+  const char *string;
+  size_t count;
+  uint8_t type, info;
+  size_t content;
+  if (object == NONE || !this->header_(object, &type, &info, &count, &content)) {
+    append(text, size, length, "?");
+  } else if (this->get_bool(object, &flag)) {
+    append(text, size, length, flag ? "true" : "false");
+  } else if (this->get_integer(object, &integer)) {
+    append(text, size, length, "%" PRId64, integer);
+  } else if (this->get_real(object, &real)) {
+    append(text, size, length, "%g", real);
+  } else if (this->get_string(object, &string, &count)) {
+    append(text, size, length, "\"%.*s\"", static_cast<int>(count < 48 ? count : 48), string);
+  } else if (this->get_data(object, &data, &count)) {
+    append(text, size, length, "<data %u>", static_cast<unsigned>(count));
+  } else if (type == TYPE_UTF16) {
+    append(text, size, length, "<utf16 %u>", static_cast<unsigned>(count));
+  } else if ((type == TYPE_DICT || type == TYPE_ARRAY) && depth >= 6) {
+    append(text, size, length, type == TYPE_DICT ? "{...}" : "[...]");
+  } else if (type == TYPE_DICT) {
+    append(text, size, length, "{");
+    for (size_t i = 0; i < count; i++) {
+      const Object key = this->ref_(content + i * this->ref_size_);
+      const char *key_text = nullptr;
+      size_t key_length = 0;
+      append(text, size, length, i == 0 ? "" : ", ");
+      if (this->get_string(key, &key_text, &key_length)) {
+        append(text, size, length, "%.*s: ", static_cast<int>(key_length), key_text);
+      } else {
+        this->describe_(key, text, size, length, depth + 1);
+        append(text, size, length, ": ");
+      }
+      this->describe_(this->ref_(content + (count + i) * this->ref_size_), text, size, length, depth + 1);
+    }
+    append(text, size, length, "}");
+  } else if (type == TYPE_ARRAY) {
+    append(text, size, length, "[");
+    for (size_t i = 0; i < count; i++) {
+      append(text, size, length, i == 0 ? "" : ", ");
+      this->describe_(this->ref_(content + i * this->ref_size_), text, size, length, depth + 1);
+    }
+    append(text, size, length, "]");
+  } else {
+    append(text, size, length, "<type %u>", type);
+  }
+}
+
+size_t PlistReader::describe(Object object, char *text, size_t size) const {
+  if (size == 0)
+    return 0;
+  text[0] = '\0';
+  size_t length = 0;
+  this->describe_(object, text, size, length, 0);
+  return length;
 }
 
 // ===== Writer =====

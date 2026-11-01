@@ -82,9 +82,16 @@ void Receiver::init_airplay2_() {
                 id[4], id[5], id[6], id[7], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
 
   const TxtRecord records[] = {
-      {"deviceid", this->device_id_},       {"features", this->features_}, {"flags", "0x4"},
-      {"model", this->config_.model},       {"pk", this->public_key_hex_}, {"pi", this->pairing_id_},
-      {"srcvers", AIRPLAY2_SOURCE_VERSION}, {"protovers", "1.1"},          {"acl", "0"},
+      {"deviceid", this->device_id_},
+      {"features", this->features_},
+      {"flags", "0x4"},
+      {"model", this->config_.model},
+      {"pk", this->public_key_hex_},
+      {"pi", this->pairing_id_},
+      {"srcvers", AIRPLAY2_SOURCE_VERSION},
+      {"protovers", "1.1"},
+      {"acl", "0"},
+      {"vv", "2"},
   };
   static_assert(sizeof(records) / sizeof(records[0]) <= MAX_AIRPLAY_TXT_RECORDS, "Too many TXT records");
   this->airplay_txt_record_count_ = 0;
@@ -172,6 +179,30 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   } else {
     AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s)", line_length, request, content_type[0] != '\0' ? content_type : "-",
                  static_cast<unsigned>(body_length), this->connections_[connection].encrypted ? ", encrypted" : "");
+  }
+  // Headers of the requests that come before a session, and the content of property lists
+  if (std::strcmp(method, "OPTIONS") == 0 ||
+      ((std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) && !path_is(request, "/feedback"))) {
+    for (const char *line = line_end; line != nullptr && line + 2 < request + header_length;) {
+      line += 2;
+      const char *next = std::strstr(line, "\r\n");
+      if (next == nullptr || next == line)
+        break;
+      AIRPLAY_LOGD("  %.*s", static_cast<int>(std::min<ptrdiff_t>(next - line, 160)), line);
+      line = next;
+    }
+  }
+  if (plist && data != nullptr) {
+    PlistReader reader;
+    if (reader.parse(data, body_length)) {
+      // The response body buffer is free until the response is built
+      auto *text = reinterpret_cast<char *>(this->body_buffer_);
+      const size_t length = reader.describe(reader.root(), text, AIRPLAY2_BODY_SIZE);
+      for (size_t offset = 0; offset < length; offset += 150)
+        AIRPLAY_LOGD("  plist: %.*s", static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
+    } else {
+      AIRPLAY_LOGD("  not a binary property list");
+    }
   }
 
   if (std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) {

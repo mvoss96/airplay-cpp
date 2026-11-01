@@ -26,6 +26,8 @@ static constexpr uint32_t FRESH_PROGRESS_MS = 2000;
 static constexpr float AIRPLAY_VOLUME_MIN = -30.0f;
 static constexpr float AIRPLAY_VOLUME_MUTE_LIMIT = -100.0f;
 
+static constexpr char AIRPLAY2_PUBLIC_METHODS[] =
+    "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET\r\n";
 static constexpr char PUBLIC_METHODS[] =
     "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER\r\n";
 
@@ -208,6 +210,8 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
     this->init_airplay2_();
     // AirPlay 2 senders also look at the features of the RAOP service
     this->txt_records_[this->txt_record_count_++] = TxtRecord{"ft", this->features_};
+    this->txt_records_[this->txt_record_count_++] = TxtRecord{"pk", this->public_key_hex_};
+    this->txt_records_[this->txt_record_count_++] = TxtRecord{"vv", "2"};
   }
 }
 
@@ -514,7 +518,8 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     std::snprintf(extra_headers, sizeof(extra_headers), "WWW-Authenticate: Digest realm=\"raop\", nonce=\"%s\"\r\n",
                   c.nonce);
   } else if (std::strcmp(method, "OPTIONS") == 0) {
-    std::snprintf(extra_headers, sizeof(extra_headers), "%s", PUBLIC_METHODS);
+    std::snprintf(extra_headers, sizeof(extra_headers), "%s",
+                  this->airplay2_ ? AIRPLAY2_PUBLIC_METHODS : PUBLIC_METHODS);
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
     this->take_session_(connection, request, header_length);
     if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {

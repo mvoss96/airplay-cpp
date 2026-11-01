@@ -32,12 +32,16 @@ class PlistReader {
   bool get_string(Object object, const char **text, size_t *length) const;
   /// Compares an ASCII or UTF-16 string with ASCII text
   bool string_equals(Object object, const char *text) const;
+  /// @brief Writes a short text form of an object for logs, e.g. {type: "x", params: [1, <data 32>]}.
+  /// @return the length of the text, which is cut off to fit `size` (null terminated)
+  size_t describe(Object object, char *text, size_t size) const;
 
  private:
   /// Type nibble, length and where the content starts
   bool header_(Object object, uint8_t *type, uint8_t *info, size_t *length, size_t *content) const;
   uint64_t read_uint_(size_t offset, size_t size) const;
   Object ref_(size_t offset) const;
+  void describe_(Object object, char *text, size_t size, size_t &length, int depth) const;
 
   const uint8_t *data_{nullptr};
   size_t length_{0};
