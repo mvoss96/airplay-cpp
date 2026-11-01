@@ -220,8 +220,16 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "\n");
   }
 
-  while (g_running)
+  // For tests: moves the AirPlay 2 sender's volume slider once its event connection is up
+  const char *sender_volume = std::getenv("AIRPLAY_TEST_SENDER_VOLUME");
+  bool sender_volume_sent = sender_volume == nullptr;
+  while (g_running) {
     runner.run_once(100);
+    if (!sender_volume_sent && receiver.request_sender_volume(std::strtof(sender_volume, nullptr))) {
+      sender_volume_sent = true;
+      std::fprintf(stderr, "Sender volume requested\n");
+    }
+  }
 
   runner.end();
   output_thread.join();

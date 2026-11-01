@@ -374,6 +374,13 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
     this->event_channel_pending_ = false;
     c.event_channel = true;
+    // Nothing is read on it, but the receiver may send requests to the sender, encrypted with pair-setup's key
+    const uint8_t source = this->event_channel_source_;
+    if (source < MAX_CONNECTIONS && this->connections_[source].encrypted) {
+      std::memcpy(c.write_key, this->connections_[source].event_key, sizeof(c.write_key));
+      c.write_counter = 0;
+      c.encrypted = true;
+    }
     AIRPLAY_LOGD("Event connection");
   } else if (this->data_channel_pending_ && this->session_owner_ != NO_CONNECTION &&
              this->connections_[this->session_owner_].peer.address == peer.address) {
@@ -1667,6 +1674,11 @@ void Receiver::poll(int64_t now_us) {
       this->stats_.longest_gap_ms = std::max(this->stats_.longest_gap_ms, now_ms - this->last_poll_ms_);
     this->last_poll_ms_ = now_ms;
   }
+
+  this->update_event_channel_ready_();
+  const float sender_volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
+  if (sender_volume >= 0.0f)
+    this->send_sender_volume_(sender_volume);
 
   // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again
   if (this->artwork_paused_ != NO_CONNECTION && this->listener_->artwork_room() >= ARTWORK_RESERVE + RTSP_BUFFER_SIZE)

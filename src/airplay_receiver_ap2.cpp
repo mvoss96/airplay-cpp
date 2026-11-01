@@ -37,6 +37,9 @@ static constexpr char TRANSIENT_PIN[] = "3939";
 static constexpr char CONTROL_SALT[] = "Control-Salt";
 static constexpr char CONTROL_SENDER_WRITE_INFO[] = "Control-Write-Encryption-Key";
 static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key";
+// The receiver writes on the event connection with this key, though the sender opened it
+static constexpr char EVENTS_SALT[] = "Events-Salt";
+static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Key";
 
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
@@ -352,6 +355,7 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       const uint8_t *secret = this->srp_->session_key();
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, SHA512_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, SHA512_SIZE, c.write_key);
+      hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, SHA512_SIZE, c.event_key);
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
     } else {
@@ -394,6 +398,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       AIRPLAY_LOGD("Remote control session");
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
+      this->event_channel_source_ = connection;
       writer.begin_dict(1);
       writer.key("eventPort");
       writer.integer(c.local.port);
@@ -421,6 +426,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       c.pending_timing_port = static_cast<uint16_t>(timing_port);
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
+      this->event_channel_source_ = connection;
       writer.begin_dict(2);
       writer.key("eventPort");
       writer.integer(c.local.port);
@@ -446,6 +452,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       return;
     this->event_channel_pending_ = true;
     this->event_channel_address_ = c.peer.address;
+    this->event_channel_source_ = connection;
     // The event connection uses the RTSP port; nothing is read from it
     writer.begin_dict(2);
     writer.key("eventPort");
@@ -587,6 +594,63 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
   response.status_text = "OK";
   response.content_type = CONTENT_TYPE_PLIST;
   response.body = this->body_buffer_;
+}
+
+bool Receiver::request_sender_volume(float volume) {
+  if (!this->event_channel_ready_.load(std::memory_order_acquire))
+    return false;
+  this->sender_volume_request_.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_release);
+  return true;
+}
+
+void Receiver::update_event_channel_ready_() {
+  bool ready = false;
+  if (this->session_owner_ != NO_CONNECTION) {
+    const uint32_t address = this->connections_[this->session_owner_].peer.address;
+    for (const Connection &c : this->connections_)
+      ready |= c.open && c.event_channel && c.encrypted && c.peer.address == address;
+  }
+  this->event_channel_ready_.store(ready, std::memory_order_release);
+}
+
+void Receiver::send_sender_volume_(float volume) {
+  if (this->session_owner_ == NO_CONNECTION)
+    return;
+  const uint32_t address = this->connections_[this->session_owner_].peer.address;
+  for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
+    const Connection &c = this->connections_[i];
+    if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
+      continue;
+    // A media remote command, as a HomePod sends when its volume is changed on the device. The volume is given at
+    // the top level and in the parameters; senders read either.
+    uint8_t body[192];
+    PlistWriter writer(body, sizeof(body));
+    writer.begin_dict(4);
+    writer.key("type");
+    writer.string("sendMediaRemoteCommand");
+    writer.key("value");
+    writer.string("dvlc");
+    writer.key("volume");
+    writer.real(volume);
+    writer.key("params");
+    writer.begin_dict(1);
+    writer.key("volume");
+    writer.real(volume);
+    const size_t body_length = writer.finish();
+    if (body_length == 0)
+      return;
+    char message[512];
+    const int header_length =
+        std::snprintf(message, sizeof(message),
+                      "POST /command RTSP/1.0\r\nCSeq: %" PRIu32 "\r\nContent-Type: %s\r\nContent-Length: %u\r\n\r\n",
+                      ++this->event_cseq_, CONTENT_TYPE_PLIST, static_cast<unsigned>(body_length));
+    if (header_length <= 0 || static_cast<size_t>(header_length) + body_length > sizeof(message))
+      return;
+    std::memcpy(message + header_length, body, body_length);
+    AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
+    this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
+    return;
+  }
 }
 
 void Receiver::build_info_(Response &response) {

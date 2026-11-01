@@ -169,6 +169,10 @@ class Receiver {
   void request_output_restart() { this->output_restart_requested_.store(true, std::memory_order_release); }
   /// @brief Ends the session at the next poll(), e.g. because another source takes over the speaker.
   void request_disconnect() { this->disconnect_requested_.store(true, std::memory_order_release); }
+  /// @brief Moves the AirPlay 2 sender's volume slider, e.g. after the volume was changed on the device.
+  /// @param volume 0 to 1, as Listener::on_volume() reports it.
+  /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
+  bool request_sender_volume(float volume);
 
   // ===== mDNS =====
   /// @brief Instance name of the _raop._tcp service: "<MAC>@<name>".
@@ -209,6 +213,7 @@ class Receiver {
     uint16_t pending_timing_port{0};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
+    uint8_t event_key[CHACHA_KEY_SIZE];  // From pair-setup, for writing on the event connection that follows
     uint64_t read_counter{0};
     uint64_t write_counter{0};
     uint8_t *frame{nullptr};  // An incoming encrypted frame, until it is complete
@@ -309,6 +314,8 @@ class Receiver {
   void handle_rate_anchor_(const uint8_t *body, size_t length);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
+  void update_event_channel_ready_();
+  void send_sender_volume_(float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
   void forget_timeline_() {
     this->anchor_valid_ = false;
@@ -394,6 +401,8 @@ class Receiver {
   bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
   bool event_channel_pending_{false};  // A sender is about to open its event connection, from this address:
   uint32_t event_channel_address_{0};
+  uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
+  uint32_t event_cseq_{0};
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
@@ -419,6 +428,8 @@ class Receiver {
   std::atomic<uint32_t> played_timestamp_{0};  // Low 32 bits of the time in microseconds; 0 = none
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
+  std::atomic<bool> event_channel_ready_{false};     // The playing sender has an event connection
+  std::atomic<float> sender_volume_request_{-1.0f};  // For the sender's slider; below 0 when none
 
   // Buffers
   char *rtsp_buffers_{nullptr};

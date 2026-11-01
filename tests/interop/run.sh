@@ -11,6 +11,7 @@
 #   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero or
 #   earlier leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
 #   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
+#   AIRPLAY_TEST_SENDER_VOLUME=<0 to 1> makes the receiver send that volume to the sender on the event connection.
 # buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder
 #   (the POSIX example with FAAD2). Its output is compared with ffmpeg's decoding of the same file. PAUSE=1 pauses
 #   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
@@ -109,6 +110,9 @@ if [ "$SENDER" = pyatv ]; then
   if [ "$AIRPLAY2" = 1 ] && [ -z "$PASSWORD" ]; then  # Not offered with a password
     grep -q "Paired" receiver.log
     grep -q "Stream: .*, AirPlay 2" receiver.log
+    if [ -n "$AIRPLAY_TEST_SENDER_VOLUME" ]; then
+      grep -q "sent to the sender" receiver.log  # On the event connection
+    fi
   fi
   if [ "$MODE" = posix ]; then
     cmp artwork.bin cover.bin  # Cover art arrived complete

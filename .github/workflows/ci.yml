@@ -184,7 +184,7 @@ jobs:
           case "${{ matrix.network }}" in
             # As iOS sends it: RECORD before the stream SETUP, which has no key but uses that of a buffered
             # stream offered before
-            *record-first) export RECORD_FIRST=1 AUDIO_KEY=earlier ;;
+            *record-first) export RECORD_FIRST=1 AUDIO_KEY=earlier AIRPLAY_TEST_SENDER_VOLUME=0.4 ;;
           esac
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;
