@@ -17,12 +17,11 @@
 namespace airplay {
 
 // Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), audio formats (18-20, 22),
-// unified advertiser info (30), unified media control (38), the bits 44-47 that current receivers set, and
-// CoreUtils pairing and encryption (48). Buffered audio (40) and PTP timing (41) are not offered yet, so senders
-// stream realtime audio with NTP timing.
-static constexpr uint32_t FEATURES_LOW = 0x405C0A00;
-static constexpr uint32_t FEATURES_HIGH = 0x1C040;
-static constexpr uint64_t FEATURES = (static_cast<uint64_t>(FEATURES_HIGH) << 32) | FEATURES_LOW;
+// unified advertiser info (30), control channel encryption (38), NTP timing (45), HomeKit pairing and peer
+// management (46, 47) and transient pairing (48). Without buffered audio (40) and PTP timing (41) senders stream
+// realtime audio; the experiments noted in openairplay/airplay2-receiver found that bit 45 makes iOS do that with
+// NTP timing.
+static constexpr uint64_t DEFAULT_FEATURES = 0x1E040405C0A00ULL;
 /// Status flags: an audio receiver
 static constexpr int64_t STATUS_FLAGS = 0x4;
 
@@ -65,7 +64,10 @@ void Receiver::init_airplay2_() {
   const uint8_t *mac = this->config_.mac;
   std::snprintf(this->device_id_, sizeof(this->device_id_), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2],
                 mac[3], mac[4], mac[5]);
-  std::snprintf(this->features_, sizeof(this->features_), "0x%" PRIX32 ",0x%" PRIX32, FEATURES_LOW, FEATURES_HIGH);
+  this->airplay2_features_ = this->config_.airplay2_features != 0 ? this->config_.airplay2_features : DEFAULT_FEATURES;
+  // Lower 32 bits first
+  std::snprintf(this->features_, sizeof(this->features_), "0x%" PRIX32 ",0x%" PRIX32,
+                static_cast<uint32_t>(this->airplay2_features_), static_cast<uint32_t>(this->airplay2_features_ >> 32));
 
   // Key and pairing id stay the same across restarts. Senders only show the key; transient pairing does not use it.
   uint8_t digest[SHA512_SIZE];
@@ -419,7 +421,7 @@ void Receiver::build_info_(Response &response) {
   writer.key("macAddress");
   writer.string(this->device_id_);
   writer.key("features");
-  writer.integer(static_cast<int64_t>(FEATURES));
+  writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
   writer.integer(STATUS_FLAGS);
   writer.key("model");

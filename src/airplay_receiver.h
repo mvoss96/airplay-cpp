@@ -85,6 +85,8 @@ struct ReceiverConfig {
   bool airplay2{false};
   /// Fills a buffer with cryptographically secure random bytes; for AirPlay 2 pairing
   void (*random)(uint8_t *buffer, size_t length){nullptr};
+  /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
+  uint64_t airplay2_features{0};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
   void (*deallocate)(void *pointer){nullptr};
@@ -319,6 +321,7 @@ class Receiver {
   size_t airplay_txt_record_count_{0};
   char device_id_[18]{};  // MAC as "AA:BB:CC:DD:EE:FF"
   char features_[24]{};
+  uint64_t airplay2_features_{0};
   char public_key_hex_[2 * CHACHA_KEY_SIZE + 1]{};
   char pairing_id_[37]{};
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
