@@ -309,6 +309,11 @@ class Receiver {
   void handle_rate_anchor_(const uint8_t *body, size_t length);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
+  /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
+  void forget_timeline_() {
+    this->anchor_valid_ = false;
+    this->sender_latency_frames_ = 0;
+  }
   void update_receive_pause_();
   /// Takes a packet that did not decrypt with the zero key as unencrypted audio from now on
   size_t detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output);

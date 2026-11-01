@@ -492,6 +492,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       }
       this->stop_audio_();
       this->stop_buffered_audio_();
+      this->forget_timeline_();
       if (!this->config_.aac_decoder->begin()) {
         AIRPLAY_LOGW("Failed to start the AAC decoder");
         return;
@@ -529,6 +530,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       }
       this->stop_audio_();
       this->stop_buffered_audio_();
+      this->forget_timeline_();
       this->codec_ = Codec::NONE;
       if (compression == COMPRESSION_ALAC) {
         ALACConfig alac;
@@ -808,7 +810,8 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
   int64_t seconds = 0;
   int64_t fraction = 0;
   int64_t rtp = 0;
-  if (reader.get_integer(reader.get(root, "networkTimeSecs"), &seconds) &&
+  // Realtime streams take their timeline from sync packets, which also carry the sender's latency
+  if (this->buffered_stream_ && reader.get_integer(reader.get(root, "networkTimeSecs"), &seconds) &&
       reader.get_integer(reader.get(root, "rtpTime"), &rtp)) {
     reader.get_integer(reader.get(root, "networkTimeFrac"), &fraction);
     // The fraction is of a second in 64 bits
