@@ -40,6 +40,7 @@ static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key"
 // The receiver writes on the event connection with this key, though the sender opened it
 static constexpr char EVENTS_SALT[] = "Events-Salt";
 static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Key";
+static constexpr char EVENTS_SENDER_WRITE_INFO[] = "Events-Read-Encryption-Key";
 
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
@@ -356,6 +357,7 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, SHA512_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, SHA512_SIZE, c.write_key);
       hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, SHA512_SIZE, c.event_key);
+      std::memcpy(c.pair_secret, secret, sizeof(c.pair_secret));
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
     } else {
@@ -484,6 +486,8 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     if (key != nullptr && key_length == CHACHA_KEY_SIZE) {
       std::memcpy(this->session_stream_key_, key, sizeof(this->session_stream_key_));
       this->have_session_stream_key_ = true;
+      std::memcpy(this->remembered_stream_key_, key, sizeof(this->remembered_stream_key_));
+      this->remembered_key_address_ = c.peer.address;
     }
     if (type == STREAM_TYPE_BUFFERED) {
       int64_t audio_format = 0;
@@ -551,19 +555,18 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
         AIRPLAY_LOGW("Unsupported audio format %" PRId64, compression);
         return;
       }
-      // iOS leaves the key out of realtime streams. Whether their audio is then encrypted with a zero key (as
-      // openairplay/airplay2-receiver assumes) or not at all is told by the first packet.
+      // iOS leaves the key out of realtime streams. Which key it uses then (or none) is told by the first packets.
       if (key != nullptr) {
         std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
         this->audio_encryption_ = AudioEncryption::KEY;
       } else {
-        // Tried in this order: the key of an earlier stream of the session, a zero key, no encryption
-        if (this->have_session_stream_key_) {
-          std::memcpy(this->audio_key_, this->session_stream_key_, sizeof(this->audio_key_));
-        } else {
-          std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
-        }
+        this->prepare_key_candidates_(c);
         this->audio_encryption_ = AudioEncryption::UNKNOWN;
+        if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+          char text[400];
+          reader.describe(stream, text, sizeof(text));
+          AIRPLAY_LOGD("Stream without a key: %s", text);
+        }
       }
       this->airplay2_audio_ = true;
       this->encrypted_ = false;
@@ -716,40 +719,88 @@ void Receiver::build_info_(Response &response) {
 
 // ===== Audio =====
 
+void Receiver::add_key_candidate_(const uint8_t *key, const char *name) {
+  if (this->key_candidate_count_ >= MAX_KEY_CANDIDATES)
+    return;
+  for (uint8_t i = 0; i < this->key_candidate_count_; i++) {
+    if (std::memcmp(this->key_candidates_[i].key, key, CHACHA_KEY_SIZE) == 0)
+      return;
+  }
+  KeyCandidate &candidate = this->key_candidates_[this->key_candidate_count_++];
+  std::memcpy(candidate.key, key, CHACHA_KEY_SIZE);
+  candidate.name = name;
+}
+
+void Receiver::prepare_key_candidates_(const Connection &c) {
+  // The most likely first: iOS uses the key of an earlier stream of the session (also one this receiver turned
+  // down). The others are guesses for senders that start a session with a realtime stream.
+  this->key_candidate_count_ = 0;
+  this->undecryptable_packets_ = 0;
+  if (this->have_session_stream_key_)
+    this->add_key_candidate_(this->session_stream_key_, "the key of an earlier stream");
+  if (this->remembered_key_address_ == c.peer.address)
+    this->add_key_candidate_(this->remembered_stream_key_, "the key of the sender's previous session");
+  const uint8_t zero[CHACHA_KEY_SIZE] = {};
+  this->add_key_candidate_(zero, "a zero key");
+  if (c.encrypted) {
+    uint8_t derived[CHACHA_KEY_SIZE];
+    this->add_key_candidate_(c.pair_secret, "the pairing secret");
+    this->add_key_candidate_(c.event_key, "the event write key");
+    hkdf_sha512_key(EVENTS_SALT, EVENTS_SENDER_WRITE_INFO, c.pair_secret, SHA512_SIZE, derived);
+    this->add_key_candidate_(derived, "the event read key");
+    this->add_key_candidate_(c.read_key, "the control write key");
+    this->add_key_candidate_(c.write_key, "the control read key");
+  }
+}
+
 size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length,
                                          uint8_t *output) {
   if (this->audio_encryption_ == AudioEncryption::NONE) {
     std::memcpy(output, payload, length);
     return length;
   }
+  if (this->audio_encryption_ == AudioEncryption::FAILED)
+    return 0;
   if (length <= POLY1305_TAG_SIZE + AUDIO_NONCE_SIZE)
     return this->audio_encryption_ == AudioEncryption::UNKNOWN ? this->detect_plain_audio_(payload, length, output) : 0;
   const size_t audio_length = length - POLY1305_TAG_SIZE - AUDIO_NONCE_SIZE;
   uint8_t nonce[CHACHA_NONCE_SIZE] = {};
   std::memcpy(nonce + 4, payload + length - AUDIO_NONCE_SIZE, AUDIO_NONCE_SIZE);
   // The timestamp and SSRC of the RTP header are authenticated
-  if (chacha20_poly1305_decrypt(this->audio_key_, nonce, header + 4, 8, payload, audio_length, payload + audio_length,
-                                output)) {
-    if (this->audio_encryption_ == AudioEncryption::UNKNOWN) {
-      const uint8_t zero[CHACHA_KEY_SIZE] = {};
-      AIRPLAY_LOGI("Audio encrypted with %s", std::memcmp(this->audio_key_, zero, sizeof(zero)) == 0
-                                                  ? "a zero key"
-                                                  : "the key of an earlier stream");
-      this->audio_encryption_ = AudioEncryption::KEY;
-    }
-    return audio_length;
+  if (this->audio_encryption_ == AudioEncryption::KEY) {
+    return chacha20_poly1305_decrypt(this->audio_key_, nonce, header + 4, 8, payload, audio_length,
+                                     payload + audio_length, output)
+               ? audio_length
+               : 0;
   }
-  if (this->audio_encryption_ != AudioEncryption::UNKNOWN)
-    return 0;
-  const uint8_t zero[CHACHA_KEY_SIZE] = {};
-  if (std::memcmp(this->audio_key_, zero, sizeof(zero)) != 0) {
-    std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
-    return this->decrypt_airplay2_audio_(header, payload, length, output);
+  for (uint8_t i = 0; i < this->key_candidate_count_; i++) {
+    const KeyCandidate &candidate = this->key_candidates_[i];
+    if (chacha20_poly1305_decrypt(candidate.key, nonce, header + 4, 8, payload, audio_length, payload + audio_length,
+                                  output)) {
+      AIRPLAY_LOGI("Audio encrypted with %s", candidate.name);
+      std::memcpy(this->audio_key_, candidate.key, sizeof(this->audio_key_));
+      this->audio_encryption_ = AudioEncryption::KEY;
+      return audio_length;
+    }
   }
   return this->detect_plain_audio_(payload, length, output);
 }
 
 size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output) {
+  // An ALAC frame starts with the type of its first element: a single (0) or a channel pair (1). Encrypted data
+  // passes that by chance one time in four, so a few packets must agree.
+  static constexpr uint8_t PACKETS_TO_DECIDE = 4;
+  const bool plausible = this->codec_ != Codec::ALAC || (payload[0] >> 5) <= 1;
+  if (!plausible) {
+    if (++this->undecryptable_packets_ >= PACKETS_TO_DECIDE) {
+      AIRPLAY_LOGW("The audio cannot be decrypted: the sender's key is unknown (starts with %02x %02x %02x %02x, "
+                   "%u bytes)",
+                   payload[0], length > 1 ? payload[1] : 0, length > 2 ? payload[2] : 0, length > 3 ? payload[3] : 0,
+                   static_cast<unsigned>(length));
+      this->audio_encryption_ = AudioEncryption::FAILED;
+    }
+    return 0;
+  }
   AIRPLAY_LOGI("Audio not encrypted (starts with %02x %02x %02x %02x, %u bytes)", payload[0],
                length > 1 ? payload[1] : 0, length > 2 ? payload[2] : 0, length > 3 ? payload[3] : 0,
                static_cast<unsigned>(length));

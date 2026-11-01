@@ -226,6 +226,7 @@ class Receiver {
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint8_t event_key[CHACHA_KEY_SIZE];  // From pair-setup, for writing on the event connection that follows
+    uint8_t pair_secret[SHA512_SIZE];    // Pair-setup's shared secret, from which stream keys may be derived
     uint64_t read_counter{0};
     uint64_t write_counter{0};
     uint8_t *frame{nullptr};  // An incoming encrypted frame, until it is complete
@@ -328,6 +329,8 @@ class Receiver {
   void stop_buffered_audio_();
   void update_event_channel_ready_();
   void send_sender_requests_();
+  void add_key_candidate_(const uint8_t *key, const char *name);
+  void prepare_key_candidates_(const Connection &c);
   /// Sends a media remote command on the playing sender's event connection; the volume only if not below 0
   void send_media_remote_command_(const char *value, float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
@@ -342,8 +345,15 @@ class Receiver {
   /// How the audio of an AirPlay 2 stream is encrypted
   enum class AudioEncryption : uint8_t {
     KEY,      // With audio_key_
-    UNKNOWN,  // No key given: a zero key or none, told by the first packet
+    UNKNOWN,  // No key given: one of key_candidates_ or none, told by the first packets
     NONE,
+    FAILED,  // No key fits: the audio cannot be decrypted
+  };
+  /// Keys tried for a realtime stream that came without one
+  static constexpr size_t MAX_KEY_CANDIDATES = 8;
+  struct KeyCandidate {
+    uint8_t key[CHACHA_KEY_SIZE];
+    const char *name;
   };
   void end_session_();
   void set_session_state_(SessionState state);
@@ -435,6 +445,12 @@ class Receiver {
   bool flush_active_{false};
   uint32_t buffered_dropped_{0};
   uint8_t session_stream_key_[CHACHA_KEY_SIZE]{};  // The last key a stream setup of the session carried
+  // The last key any stream setup carried, and the sender's address; kept across sessions
+  uint8_t remembered_stream_key_[CHACHA_KEY_SIZE]{};
+  uint32_t remembered_key_address_{0};
+  KeyCandidate key_candidates_[MAX_KEY_CANDIDATES]{};
+  uint8_t key_candidate_count_{0};
+  uint8_t undecryptable_packets_{0};
   bool have_session_stream_key_{false};
 
   // Cross-thread requests and reports
