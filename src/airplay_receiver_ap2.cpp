@@ -8,7 +8,9 @@
 #include "airplay_tlv8.h"
 #include "airplay_util.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
@@ -162,6 +164,15 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   get_header(request, header_length, "Content-Type", content_type, sizeof(content_type));
   const bool plist = equals_ignore_case(content_type, CONTENT_TYPE_PLIST, sizeof(CONTENT_TYPE_PLIST) - 1);
   const auto *data = reinterpret_cast<const uint8_t *>(body);
+  // AirPlay 2 support is new: show what senders ask for (the feedback every 2 seconds only at verbose level)
+  const char *line_end = std::strstr(request, "\r\n");
+  const int line_length = line_end != nullptr ? static_cast<int>(std::min<ptrdiff_t>(line_end - request, 96)) : 0;
+  if (path_is(request, "/feedback")) {
+    AIRPLAY_LOGV("Request: %.*s", line_length, request);
+  } else {
+    AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s)", line_length, request, content_type[0] != '\0' ? content_type : "-",
+                 static_cast<unsigned>(body_length), this->connections_[connection].encrypted ? ", encrypted" : "");
+  }
 
   if (std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) {
     if (path_is(request, "/info")) {
@@ -170,6 +181,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       this->handle_pair_setup_(connection, data, body_length, response);
     } else if (path_is(request, "/pair-verify")) {
       // Only transient pairing is offered, which needs no verification
+      AIRPLAY_LOGW("pair-verify is not supported, only transient pair-setup");
       Tlv8Writer writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
       writer.add_byte(TLV_STATE, 2);
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);

@@ -631,6 +631,8 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
       (body_size > 0 && !this->send_(connection, body_data, body_size))) {
     return false;
   }
+  if (this->airplay2_)
+    AIRPLAY_LOGD("Response: %d %s (%u bytes)", status, status_text, static_cast<unsigned>(body_size));
   // After pair-setup everything that follows is encrypted, starting with the next request
   if (c.encrypt_after_response) {
     c.encrypt_after_response = false;
