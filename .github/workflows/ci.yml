@@ -129,7 +129,7 @@ jobs:
     # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
     # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
     # Digest authentication. The airplay2 runs make pyatv use AirPlay 2 (transient pairing, encrypted RTSP and
-    # ChaCha20-Poly1305 audio). pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
+    # ChaCha20-Poly1305 audio), one of them in the order iOS uses. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -143,6 +143,8 @@ jobs:
             network: airplay2
           - sender: pyatv
             network: airplay2-lossy
+          - sender: pyatv
+            network: airplay2-record-first
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -165,6 +167,9 @@ jobs:
         run: |
           case "${{ matrix.network }}" in
             airplay2*) export AIRPLAY2=1 ;;
+          esac
+          case "${{ matrix.network }}" in
+            *record-first) export RECORD_FIRST=1 ;;  # RECORD before the stream SETUP, as iOS sends it
           esac
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;

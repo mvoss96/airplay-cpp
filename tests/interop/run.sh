@@ -8,6 +8,7 @@
 # pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
 #   the receiver asks for it and pyatv logs in. With AIRPLAY2=1 pyatv uses AirPlay 2: transient pairing, an
 #   encrypted RTSP connection and ChaCha20-Poly1305 encrypted audio.
+#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -51,7 +52,7 @@ if [ "$SENDER" = pyatv ]; then
   if [ "$AIRPLAY2" = 1 ]; then
     TXT="$TXT $(sed -n 's/.*_airplay._tcp.* \(features=[^ ]*\).*/\1/p' receiver.log | sed 's/features=/ft=/')"
   fi
-  AIRPLAY_PASSWORD=$PASSWORD python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
+  AIRPLAY_PASSWORD=$PASSWORD RECORD_FIRST=$RECORD_FIRST python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
   sleep 2
 else
   export XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/config"

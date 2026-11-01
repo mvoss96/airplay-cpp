@@ -182,8 +182,8 @@ bool Receiver::send_(uint8_t connection, const uint8_t *data, size_t length) {
 // ===== Requests =====
 
 bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, const char *request,
-                                        size_t header_length, const char *body, size_t body_length,
-                                        Response &response) {
+                                        size_t header_length, const char *body, size_t body_length, Response &response,
+                                        int64_t now_us) {
   char content_type[48] = "";
   get_header(request, header_length, "Content-Type", content_type, sizeof(content_type));
   const bool plist = equals_ignore_case(content_type, CONTENT_TYPE_PLIST, sizeof(CONTENT_TYPE_PLIST) - 1);
@@ -254,7 +254,8 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     return true;
   }
   if (std::strcmp(method, "SETUP") == 0 && plist) {
-    this->handle_airplay2_setup_(connection, request, header_length, data, data != nullptr ? body_length : 0, response);
+    this->handle_airplay2_setup_(connection, request, header_length, data, data != nullptr ? body_length : 0, response,
+                                 now_us);
     return true;
   }
   if (std::strcmp(method, "TEARDOWN") == 0 && plist && data != nullptr && connection == this->session_owner_) {
@@ -331,7 +332,7 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
 }
 
 void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length,
-                                      const uint8_t *body, size_t length, Response &response) {
+                                      const uint8_t *body, size_t length, Response &response, int64_t now_us) {
   Connection &c = this->connections_[connection];
   response.status = 455;
   response.status_text = "Method Not Valid in This State";
@@ -359,6 +360,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     this->take_session_(connection, request, header_length);
+    this->airplay2_recording_ = false;
     this->codec_ = Codec::NONE;
     this->encrypted_ = false;
     this->airplay2_audio_ = false;
@@ -417,6 +419,10 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     this->encrypted_ = false;
     this->client_control_.port = static_cast<uint16_t>(control_port);
     AIRPLAY_LOGD("Stream: %s, AirPlay 2", this->codec_ == Codec::ALAC ? "ALAC" : "PCM");
+    if (this->airplay2_recording_ && this->start_audio_(now_us)) {
+      AIRPLAY_LOGI("Playback started");
+      this->set_session_state_(SessionState::PLAYING);
+    }
 
     writer.begin_dict(1);
     writer.key("streams");

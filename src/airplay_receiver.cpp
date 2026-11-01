@@ -507,7 +507,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   bool airplay2 = false;
 
   if (this->airplay2_ && this->handle_airplay2_request_(connection, method, request, header_length, body, body_length,
-                                                        airplay2_response)) {
+                                                        airplay2_response, now_us)) {
     airplay2 = true;
     status = airplay2_response.status;
     status_text = airplay2_response.status_text;
@@ -539,10 +539,17 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     this->have_initial_seq_ = get_header(request, header_length, "RTP-Info", rtp_info, sizeof(rtp_info)) &&
                               get_numeric_parameter(rtp_info, "seq", &seq);
     this->initial_seq_ = static_cast<uint16_t>(seq);
+    const bool airplay2_session = is_owner && c.encrypted;
+    if (airplay2_session)
+      this->airplay2_recording_ = true;
     if (is_owner && this->start_audio_(now_us)) {
       AIRPLAY_LOGI("Playback started");
       this->set_session_state_(SessionState::PLAYING);
       // The same value as shairport-sync and the AirPort Express
+      std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
+    } else if (airplay2_session && this->codec_ == Codec::NONE && this->udp_open_) {
+      // AirPlay 2 senders may send RECORD before they set up the audio stream
+      AIRPLAY_LOGD("Waiting for the audio stream");
       std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
     } else {
       status = 455;
@@ -1039,6 +1046,7 @@ void Receiver::end_session_() {
   this->codec_ = Codec::NONE;
   this->airplay2_audio_ = false;
   this->event_channel_pending_ = false;
+  this->airplay2_recording_ = false;
   // The sender's event connection goes with its session
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];

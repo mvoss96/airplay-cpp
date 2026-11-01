@@ -255,10 +255,10 @@ class Receiver {
   void init_airplay2_();
   /// @return true if the request is an AirPlay 2 request and `response` is filled in
   bool handle_airplay2_request_(uint8_t connection, const char *method, const char *request, size_t header_length,
-                                const char *body, size_t body_length, Response &response);
+                                const char *body, size_t body_length, Response &response, int64_t now_us);
   void handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
-                              size_t length, Response &response);
+                              size_t length, Response &response, int64_t now_us);
   void build_info_(Response &response);
   /// Decrypts an encrypted connection's frames and passes the RTSP data on
   void receive_encrypted_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
@@ -328,12 +328,14 @@ class Receiver {
   char features_base64_[16]{};    // "fex": the feature bits as little endian bytes
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
   SrpServer *srp_{nullptr};
-  uint8_t pairing_connection_{0xff};   // Connection between pair-setup M1 and M3
-  uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
-  uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
-  uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response
-  bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
-  bool event_channel_pending_{false};  // The session owner is about to open its event connection
+  uint8_t pairing_connection_{0xff};  // Connection between pair-setup M1 and M3
+  uint8_t *frames_{nullptr};          // Per connection: an incoming encrypted frame
+  uint8_t *send_buffer_{nullptr};     // An outgoing encrypted frame
+  uint8_t *body_buffer_{nullptr};     // Body of an AirPlay 2 response
+  bool airplay2_audio_{false};        // The session's audio is encrypted with audio_key_
+  bool event_channel_pending_{false};
+  bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
+                                    // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
 
   // Cross-thread requests and reports
