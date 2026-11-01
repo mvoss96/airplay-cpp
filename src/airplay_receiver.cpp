@@ -369,8 +369,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.frame_length = 0;
   // An AirPlay 2 sender connects its event connection right after setting up its session
-  if (this->event_channel_pending_ && this->session_owner_ != NO_CONNECTION &&
-      this->connections_[this->session_owner_].peer.address == peer.address) {
+  if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
     this->event_channel_pending_ = false;
     c.event_channel = true;
     AIRPLAY_LOGD("Event connection");

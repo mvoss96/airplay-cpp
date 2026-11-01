@@ -3,7 +3,9 @@
 Pairing and the encrypted RTSP connection come from pyatv; the buffered stream (stream type 103), which pyatv
 cannot send, is done here.
 
-Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause]
+Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-control]
+
+--remote-control opens a second session during playback, only to control it, as iOS does; playback goes on.
 """
 import asyncio
 import os
@@ -64,6 +66,7 @@ def network_time(seconds_from_now):
 async def main():
     host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     pause = "--pause" in sys.argv
+    remote_control = "--remote-control" in sys.argv
     frames = read_adts(path)
     loop = asyncio.get_running_loop()
 
@@ -118,6 +121,13 @@ async def main():
     for i in range(20, len(frames)):
         if i == 100:
             await send(i, b"")  # As iOS sends after a flush: no audio, to be skipped
+        if i == 120 and remote_control:
+            control = await http_connect(host, port)
+            control_rtsp = RtspSession(control)
+            await verify_connection(TRANSIENT_CREDENTIALS, control)
+            reply = await exchange(control_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
+            assert "eventPort" in reply
+            await asyncio.open_connection(host, reply["eventPort"])
         await send(i)
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE
     if pause:

@@ -186,7 +186,7 @@ jobs:
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;
           esac
           if [ "${{ matrix.network }}" = pause ]; then
-            export PAUSE=1
+            export PAUSE=1 REMOTE_CONTROL=1
           fi
           if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test

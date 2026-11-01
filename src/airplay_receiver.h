@@ -361,12 +361,13 @@ class Receiver {
   char features_base64_[16]{};    // "fex": the feature bits as little endian bytes
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
   SrpServer *srp_{nullptr};
-  uint8_t pairing_connection_{0xff};  // Connection between pair-setup M1 and M3
-  uint8_t *frames_{nullptr};          // Per connection: an incoming encrypted frame
-  uint8_t *send_buffer_{nullptr};     // An outgoing encrypted frame
-  uint8_t *body_buffer_{nullptr};     // Body of an AirPlay 2 response
-  bool airplay2_audio_{false};        // The session's audio is encrypted with audio_key_
-  bool event_channel_pending_{false};
+  uint8_t pairing_connection_{0xff};   // Connection between pair-setup M1 and M3
+  uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
+  uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
+  uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response
+  bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
+  bool event_channel_pending_{false};  // A sender is about to open its event connection, from this address:
+  uint32_t event_channel_address_{0};
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};

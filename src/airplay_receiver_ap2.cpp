@@ -385,6 +385,25 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
   if (streams == PlistReader::NONE) {
     // The session: the clock exchange and the event connection
     const PlistReader::Object timing_protocol = reader.get(root, "timingProtocol");
+    bool remote_control_only = false;
+    reader.get_bool(reader.get(root, "isRemoteControlOnly"), &remote_control_only);
+    if (remote_control_only || reader.string_equals(timing_protocol, "None")) {
+      // iOS opens extra sessions only to control playback; they must not take over the speaker
+      AIRPLAY_LOGD("Remote control session");
+      this->event_channel_pending_ = true;
+      this->event_channel_address_ = c.peer.address;
+      writer.begin_dict(1);
+      writer.key("eventPort");
+      writer.integer(c.local.port);
+      response.body_length = writer.finish();
+      if (response.body_length > 0) {
+        response.status = 200;
+        response.status_text = "OK";
+        response.content_type = CONTENT_TYPE_PLIST;
+        response.body = this->body_buffer_;
+      }
+      return;
+    }
     if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP")) {
       AIRPLAY_LOGW("Only NTP timing is supported");
       return;
@@ -401,6 +420,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     if (!this->open_udp_(connection, 0, static_cast<uint32_t>(timing_port), this->udp_ports_))
       return;
     this->event_channel_pending_ = true;
+    this->event_channel_address_ = c.peer.address;
     // The event connection uses the RTSP port; nothing is read from it
     writer.begin_dict(2);
     writer.key("eventPort");

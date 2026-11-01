@@ -13,7 +13,7 @@
 #   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
 # buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder
 #   (the POSIX example with FAAD2). Its output is compared with ffmpeg's decoding of the same file. PAUSE=1 pauses
-#   in the middle.
+#   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -60,7 +60,8 @@ RECEIVER_PID=$!
 sleep 2
 
 if [ "$SENDER" = buffered ]; then
-  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) ||
+  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) \
+    $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) ||
     echo "The sender failed"
   sleep 1
 elif [ "$SENDER" = pyatv ]; then
