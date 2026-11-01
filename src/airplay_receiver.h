@@ -265,6 +265,15 @@ class Receiver {
   void pass_plain_(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
   /// @return the length of the audio in `output`, or 0 if the packet is not authentic
   size_t decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length, uint8_t *output);
+  /// Takes a packet that did not decrypt with the zero key as unencrypted audio from now on
+  size_t detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output);
+
+  /// How the audio of an AirPlay 2 stream is encrypted
+  enum class AudioEncryption : uint8_t {
+    KEY,      // With audio_key_
+    UNKNOWN,  // No key given: a zero key or none, told by the first packet
+    NONE,
+  };
   void end_session_();
   void set_session_state_(SessionState state);
   void close_udp_();
@@ -337,6 +346,7 @@ class Receiver {
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
+  AudioEncryption audio_encryption_{AudioEncryption::KEY};
 
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};

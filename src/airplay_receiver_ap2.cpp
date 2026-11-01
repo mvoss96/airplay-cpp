@@ -395,7 +395,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       AIRPLAY_LOGW("Unsupported stream type %" PRId64, type);
       return;
     }
-    if (key_length != CHACHA_KEY_SIZE || sample_rate != SAMPLE_RATE || frames_per_packet <= 0 ||
+    if ((key != nullptr && key_length != CHACHA_KEY_SIZE) || sample_rate != SAMPLE_RATE || frames_per_packet <= 0 ||
         frames_per_packet > FRAMES_PER_PACKET) {
       AIRPLAY_LOGW("Unsupported stream parameters");
       return;
@@ -414,7 +414,15 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       AIRPLAY_LOGW("Unsupported audio format %" PRId64, compression);
       return;
     }
-    std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
+    // iOS leaves the key out of realtime streams. Whether their audio is then encrypted with a zero key (as
+    // openairplay/airplay2-receiver assumes) or not at all is told by the first packet.
+    if (key != nullptr) {
+      std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
+      this->audio_encryption_ = AudioEncryption::KEY;
+    } else {
+      std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+      this->audio_encryption_ = AudioEncryption::UNKNOWN;
+    }
     this->airplay2_audio_ = true;
     this->encrypted_ = false;
     this->client_control_.port = static_cast<uint16_t>(control_port);
@@ -484,17 +492,32 @@ void Receiver::build_info_(Response &response) {
 
 size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length,
                                          uint8_t *output) {
+  if (this->audio_encryption_ == AudioEncryption::NONE) {
+    std::memcpy(output, payload, length);
+    return length;
+  }
   if (length <= POLY1305_TAG_SIZE + AUDIO_NONCE_SIZE)
-    return 0;
+    return this->audio_encryption_ == AudioEncryption::UNKNOWN ? this->detect_plain_audio_(payload, length, output) : 0;
   const size_t audio_length = length - POLY1305_TAG_SIZE - AUDIO_NONCE_SIZE;
   uint8_t nonce[CHACHA_NONCE_SIZE] = {};
   std::memcpy(nonce + 4, payload + length - AUDIO_NONCE_SIZE, AUDIO_NONCE_SIZE);
   // The timestamp and SSRC of the RTP header are authenticated
   if (!chacha20_poly1305_decrypt(this->audio_key_, nonce, header + 4, 8, payload, audio_length, payload + audio_length,
                                  output)) {
-    return 0;
+    return this->audio_encryption_ == AudioEncryption::UNKNOWN ? this->detect_plain_audio_(payload, length, output) : 0;
+  }
+  if (this->audio_encryption_ == AudioEncryption::UNKNOWN) {
+    AIRPLAY_LOGI("Audio encrypted with a zero key");
+    this->audio_encryption_ = AudioEncryption::KEY;
   }
   return audio_length;
+}
+
+size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output) {
+  AIRPLAY_LOGI("Audio not encrypted");
+  this->audio_encryption_ = AudioEncryption::NONE;
+  std::memcpy(output, payload, length);
+  return length;
 }
 
 }  // namespace airplay
