@@ -216,7 +216,7 @@ class Receiver {
   static constexpr uint32_t TIMING_SAMPLE_COUNT = 8;
   static constexpr uint8_t NO_CONNECTION = 0xff;
   static constexpr size_t MAX_TXT_RECORDS = 20;
-  static constexpr size_t MAX_AIRPLAY_TXT_RECORDS = 10;
+  static constexpr size_t MAX_AIRPLAY_TXT_RECORDS = 15;
   /// An encrypted frame: length, up to 1024 bytes and the tag
   static constexpr size_t HAP_FRAME_DATA_SIZE = 1024;
   static constexpr size_t HAP_FRAME_SIZE = 2 + HAP_FRAME_DATA_SIZE + POLY1305_TAG_SIZE;
@@ -324,6 +324,8 @@ class Receiver {
   uint64_t airplay2_features_{0};
   char public_key_hex_[2 * CHACHA_KEY_SIZE + 1]{};
   char pairing_id_[37]{};
+  char public_session_id_[37]{};  // "psi"
+  char features_base64_[16]{};    // "fex": the feature bits as little endian bytes
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
   SrpServer *srp_{nullptr};
   uint8_t pairing_connection_{0xff};   // Connection between pair-setup M1 and M3

@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
+#include <utility>
 
 namespace airplay {
 
@@ -78,10 +80,16 @@ void Receiver::init_airplay2_() {
   std::memcpy(this->public_key_, digest, sizeof(this->public_key_));
   for (size_t i = 0; i < sizeof(this->public_key_); i++)
     std::snprintf(this->public_key_hex_ + 2 * i, 3, "%02x", this->public_key_[i]);
-  const uint8_t *id = digest + 32;
-  std::snprintf(this->pairing_id_, sizeof(this->pairing_id_),
-                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", id[0], id[1], id[2], id[3],
-                id[4], id[5], id[6], id[7], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+  for (auto [id_text, id] :
+       {std::pair{this->pairing_id_, digest + 32}, std::pair{this->public_session_id_, digest + 48}}) {
+    std::snprintf(id_text, sizeof(this->pairing_id_),
+                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", id[0], id[1], id[2], id[3],
+                  id[4], id[5], id[6], id[7], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+  }
+  uint8_t feature_bytes[8];
+  for (size_t i = 0; i < sizeof(feature_bytes); i++)
+    feature_bytes[i] = static_cast<uint8_t>(this->airplay2_features_ >> (8 * i));
+  base64_encode_unpadded(feature_bytes, sizeof(feature_bytes), this->features_base64_, sizeof(this->features_base64_));
 
   const TxtRecord records[] = {
       {"deviceid", this->device_id_},
@@ -93,6 +101,12 @@ void Receiver::init_airplay2_() {
       {"srcvers", AIRPLAY2_SOURCE_VERSION},
       {"protovers", "1.1"},
       {"acl", "0"},
+      // Group details, as shairport-sync announces them: not in a group
+      {"gid", this->pairing_id_},
+      {"igl", "0"},
+      {"gcgl", "0"},
+      {"psi", this->public_session_id_},
+      {"fex", this->features_base64_},
       {"vv", "2"},
   };
   static_assert(sizeof(records) / sizeof(records[0]) <= MAX_AIRPLAY_TXT_RECORDS, "Too many TXT records");
