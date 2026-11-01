@@ -192,7 +192,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   get_header(request, header_length, "Content-Type", content_type, sizeof(content_type));
   const bool plist = equals_ignore_case(content_type, CONTENT_TYPE_PLIST, sizeof(CONTENT_TYPE_PLIST) - 1);
   const auto *data = reinterpret_cast<const uint8_t *>(body);
-  // AirPlay 2 support is new: show what senders ask for (the feedback every 2 seconds only at verbose level)
+  // What senders ask for; the details only at verbose level, as logging them can hold up the audio
   const char *line_end = std::strstr(request, "\r\n");
   const int line_length = line_end != nullptr ? static_cast<int>(std::min<ptrdiff_t>(line_end - request, 96)) : 0;
   if (path_is(request, "/feedback")) {
@@ -201,28 +201,30 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s)", line_length, request, content_type[0] != '\0' ? content_type : "-",
                  static_cast<unsigned>(body_length), this->connections_[connection].encrypted ? ", encrypted" : "");
   }
+  const bool verbose = detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE;
   // Headers of the requests that come before a session, and the content of property lists
-  if (std::strcmp(method, "OPTIONS") == 0 ||
-      ((std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) && !path_is(request, "/feedback"))) {
+  if (verbose &&
+      (std::strcmp(method, "OPTIONS") == 0 ||
+       ((std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) && !path_is(request, "/feedback")))) {
     for (const char *line = line_end; line != nullptr && line + 2 < request + header_length;) {
       line += 2;
       const char *next = std::strstr(line, "\r\n");
       if (next == nullptr || next == line)
         break;
-      AIRPLAY_LOGD("  %.*s", static_cast<int>(std::min<ptrdiff_t>(next - line, 160)), line);
+      AIRPLAY_LOGV("  %.*s", static_cast<int>(std::min<ptrdiff_t>(next - line, 160)), line);
       line = next;
     }
   }
-  if (plist && data != nullptr) {
+  if (verbose && plist && data != nullptr) {
     PlistReader reader;
     if (reader.parse(data, body_length)) {
       // The response body buffer is free until the response is built
       auto *text = reinterpret_cast<char *>(this->body_buffer_);
       const size_t length = reader.describe(reader.root(), text, AIRPLAY2_BODY_SIZE);
       for (size_t offset = 0; offset < length; offset += 150)
-        AIRPLAY_LOGD("  plist: %.*s", static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
+        AIRPLAY_LOGV("  plist: %.*s", static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
     } else {
-      AIRPLAY_LOGD("  not a binary property list");
+      AIRPLAY_LOGV("  not a binary property list");
     }
   }
 

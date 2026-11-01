@@ -702,7 +702,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     return false;
   }
   if (this->airplay2_)
-    AIRPLAY_LOGD("Response: %d %s (%u bytes)", status, status_text, static_cast<unsigned>(body_size));
+    AIRPLAY_LOGV("Response: %d %s (%u bytes)", status, status_text, static_cast<unsigned>(body_size));
   // After pair-setup everything that follows is encrypted, starting with the next request
   if (c.encrypt_after_response) {
     c.encrypt_after_response = false;
@@ -787,7 +787,7 @@ bool Receiver::handle_announce_(const char *body, size_t body_length) {
       while (line_end < body + body_length && *line_end != '\r' && *line_end != '\n')
         line_end++;
       if (line_end > line)
-        AIRPLAY_LOGD("  sdp: %.*s", static_cast<int>(std::min<ptrdiff_t>(line_end - line, 100)), line);
+        AIRPLAY_LOGV("  sdp: %.*s", static_cast<int>(std::min<ptrdiff_t>(line_end - line, 100)), line);
       line = line_end + 1;
     }
   }
