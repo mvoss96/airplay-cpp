@@ -160,6 +160,8 @@ inline bool set_nonblocking(int fd, bool enable) {
 static constexpr uint32_t FAST_POLL_MS = 5;
 static constexpr size_t MAX_PACKETS_PER_READ = 16;
 static constexpr size_t TCP_READ_SIZE = 1024;
+/// Steps that take this long can starve the output and other tasks, so they are logged
+static constexpr int64_t SLOW_STEP_MS = 50;
 static constexpr int LISTEN_BACKLOG = 2;
 static constexpr uint32_t UDP_PORT_ATTEMPTS = 100;
 // Detect senders that disappear without closing the connection
@@ -288,13 +290,22 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
     }
     for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
       if (ready[NUM_UDP_CHANNELS + i] && this->connection_fds_[i] == fds[NUM_UDP_CHANNELS + i] &&
-          fds[NUM_UDP_CHANNELS + i] >= 0)
+          fds[NUM_UDP_CHANNELS + i] >= 0) {
+        const int64_t start = SocketRunner::now_us();
         this->receive_tcp_(i);
+        const int64_t took_ms = (SocketRunner::now_us() - start) / 1000;
+        if (took_ms >= SLOW_STEP_MS)
+          AIRPLAY_LOGW("Handling data of connection %u took %u ms", i, static_cast<unsigned>(took_ms));
+      }
     }
     if (ready[count - 1] && this->listen_fd_ >= 0)
       this->accept_connection_();
   }
-  this->receiver_->poll(SocketRunner::now_us());
+  const int64_t start = SocketRunner::now_us();
+  this->receiver_->poll(start);
+  const int64_t took_ms = (SocketRunner::now_us() - start) / 1000;
+  if (took_ms >= SLOW_STEP_MS)
+    AIRPLAY_LOGW("Playback step took %u ms", static_cast<unsigned>(took_ms));
 }
 
 void SocketRunner::accept_connection_() {
