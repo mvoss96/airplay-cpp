@@ -666,6 +666,17 @@ void Receiver::take_session_(uint8_t connection, const char *request, size_t hea
 }
 
 bool Receiver::handle_announce_(const char *body, size_t body_length) {
+  if (this->airplay2_) {
+    // While AirPlay 2 is new: show how senders describe the stream (keys are long base64 lines, shown cut off)
+    for (const char *line = body; line < body + body_length;) {
+      const char *line_end = line;
+      while (line_end < body + body_length && *line_end != '\r' && *line_end != '\n')
+        line_end++;
+      if (line_end > line)
+        AIRPLAY_LOGD("  sdp: %.*s", static_cast<int>(std::min<ptrdiff_t>(line_end - line, 100)), line);
+      line = line_end + 1;
+    }
+  }
   this->codec_ = Codec::NONE;
   this->encrypted_ = false;
   this->airplay2_audio_ = false;
