@@ -98,12 +98,12 @@ async def main():
     ssrc = 0x12345678
     first_rtp = 1000000
 
-    async def send(index):
+    async def send(index, audio=None):
         rtp = first_rtp + index * FRAMES_PER_PACKET
         header = struct.pack(">BBHII", 0x80, 0x60, 0, rtp, ssrc)
         header = header[:1] + struct.pack(">I", index + 1)[1:] + header[4:]  # 24-bit sequence number
         nonce = struct.pack("<Q", index)
-        sealed = cipher.encrypt(b"\0\0\0\0" + nonce, frames[index], header[4:12])
+        sealed = cipher.encrypt(b"\0\0\0\0" + nonce, frames[index] if audio is None else audio, header[4:12])
         packet = header + sealed + nonce
         data.write(struct.pack(">H", len(packet) + 2) + packet)
         await data.drain()
@@ -116,6 +116,8 @@ async def main():
                                                 "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
     start = time.time() + 0.5
     for i in range(20, len(frames)):
+        if i == 100:
+            await send(i, b"")  # As iOS sends after a flush: no audio, to be skipped
         await send(i)
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE
     if pause:

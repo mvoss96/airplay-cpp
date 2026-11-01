@@ -679,6 +679,8 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
         AIRPLAY_LOGW("Failed to decrypt buffered audio (packet %" PRIu32 ")", seq);
       continue;
     }
+    if (audio_length == 0)
+      continue;  // iOS sends one without audio after a flush
     if (!this->buffered_queue_.push(rtp, seq, audio, static_cast<uint16_t>(audio_length))) {
       if (this->buffered_dropped_++ == 0)
         AIRPLAY_LOGW("Buffered audio dropped: the buffer is full");
