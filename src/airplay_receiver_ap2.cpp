@@ -749,6 +749,7 @@ void Receiver::prepare_key_candidates_(const Connection &c) {
   // down). The others are guesses for senders that start a session with a realtime stream.
   this->key_candidate_count_ = 0;
   this->undecryptable_packets_ = 0;
+  this->plain_packets_ = 0;
   if (this->have_session_stream_key_)
     this->add_key_candidate_(this->session_stream_key_, "the key of an earlier stream");
   if (this->remembered_key_address_ == c.peer.address)
@@ -775,7 +776,9 @@ size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *p
   if (this->audio_encryption_ == AudioEncryption::FAILED)
     return 0;
   if (length <= POLY1305_TAG_SIZE + AUDIO_NONCE_SIZE)
-    return this->audio_encryption_ == AudioEncryption::UNKNOWN ? this->detect_plain_audio_(payload, length, output) : 0;
+    return this->audio_encryption_ == AudioEncryption::UNKNOWN
+               ? this->detect_plain_audio_(header, payload, length, output)
+               : 0;
   const size_t audio_length = length - POLY1305_TAG_SIZE - AUDIO_NONCE_SIZE;
   uint8_t nonce[CHACHA_NONCE_SIZE] = {};
   std::memcpy(nonce + 4, payload + length - AUDIO_NONCE_SIZE, AUDIO_NONCE_SIZE);
@@ -796,25 +799,46 @@ size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *p
       return audio_length;
     }
   }
-  return this->detect_plain_audio_(payload, length, output);
+  return this->detect_plain_audio_(header, payload, length, output);
 }
 
-size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output) {
-  // An ALAC frame starts with the type of its first element: a single (0) or a channel pair (1). Encrypted data
-  // passes that by chance one time in four, so a few packets must agree.
+static constexpr size_t REALTIME_RTP_HEADER_SIZE = 12;
+
+/// Logs bytes in hex at debug level, 32 per line
+static void log_hex(const char *label, const uint8_t *data, size_t length) {
+  for (size_t offset = 0; offset < length; offset += 32) {
+    char text[32 * 2 + 1];
+    const size_t count = std::min<size_t>(length - offset, 32);
+    for (size_t i = 0; i < count; i++)
+      std::snprintf(text + 2 * i, sizeof(text) - 2 * i, "%02x", data[offset + i]);
+    AIRPLAY_LOGD("%s %u: %s", label, static_cast<unsigned>(offset), text);
+  }
+}
+
+size_t Receiver::detect_plain_audio_(const uint8_t *header, const uint8_t *payload, size_t length, uint8_t *output) {
+  // A stereo ALAC frame starts with the type of its first element, a channel pair (1). Encrypted data passes that by
+  // chance one time in eight, so several packets in a row must agree.
   static constexpr uint8_t PACKETS_TO_DECIDE = 4;
-  const bool plausible = this->codec_ != Codec::ALAC || (payload[0] >> 5) <= 1;
+  const bool plausible = this->codec_ != Codec::ALAC || (payload[0] >> 5) == 1;
   if (!plausible) {
+    this->plain_packets_ = 0;
     if (++this->undecryptable_packets_ >= PACKETS_TO_DECIDE) {
-      char start[3 * 16 + 1] = "";
-      for (size_t i = 0; i < std::min<size_t>(length, 16); i++)
-        std::snprintf(start + 3 * i, sizeof(start) - 3 * i, "%02x ", payload[i]);
-      AIRPLAY_LOGW("The audio cannot be decrypted: the sender's key is unknown (%u bytes: %s)",
-                   static_cast<unsigned>(length), start);
+      AIRPLAY_LOGW("The audio cannot be decrypted: the sender's key is unknown (%u bytes)",
+                   static_cast<unsigned>(length));
       this->audio_encryption_ = AudioEncryption::FAILED;
+      if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && this->session_owner_ != NO_CONNECTION) {
+        // To work out the sender's encryption offline; pairing secrets are new for every connection
+        log_hex("RTP header", header, REALTIME_RTP_HEADER_SIZE);
+        log_hex("Payload", payload, std::min<size_t>(length, 128));
+        log_hex("Pairing secret", this->connections_[this->session_owner_].pair_secret, SHA512_SIZE);
+        if (this->have_session_stream_key_)
+          log_hex("Session stream key", this->session_stream_key_, CHACHA_KEY_SIZE);
+      }
     }
     return 0;
   }
+  if (++this->plain_packets_ < PACKETS_TO_DECIDE && this->codec_ == Codec::ALAC)
+    return 0;
   AIRPLAY_LOGI("Audio not encrypted (starts with %02x %02x %02x %02x, %u bytes)", payload[0],
                length > 1 ? payload[1] : 0, length > 2 ? payload[2] : 0, length > 3 ? payload[3] : 0,
                static_cast<unsigned>(length));

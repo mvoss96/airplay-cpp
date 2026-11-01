@@ -340,7 +340,7 @@ class Receiver {
   }
   void update_receive_pause_();
   /// Takes a packet that did not decrypt with the zero key as unencrypted audio from now on
-  size_t detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output);
+  size_t detect_plain_audio_(const uint8_t *header, const uint8_t *payload, size_t length, uint8_t *output);
 
   /// How the audio of an AirPlay 2 stream is encrypted
   enum class AudioEncryption : uint8_t {
@@ -451,6 +451,7 @@ class Receiver {
   KeyCandidate key_candidates_[MAX_KEY_CANDIDATES]{};
   uint8_t key_candidate_count_{0};
   uint8_t undecryptable_packets_{0};
+  uint8_t plain_packets_{0};
   bool have_session_stream_key_{false};
 
   // Cross-thread requests and reports
