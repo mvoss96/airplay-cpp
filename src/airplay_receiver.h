@@ -347,6 +347,8 @@ class Receiver {
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
   AudioEncryption audio_encryption_{AudioEncryption::KEY};
+  uint8_t session_stream_key_[CHACHA_KEY_SIZE]{};  // The last key a stream setup of the session carried
+  bool have_session_stream_key_{false};
 
   // Cross-thread requests and reports
   std::atomic<uint32_t> frames_played_{0};

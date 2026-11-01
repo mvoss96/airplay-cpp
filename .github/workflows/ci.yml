@@ -169,8 +169,9 @@ jobs:
             airplay2*) export AIRPLAY2=1 ;;
           esac
           case "${{ matrix.network }}" in
-            # As iOS sends it: RECORD before the stream SETUP, which has no key
-            *record-first) export RECORD_FIRST=1 AUDIO_KEY=none ;;
+            # As iOS sends it: RECORD before the stream SETUP, which has no key but uses that of a buffered
+            # stream offered before
+            *record-first) export RECORD_FIRST=1 AUDIO_KEY=earlier ;;
           esac
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;

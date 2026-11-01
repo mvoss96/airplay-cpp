@@ -28,14 +28,24 @@ def record_before_stream_setup():
 
 
 def stream_without_key(mode):
-    """Leaves the key out of the stream SETUP, as iOS does for realtime streams; the audio is then sent
-    unencrypted (mode "none") or encrypted with a zero key (mode "zero")"""
+    """Leaves the key out of the stream SETUP, as iOS does for realtime streams. The audio is then sent
+    unencrypted (mode "none"), encrypted with a zero key (mode "zero") or, as iOS does, with the key of a
+    buffered stream offered before (mode "earlier"), which the receiver turns down."""
     from pyatv.protocols.raop.protocols import airplayv2
     from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
     original = airplayv2.AirPlayV2.setup_audio_stream
 
     async def setup_audio_stream(self, control_client_port):
+        key = bytes(32)
+        if mode == "earlier":
+            key, _ = self._verifier.encryption_keys(
+                airplayv2.EVENTS_SALT, airplayv2.EVENTS_WRITE_INFO, airplayv2.EVENTS_READ_INFO
+            )
+            key = key[0:32]
+            offer = {"streams": [{"type": 103, "ct": 4, "spf": 1024, "audioFormat": 0x400000, "shk": key}]}
+            response = await self.rtsp.exchange("SETUP", body=offer, allow_error=True)
+            assert response.code != 200, "The buffered stream should be turned down"
         original_setup = self.rtsp.setup
 
         async def setup(headers=None, body=None):
@@ -49,7 +59,7 @@ def stream_without_key(mode):
             await original(self, control_client_port)
         finally:
             self.rtsp.setup = original_setup
-        self._cipher = None if mode == "none" else Chacha20Cipher8byteNonce(bytes(32), bytes(32))
+        self._cipher = None if mode == "none" else Chacha20Cipher8byteNonce(key, key)
 
     airplayv2.AirPlayV2.setup_audio_stream = setup_audio_stream
 
@@ -75,7 +85,7 @@ async def main():
     finally:
         atv.close()
 
-if os.environ.get("AUDIO_KEY") in ("none", "zero"):
+if os.environ.get("AUDIO_KEY") in ("none", "zero", "earlier"):
     stream_without_key(os.environ["AUDIO_KEY"])
 if os.environ.get("RECORD_FIRST") == "1":
     record_before_stream_setup()

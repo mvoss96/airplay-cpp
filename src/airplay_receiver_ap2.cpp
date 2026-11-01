@@ -361,6 +361,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     this->take_session_(connection, request, header_length);
     this->airplay2_recording_ = false;
+    this->have_session_stream_key_ = false;
     this->codec_ = Codec::NONE;
     this->encrypted_ = false;
     this->airplay2_audio_ = false;
@@ -391,6 +392,12 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     reader.get_integer(reader.get(stream, "sr"), &sample_rate);
     reader.get_integer(reader.get(stream, "controlPort"), &control_port);
     reader.get_data(reader.get(stream, "shk"), &key, &key_length);
+    // iOS sends the key with the first stream it offers, also one this receiver turns down, and leaves it out of
+    // later ones
+    if (key != nullptr && key_length == CHACHA_KEY_SIZE) {
+      std::memcpy(this->session_stream_key_, key, sizeof(this->session_stream_key_));
+      this->have_session_stream_key_ = true;
+    }
     if (type != STREAM_TYPE_REALTIME) {
       AIRPLAY_LOGW("Unsupported stream type %" PRId64, type);
       return;
@@ -420,7 +427,12 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
       this->audio_encryption_ = AudioEncryption::KEY;
     } else {
-      std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+      // Tried in this order: the key of an earlier stream of the session, a zero key, no encryption
+      if (this->have_session_stream_key_) {
+        std::memcpy(this->audio_key_, this->session_stream_key_, sizeof(this->audio_key_));
+      } else {
+        std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+      }
       this->audio_encryption_ = AudioEncryption::UNKNOWN;
     }
     this->airplay2_audio_ = true;
@@ -502,19 +514,31 @@ size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *p
   uint8_t nonce[CHACHA_NONCE_SIZE] = {};
   std::memcpy(nonce + 4, payload + length - AUDIO_NONCE_SIZE, AUDIO_NONCE_SIZE);
   // The timestamp and SSRC of the RTP header are authenticated
-  if (!chacha20_poly1305_decrypt(this->audio_key_, nonce, header + 4, 8, payload, audio_length, payload + audio_length,
-                                 output)) {
-    return this->audio_encryption_ == AudioEncryption::UNKNOWN ? this->detect_plain_audio_(payload, length, output) : 0;
+  if (chacha20_poly1305_decrypt(this->audio_key_, nonce, header + 4, 8, payload, audio_length, payload + audio_length,
+                                output)) {
+    if (this->audio_encryption_ == AudioEncryption::UNKNOWN) {
+      const uint8_t zero[CHACHA_KEY_SIZE] = {};
+      AIRPLAY_LOGI("Audio encrypted with %s", std::memcmp(this->audio_key_, zero, sizeof(zero)) == 0
+                                                  ? "a zero key"
+                                                  : "the key of an earlier stream");
+      this->audio_encryption_ = AudioEncryption::KEY;
+    }
+    return audio_length;
   }
-  if (this->audio_encryption_ == AudioEncryption::UNKNOWN) {
-    AIRPLAY_LOGI("Audio encrypted with a zero key");
-    this->audio_encryption_ = AudioEncryption::KEY;
+  if (this->audio_encryption_ != AudioEncryption::UNKNOWN)
+    return 0;
+  const uint8_t zero[CHACHA_KEY_SIZE] = {};
+  if (std::memcmp(this->audio_key_, zero, sizeof(zero)) != 0) {
+    std::memset(this->audio_key_, 0, sizeof(this->audio_key_));
+    return this->decrypt_airplay2_audio_(header, payload, length, output);
   }
-  return audio_length;
+  return this->detect_plain_audio_(payload, length, output);
 }
 
 size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint8_t *output) {
-  AIRPLAY_LOGI("Audio not encrypted");
+  AIRPLAY_LOGI("Audio not encrypted (starts with %02x %02x %02x %02x, %u bytes)", payload[0],
+               length > 1 ? payload[1] : 0, length > 2 ? payload[2] : 0, length > 3 ? payload[3] : 0,
+               static_cast<unsigned>(length));
   this->audio_encryption_ = AudioEncryption::NONE;
   std::memcpy(output, payload, length);
   return length;

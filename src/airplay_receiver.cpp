@@ -1047,6 +1047,7 @@ void Receiver::end_session_() {
   this->airplay2_audio_ = false;
   this->event_channel_pending_ = false;
   this->airplay2_recording_ = false;
+  this->have_session_stream_key_ = false;
   // The sender's event connection goes with its session
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
@@ -1273,6 +1274,11 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
       slot.samples[i] = static_cast<int16_t>(read_be16(data + 2 * i));
   }
   if (frames <= 0) {
+    if (this->stats_.decode_errors == 0) {
+      AIRPLAY_LOGW("Failed to decode audio (packet %u, %u bytes, starting with %02x %02x %02x %02x)", seq,
+                   static_cast<unsigned>(length), data[0], length > 1 ? data[1] : 0, length > 2 ? data[2] : 0,
+                   length > 3 ? data[3] : 0);
+    }
     AIRPLAY_LOGV("Failed to decode packet %u", seq);
     this->stats_.decode_errors++;
     return;  // Treated as lost

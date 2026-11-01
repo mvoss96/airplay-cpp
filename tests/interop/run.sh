@@ -8,9 +8,9 @@
 # pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
 #   the receiver asks for it and pyatv logs in. With AIRPLAY2=1 pyatv uses AirPlay 2: transient pairing, an
 #   encrypted RTSP connection and ChaCha20-Poly1305 encrypted audio.
-#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none or zero
-#   leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio unencrypted or
-#   encrypted with a zero key.
+#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero or
+#   earlier leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
+#   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
