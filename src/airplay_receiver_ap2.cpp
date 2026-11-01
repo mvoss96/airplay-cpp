@@ -388,6 +388,15 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
   }
   const PlistReader::Object root = reader.root();
   const PlistReader::Object streams = reader.get(root, "streams");
+  if (streams == PlistReader::NONE && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+    // In pieces, as log lines are short; the response is not built yet, so its buffer is free
+    auto *text = reinterpret_cast<char *>(this->body_buffer_);
+    const size_t text_length = reader.describe(root, text, AIRPLAY2_BODY_SIZE);
+    for (size_t offset = 0; offset < text_length; offset += 120) {
+      AIRPLAY_LOGD("Session setup (%u): %.*s", static_cast<unsigned>(offset / 120),
+                   static_cast<int>(std::min<size_t>(text_length - offset, 120)), text + offset);
+    }
+  }
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
 
   if (streams == PlistReader::NONE) {
@@ -563,9 +572,13 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
         this->prepare_key_candidates_(c);
         this->audio_encryption_ = AudioEncryption::UNKNOWN;
         if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
-          char text[400];
-          reader.describe(stream, text, sizeof(text));
-          AIRPLAY_LOGD("Stream without a key: %s", text);
+          // In pieces, as log lines are short
+          char text[800];
+          const size_t text_length = reader.describe(stream, text, sizeof(text));
+          for (size_t offset = 0; offset < text_length; offset += 120) {
+            AIRPLAY_LOGD("Stream without a key (%u): %.*s", static_cast<unsigned>(offset / 120),
+                         static_cast<int>(std::min<size_t>(text_length - offset, 120)), text + offset);
+          }
         }
       }
       this->airplay2_audio_ = true;
@@ -793,10 +806,11 @@ size_t Receiver::detect_plain_audio_(const uint8_t *payload, size_t length, uint
   const bool plausible = this->codec_ != Codec::ALAC || (payload[0] >> 5) <= 1;
   if (!plausible) {
     if (++this->undecryptable_packets_ >= PACKETS_TO_DECIDE) {
-      AIRPLAY_LOGW("The audio cannot be decrypted: the sender's key is unknown (starts with %02x %02x %02x %02x, "
-                   "%u bytes)",
-                   payload[0], length > 1 ? payload[1] : 0, length > 2 ? payload[2] : 0, length > 3 ? payload[3] : 0,
-                   static_cast<unsigned>(length));
+      char start[3 * 16 + 1] = "";
+      for (size_t i = 0; i < std::min<size_t>(length, 16); i++)
+        std::snprintf(start + 3 * i, sizeof(start) - 3 * i, "%02x ", payload[i]);
+      AIRPLAY_LOGW("The audio cannot be decrypted: the sender's key is unknown (%u bytes: %s)",
+                   static_cast<unsigned>(length), start);
       this->audio_encryption_ = AudioEncryption::FAILED;
     }
     return 0;
