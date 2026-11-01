@@ -1,6 +1,7 @@
 // AirPlay 2 part of the receiver: transient pairing, the encrypted RTSP connection, session and stream setup
 // with property lists, and the encrypted audio of realtime streams.
 
+#include "airplay_fairplay.h"
 #include "airplay_log.h"
 #include "airplay_plist.h"
 #include "airplay_receiver.h"
@@ -18,12 +19,12 @@
 
 namespace airplay {
 
-// Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), audio formats (18-20, 22),
-// unified advertiser info (30), control channel encryption (38), NTP timing (45), HomeKit pairing and peer
-// management (46, 47) and transient pairing (48). Without buffered audio (40) and PTP timing (41) senders stream
-// realtime audio; the experiments noted in openairplay/airplay2-receiver found that bit 45 makes iOS do that with
-// NTP timing.
-static constexpr uint64_t DEFAULT_FEATURES = 0x1E040405C0A00ULL;
+// Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), FairPlay (14), audio formats
+// (18-20, 22), unified advertiser info (30), control channel encryption (38), NTP timing (45), HomeKit pairing and
+// peer management (46, 47) and transient pairing (48). Without buffered audio (40) and PTP timing (41) senders
+// stream realtime audio; the experiments noted in openairplay/airplay2-receiver found that bit 45 makes iOS do
+// that with NTP timing. iOS only streams to receivers with bit 14, after the FairPlay setup.
+static constexpr uint64_t DEFAULT_FEATURES = 0x1E040405C4A00ULL;
 /// Status flags: an audio receiver
 static constexpr int64_t STATUS_FLAGS = 0x4;
 
@@ -224,6 +225,17 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   if (std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) {
     if (path_is(request, "/info")) {
       this->build_info_(response);
+    } else if (path_is(request, "/fp-setup")) {
+      response.body_length =
+          fairplay_setup_reply(data, data != nullptr ? body_length : 0, this->body_buffer_, AIRPLAY2_BODY_SIZE);
+      if (response.body_length == 0) {
+        AIRPLAY_LOGW("Unsupported FairPlay setup message");
+        response.status = 400;
+        response.status_text = "Bad Request";
+      } else {
+        response.content_type = CONTENT_TYPE_OCTET_STREAM;
+        response.body = this->body_buffer_;
+      }
     } else if (path_is(request, "/pair-setup")) {
       this->handle_pair_setup_(connection, data, body_length, response);
     } else if (path_is(request, "/pair-verify")) {

@@ -1,4 +1,5 @@
 // AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, TLV8 and binary property lists
+#include "airplay_fairplay.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_plist.h"
 #include "airplay_srp.h"
@@ -289,6 +290,30 @@ static void test_plist_writer() {
   CHECK(incomplete.finish() == 0);
 }
 
+static void test_fairplay_setup() {
+  // The first message of each mode gets the matching fixed reply (as shairport-sync answers)
+  uint8_t message[164] = {'F', 'P', 'L', 'Y', 3, 1, 1, 0, 0, 0, 0, 4, 2, 0, 2, 0xbb};
+  uint8_t reply[FAIRPLAY_SETUP_REPLY_SIZE];
+  CHECK(fairplay_setup_reply(message, 16, reply, sizeof(reply)) == 142);
+  CHECK(same(reply, "46504c5903010200000000820202c169a352eeed"));
+  message[14] = 0;
+  CHECK(fairplay_setup_reply(message, 16, reply, sizeof(reply)) == 142);
+  CHECK(same(reply, "46504c59030102000000008202000f9f"));
+  message[14] = 4;
+  CHECK(fairplay_setup_reply(message, 16, reply, sizeof(reply)) == 0);
+
+  // The second reply echoes the last 20 bytes of the message
+  message[6] = 3;
+  for (size_t i = 144; i < 164; i++)
+    message[i] = static_cast<uint8_t>(i);
+  CHECK(fairplay_setup_reply(message, 164, reply, sizeof(reply)) == 32);
+  CHECK(same(reply, "46504c590301040000000014"));
+  CHECK(reply[12] == 144 && reply[31] == 163);
+
+  message[0] = 'X';
+  CHECK(fairplay_setup_reply(message, 164, reply, sizeof(reply)) == 0);
+}
+
 int main() {
   test_sha512();
   test_hmac_hkdf();
@@ -297,5 +322,6 @@ int main() {
   test_tlv8();
   test_plist_reader();
   test_plist_writer();
+  test_fairplay_setup();
   return finish("test_hap");
 }
