@@ -42,6 +42,10 @@ class AudioSink {
   virtual size_t write(const int16_t *samples, size_t frames) = 0;
 };
 
+/// Cover art data that may still arrive after Listener::artwork_room() fell below it: the receiver's request
+/// buffer and one read of the transport (at most 2 KB)
+inline constexpr size_t ARTWORK_RESERVE = 6 * 1024;
+
 /// Events of the receiver. Called on the thread that drives the receiver.
 class Listener {
  public:
@@ -56,6 +60,12 @@ class Listener {
   /// on_artwork_begin() to skip the image, e.g. when it is too large.
   virtual bool on_artwork_begin(ArtworkFormat /*format*/, size_t /*size*/) { return false; }
   virtual void on_artwork_data(const uint8_t * /*data*/, size_t /*length*/) {}
+  /// @brief Free space for cover art data, so that an image can be decoded while it arrives through a small buffer.
+  ///
+  /// While this is below ARTWORK_RESERVE, the receiver stops reading the sender's connection; up to ARTWORK_RESERVE
+  /// bytes may still be passed after that. Reading resumes once there is room again, which poll() checks. Other
+  /// requests of the sender wait meanwhile. The default takes any amount.
+  virtual size_t artwork_room() { return SIZE_MAX; }
   /// @param complete false if the session ended before the whole image arrived
   virtual void on_artwork_end(bool /*complete*/) {}
   /// The current track has no cover art, or the session ended
@@ -147,7 +157,7 @@ class Receiver {
   bool is_session_owner(uint8_t connection) const { return this->session_owner_ == connection; }
   /// @brief Whether a connection belongs to the playing sender: its RTSP, event or buffered audio connection.
   bool is_session_connection(uint8_t connection) const;
-  bool needs_fast_polling() const { return this->audio_active_; }
+  bool needs_fast_polling() const { return this->audio_active_ || this->artwork_paused_ != NO_CONNECTION; }
   SessionState session_state() const { return this->session_state_; }
   const ReceiverStats &stats() const { return this->stats_; }
 
@@ -258,6 +268,7 @@ class Receiver {
   /// Starts receiving cover art. `body` is null if the image is too large to buffer and arrives in pieces.
   void begin_artwork_(const char *content_type, const char *body, size_t body_length);
   void end_artwork_(bool complete);
+  void resume_artwork_();
   bool add_apple_response_(uint8_t connection, const char *challenge, char *output, size_t size);
   /// @return true if the request carries the right password for the connection's challenge
   bool check_authorization_(Connection &c, const char *method, const char *request, size_t header_length);
@@ -428,8 +439,9 @@ class Receiver {
   Endpoint client_timing_{};
   uint16_t initial_seq_{0};
   bool have_initial_seq_{false};
-  uint16_t sender_version_{0};     // From "User-Agent: AirPlay/<version>"
-  bool artwork_streaming_{false};  // Passing the skipped body of the session owner's request to the listener
+  uint16_t sender_version_{0};             // From "User-Agent: AirPlay/<version>"
+  bool artwork_streaming_{false};          // Passing the skipped body of the session owner's request to the listener
+  uint8_t artwork_paused_{NO_CONNECTION};  // Connection not read while the listener has no room for cover art
 
   // Audio session
   bool audio_active_{false};

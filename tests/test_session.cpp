@@ -483,6 +483,54 @@ static void test_control() {
   CHECK(f.listener.artwork_clears == 3);        // Also cleared when the first sender was taken over
 }
 
+static void test_artwork_flow_control() {
+  Fixture f;
+  f.open(0);
+  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 200);
+  // The listener decodes through a 16 KB buffer while a 60 KB image arrives in reads of 1 KB
+  f.listener.artwork_capacity = 16 * 1024;
+  std::string art(60000, '\0');
+  for (size_t i = 0; i < art.size(); i++)
+    art[i] = static_cast<char>(i * 13);
+  std::string big = rtsp_request("SET_PARAMETER", ++f.cseq, "Content-Type: image/jpeg\r\n", art);
+  big += rtsp_request("OPTIONS", ++f.cseq);
+  size_t sent = 0;
+  int pauses = 0;
+  bool was_paused = false;
+  while (sent < big.size()) {
+    if (f.transport.paused[0]) {
+      if (!was_paused)
+        pauses++;
+      was_paused = true;
+      // The decoder takes 3 KB per millisecond
+      f.listener.artwork_used = std::min(f.listener.artwork.size(), f.listener.artwork_used + 3000);
+      f.run(1000);
+      continue;
+    }
+    was_paused = false;
+    const size_t piece = std::min<size_t>(1024, big.size() - sent);
+    send_request(f.receiver, 0, big.substr(sent, piece), f.now_us);
+    sent += piece;
+  }
+  CHECK(pauses > 0);
+  CHECK(f.listener.artwork_peak <= f.listener.artwork_capacity);
+  CHECK(f.listener.artwork == art && f.listener.artwork_ends == 1 && f.listener.artwork_complete);
+  CHECK(!f.transport.paused[0]);
+  // Both responses: the image's and the request that waited behind it
+  const std::string responses = f.transport.take(0);
+  CHECK(responses.find("CSeq: " + std::to_string(f.cseq)) != std::string::npos);
+
+  // A session that ends while paused lets go of the connection
+  f.listener.artwork_used = f.listener.artwork.size();
+  const std::string again = rtsp_request("SET_PARAMETER", ++f.cseq, "Content-Type: image/jpeg\r\n", art);
+  for (sent = 0; sent < again.size() && !f.transport.paused[0]; sent += 1024)
+    send_request(f.receiver, 0, again.substr(sent, std::min<size_t>(1024, again.size() - sent)), f.now_us);
+  CHECK(f.transport.paused[0]);
+  f.receiver.request_disconnect();
+  f.run(1000);
+  CHECK(!f.transport.paused[0] && !f.listener.artwork_complete);
+}
+
 static void test_artwork_interrupted() {
   Fixture f;
   f.open(0);
@@ -678,6 +726,7 @@ int main() {
   test_control();
   test_errors_and_disconnect();
   test_artwork_interrupted();
+  test_artwork_flow_control();
   test_password();
   test_progress();
   test_mdns();

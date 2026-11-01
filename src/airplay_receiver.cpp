@@ -476,8 +476,14 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
       std::memmove(buffer, buffer + drop, c.rx_length - drop);
       c.rx_length -= drop;
       c.discard_remaining -= drop;
-      if (artwork && c.discard_remaining == 0)
+      if (artwork && c.discard_remaining == 0) {
         this->end_artwork_(true);
+      } else if (artwork && this->artwork_paused_ == NO_CONNECTION &&
+                 this->listener_->artwork_room() < ARTWORK_RESERVE) {
+        // The listener works through the image; the rest waits in the sender's socket meanwhile
+        this->artwork_paused_ = connection;
+        this->transport_.pause_receiving(connection, true);
+      }
       continue;
     }
 
@@ -983,6 +989,15 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
   }
 }
 
+void Receiver::resume_artwork_() {
+  // After reading stops: what is left in the request buffer, the rest of the current read and the next request buffer
+  static_assert(ARTWORK_RESERVE >= 2 * RTSP_BUFFER_SIZE + 2048, "ARTWORK_RESERVE too small");
+  if (this->artwork_paused_ == NO_CONNECTION)
+    return;
+  this->transport_.pause_receiving(this->artwork_paused_, false);
+  this->artwork_paused_ = NO_CONNECTION;
+}
+
 void Receiver::begin_artwork_(const char *content_type, const char *body, size_t body_length) {
   if (!this->config_.artwork || this->listener_ == nullptr)
     return;
@@ -1012,6 +1027,7 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
 
 void Receiver::end_artwork_(bool complete) {
   this->artwork_streaming_ = false;
+  this->resume_artwork_();
   this->listener_->on_artwork_end(complete);
 }
 
@@ -1651,6 +1667,10 @@ void Receiver::poll(int64_t now_us) {
       this->stats_.longest_gap_ms = std::max(this->stats_.longest_gap_ms, now_ms - this->last_poll_ms_);
     this->last_poll_ms_ = now_ms;
   }
+
+  // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again
+  if (this->artwork_paused_ != NO_CONNECTION && this->listener_->artwork_room() >= ARTWORK_RESERVE + RTSP_BUFFER_SIZE)
+    this->resume_artwork_();
 
   if (this->disconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
     if (this->session_owner_ != NO_CONNECTION) {

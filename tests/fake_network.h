@@ -4,6 +4,8 @@
 
 #include "airplay_receiver.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -27,6 +29,7 @@ class FakeTransport : public Transport {
     return this->send_ok;
   }
   void close(uint8_t connection) override { this->closed[connection]++; }
+  void pause_receiving(uint8_t connection, bool paused) override { this->paused[connection] = paused; }
   bool open_udp(uint16_t *ports) override {
     if (!this->udp_ok)
       return false;
@@ -50,6 +53,7 @@ class FakeTransport : public Transport {
 
   std::string sent[Receiver::MAX_CONNECTIONS];
   int closed[Receiver::MAX_CONNECTIONS]{};
+  bool paused[Receiver::MAX_CONNECTIONS]{};
   std::vector<UdpSent> udp;
   bool udp_open{false};
   bool send_ok{true};
@@ -99,7 +103,13 @@ class RecordingListener : public Listener {
     this->artwork_begins++;
     return size <= this->artwork_limit;
   }
-  void on_artwork_data(const uint8_t *data, size_t length) override { this->artwork.append(data, data + length); }
+  void on_artwork_data(const uint8_t *data, size_t length) override {
+    this->artwork.append(data, data + length);
+    this->artwork_peak = std::max(this->artwork_peak, this->artwork.size() - this->artwork_used);
+  }
+  size_t artwork_room() override {
+    return this->artwork_capacity - std::min(this->artwork_capacity, this->artwork.size() - this->artwork_used);
+  }
   void on_artwork_end(bool complete) override {
     this->artwork_ends++;
     this->artwork_complete = complete;
@@ -126,6 +136,10 @@ class RecordingListener : public Listener {
   int artwork_ends{0};
   int artwork_clears{0};
   bool artwork_complete{false};
+  // A buffer that a decoder empties as artwork_used grows; unlimited unless set
+  size_t artwork_capacity{SIZE_MAX};
+  size_t artwork_used{0};
+  size_t artwork_peak{0};
   Progress progress{};
   int progress_count{0};
 };
