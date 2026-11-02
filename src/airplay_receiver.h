@@ -234,7 +234,10 @@ class Receiver {
     bool encrypted{false};
     bool encrypt_after_response{false};
     bool event_channel{false};  // A sender's event connection; nothing to read on it
-    bool audio_data{false};     // A sender's buffered audio connection
+    // Requests sent on an event connection and pieces of data that came back. Music Assistant does not answer.
+    uint16_t event_requests{0};
+    uint16_t event_answers{0};
+    bool audio_data{false};  // A sender's buffered audio connection
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};

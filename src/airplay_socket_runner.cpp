@@ -162,6 +162,7 @@ static constexpr size_t MAX_PACKETS_PER_READ = 16;
 static constexpr size_t TCP_READ_SIZE = 1024;
 /// Steps that take this long can starve the output and other tasks, so they are logged
 static constexpr int64_t SLOW_STEP_MS = 50;
+static constexpr int64_t SLOW_SEND_MS = 10;
 static constexpr int LISTEN_BACKLOG = 2;
 static constexpr uint32_t UDP_PORT_ATTEMPTS = 100;
 // Detect senders that disappear without closing the connection
@@ -394,6 +395,9 @@ void SocketRunner::receive_udp_(UdpChannel channel) {
 bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) {
   if (connection >= Receiver::MAX_CONNECTIONS || this->connection_fds_[connection] < 0)
     return false;
+  // A peer that does not read makes the send wait for room, which holds up playback
+  const int64_t start = SocketRunner::now_us();
+  const size_t total = length;
   while (length > 0) {
     const auto sent = net::send(this->connection_fds_[connection], data, length, net::MSG_NO_SIGNAL);
     if (sent <= 0)
@@ -401,6 +405,10 @@ bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) 
     data += sent;
     length -= static_cast<size_t>(sent);
   }
+  const int64_t took_ms = (SocketRunner::now_us() - start) / 1000;
+  if (took_ms >= SLOW_SEND_MS)
+    AIRPLAY_LOGW("Sending %u bytes on connection %u took %u ms", static_cast<unsigned>(total), connection,
+                 static_cast<unsigned>(took_ms));
   return true;
 }
 

@@ -44,6 +44,8 @@ static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Ke
 static constexpr char DATA_STREAM_SALT[] = "DataStream-Salt";
 static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encryption-Key";
 
+/// Unanswered requests on an event connection after which that is logged
+static constexpr uint16_t UNANSWERED_REQUESTS_LOGGED = 3;
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
 static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
@@ -663,7 +665,7 @@ void Receiver::send_media_remote_command_(const char *value, float volume) {
     return;
   const uint32_t address = this->connections_[this->session_owner_].peer.address;
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
-    const Connection &c = this->connections_[i];
+    Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
     // A volume is given at the top level and in the parameters; senders read either
@@ -695,6 +697,8 @@ void Receiver::send_media_remote_command_(const char *value, float volume) {
       return;
     std::memcpy(message + header_length, body, body_length);
     this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
+    if (++c.event_requests == UNANSWERED_REQUESTS_LOGGED && c.event_answers == 0)
+      AIRPLAY_LOGD("The sender has not answered %u requests on its event connection", c.event_requests);
     return;
   }
 }

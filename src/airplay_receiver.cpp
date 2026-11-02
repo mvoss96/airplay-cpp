@@ -372,6 +372,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.encrypted = false;
   c.encrypt_after_response = false;
   c.event_channel = false;
+  c.event_requests = 0;
+  c.event_answers = 0;
   c.audio_data = false;
   c.session_pending = false;
   c.pending_recording = false;
@@ -423,6 +425,8 @@ void Receiver::connection_closed(uint8_t connection) {
                      : connection == this->session_owner_ ? "playing sender"
                                                           : "other";
   AIRPLAY_LOGD("Connection closed (%u.%u.%u.%u, %s)", ip[0], ip[1], ip[2], ip[3], kind);
+  if (c.event_channel && c.event_requests > 0)
+    AIRPLAY_LOGD("Event connection: %u requests sent, %u answers", c.event_requests, c.event_answers);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
@@ -458,8 +462,14 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
   if (connection >= MAX_CONNECTIONS)
     return;
   Connection &c = this->connections_[connection];
-  if (!c.open || c.event_channel)
+  if (!c.open)
     return;
+  if (c.event_channel) {
+    // Answers to the receiver's requests; their content is not needed
+    if (c.event_answers++ == 0)
+      AIRPLAY_LOGD("The sender answers on its event connection");
+    return;
+  }
   if (c.audio_data) {
     this->receive_buffered_audio_(connection, data, length, to_ms(now_us));
     return;
