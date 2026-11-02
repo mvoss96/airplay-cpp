@@ -66,6 +66,8 @@ static constexpr uint32_t MAX_RESEND_RANGES = 4;
 /// Audio is handed to the sink at most this far ahead, so that a pause or seek takes effect quickly. Enough to ride
 /// out the driving thread being held up for a while, e.g. 200 ms on an ESP32 while its display redraws.
 static constexpr int64_t MAX_SPEAKER_QUEUE_US = 250000;
+/// A packet this far off its due time means that the sender's timeline does not fit its clock at all
+static constexpr int64_t MAX_TIMELINE_ERROR_US = 10000000;
 /// Silence to line up the first packet is only written once it is due within this window
 static constexpr int64_t START_WINDOW_US = 100000;
 /// Packets later than this are dropped; packets earlier than this are lined up with silence
@@ -1248,6 +1250,8 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->played_reports_missing_ = false;
   this->sync_logged_ = false;
   this->restarts_ = 0;
+  this->late_logged_ = false;
+  this->timeline_mismatch_ = false;
   this->audio_active_ = true;
   return true;
 }
@@ -1816,7 +1820,8 @@ bool Receiver::start_playback_() {
   const uint32_t capacity_frames = this->slot_count_ * FRAMES_PER_PACKET;
   const bool fits = capacity_frames >= this->sender_latency_frames_ + SYNC_MARGIN_FRAMES;
 
-  if (this->clock_locked_ && this->anchor_valid_ && fits && !this->played_reports_missing_) {
+  if (this->clock_locked_ && this->anchor_valid_ && fits && !this->played_reports_missing_ &&
+      !this->timeline_mismatch_) {
     this->synced_ = true;
   } else {
     // Wait for the sender's clock while the buffer has room, unless synchronized playback is impossible anyway.
@@ -1852,7 +1857,6 @@ bool Receiver::start_playback_() {
     }
   }
   this->playback_started_ = true;
-  this->late_logged_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -1889,6 +1893,16 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
   // Positive: the packet would be heard too early; negative: too late
   const int64_t error_us = target_us - heard_us;
+  if (error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) {
+    // The sender's sync packets and its clock disagree (Music Assistant in a group answers clock requests on the
+    // group's PTP timeline but sends its own time in sync packets): play without synchronization rather than not at
+    // all
+    AIRPLAY_LOGW("The sender's timeline is %" PRId64 " s off its clock, playing without synchronization",
+                 error_us / 1000000);
+    this->timeline_mismatch_ = true;
+    this->playback_started_ = false;
+    return false;
+  }
   if (error_us > START_WINDOW_US)
     return false;
 
@@ -1906,9 +1920,9 @@ bool Receiver::synced_step_(int64_t now_us) {
   if (error_us < -EARLY_LATE_THRESHOLD_US) {
     AIRPLAY_LOGV("Packet %u is %" PRId32 " ms late", this->next_seq_, static_cast<int32_t>(-error_us / 1000));
     if (!this->late_logged_) {
-      // Once per start: tells a sender's timing that does not fit its audio from a short hold-up
+      // Once per stream: tells a sender's timing that does not fit its audio from a short hold-up
       this->late_logged_ = true;
-      AIRPLAY_LOGD("First late packet after the start: %" PRId32 " ms late, %" PRIu32 " packets buffered, sender %u, "
+      AIRPLAY_LOGD("First late packet: %" PRId32 " ms late, %" PRIu32 " packets buffered, sender %u, "
                    "latency %" PRIu32 " ms",
                    static_cast<int32_t>(-error_us / 1000), this->buffered_packets_(), this->sender_version_,
                    static_cast<uint32_t>(frames_to_us(this->sender_latency_frames_) / 1000));

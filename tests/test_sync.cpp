@@ -28,6 +28,7 @@ struct Scenario {
   bool flush_after_record = false;  // Like pyatv: a FLUSH after RECORD, before any audio
   bool sync_before_record = false;  // Like pyatv: the first sync packet comes before RECORD
   int lost_first_syncs = 0;         // The first sync packets after RECORD never arrive
+  int64_t sync_clock_offset_s = 0;  // Sync packets carry a time this far off the clock that answers timing requests
   double duration_s = 60;
   double measure_from_s = 8;         // Errors are measured from this time on, once playback has settled
   double output_start_delay_ms = 0;  // The output plays its first audio this long after it got it (DMA buffers)
@@ -150,7 +151,7 @@ struct Sim : Transport {
       std::vector<uint8_t> sync = {0x80, 0xd4, 0x00, 0x04};
       sync.resize(20);
       put_be32(&sync[4], rtp_now - SENDER_LATENCY);
-      put_ntp(&sync[8], now_remote);
+      put_ntp(&sync[8], now_remote + this->sc.sync_clock_offset_s * 1000000000LL);
       put_be32(&sync[16], rtp_now);
       if (!this->lost() && this->syncs_sent >= this->sc.lost_first_syncs)
         this->deliver(this->now_us + this->net_delay_us(), UdpChannel::CONTROL, sync);
@@ -365,6 +366,10 @@ int main(int argc, char **argv) {
                        .buffer_ms = 500,
                        .expect_synced = false,
                        .max_discontinuities = 5});
+  // Music Assistant in a group answers timing requests on the group's PTP timeline but sends its own time in sync
+  // packets
+  scenarios.push_back(
+      {.name = "sync packets off the clock (unsynced)", .sync_clock_offset_s = 1375607, .expect_synced = false});
   scenarios.push_back({.name = "no output reports (unsynced)",
                        .jitter_ms = 2,
                        .output_reports = false,

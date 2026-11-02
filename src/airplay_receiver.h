@@ -431,6 +431,7 @@ class Receiver {
   uint32_t last_sender_volume_ms_{0};
   uint32_t restarts_{0};            // Of playback in this session
   bool late_logged_{false};         // The first late packet since playback started was logged
+  bool timeline_mismatch_{false};   // The sender's sync packets do not fit its clock: play without synchronization
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};
