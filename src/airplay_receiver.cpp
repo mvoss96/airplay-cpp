@@ -1361,8 +1361,10 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     return;
   }
   // Only from the sender that plays, not from one that was set aside and goes on sending (Music Assistant does)
-  if (this->session_owner_ == NO_CONNECTION || from.address != this->connections_[this->session_owner_].peer.address)
+  if (this->session_owner_ == NO_CONNECTION || from.address != this->connections_[this->session_owner_].peer.address) {
+    this->stats_.foreign_packets++;
     return;
+  }
   // The clock exchange and sync packets start with SETUP, the audio with RECORD
   switch (type) {
     case PAYLOAD_TIMING_REPLY:
@@ -1838,12 +1840,13 @@ void Receiver::playback_step_(int64_t now_us) {
     const ReceiverStats &st = this->stats_;
     AIRPLAY_LOGD("%s: buffered %" PRIu32 " ms, output %" PRIu32 " ms, servo %" PRId32 " us; lost %" PRIu32
                  ", late %" PRIu32 ", resend requests %" PRIu32 ", trimmed frames %" PRIu32 ", silence %" PRIu32
-                 " ms, underruns %" PRIu32 ", longest poll gap %" PRIu32 " ms",
+                 " ms, underruns %" PRIu32 ", longest poll gap %" PRIu32 " ms, foreign packets %" PRIu32,
                  this->synced_ ? "Synchronized" : "Unsynchronized",
                  static_cast<uint32_t>(frames_to_us(this->buffered_packets_() * FRAMES_PER_PACKET) / 1000),
                  static_cast<uint32_t>(frames_to_us(this->speaker_queued_frames_()) / 1000), this->servo_error_us_,
                  st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
-                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms);
+                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms,
+                 st.foreign_packets);
   }
 
   if (!this->have_seq_)

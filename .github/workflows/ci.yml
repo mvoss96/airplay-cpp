@@ -190,7 +190,7 @@ jobs:
             # stream offered before
             *record-first) export RECORD_FIRST=1 AUDIO_KEY=earlier AIRPLAY_TEST_SENDER_VOLUME=0.4 ;;
             # As iOS 26 sends a realtime stream it starts a session with: a key derived from the pairing
-            *stream-key) export RECORD_FIRST=1 AUDIO_KEY=stream ;;
+            *stream-key) export RECORD_FIRST=1 AUDIO_KEY=stream AIRPLAY_DEVICE_VOLUME=0.6 ;;
           esac
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;

@@ -127,11 +127,12 @@ struct ReceiverStats {
   uint32_t late_packets;  // Arrived or were due too late
   uint32_t decode_errors;
   uint32_t resend_requests;
-  uint32_t trimmed_frames;  // Single frames dropped or repeated to follow the sender's clock or the buffer level
-  uint32_t silence_frames;  // Written instead of audio: for lost packets and to line playback up
-  uint32_t underruns;       // Times the output ran out of audio during playback
-  uint32_t longest_gap_ms;  // Longest time between two poll() calls in a session, e.g. while the thread was blocked
-  bool synchronized;        // Playing on the sender's timeline
+  uint32_t trimmed_frames;   // Single frames dropped or repeated to follow the sender's clock or the buffer level
+  uint32_t silence_frames;   // Written instead of audio: for lost packets and to line playback up
+  uint32_t underruns;        // Times the output ran out of audio during playback
+  uint32_t longest_gap_ms;   // Longest time between two poll() calls in a session, e.g. while the thread was blocked
+  uint32_t foreign_packets;  // UDP packets from another sender than the playing one, e.g. one that was set aside
+  bool synchronized;         // Playing on the sender's timeline
 };
 
 /// AirPlay 1 (RAOP) and, optionally, AirPlay 2 audio receiver without any I/O of its own: feed it RTSP
@@ -182,6 +183,9 @@ class Receiver {
   /// @param volume 0 to 1, as Listener::on_volume() reports it.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_volume(float volume);
+  /// @brief The device's volume, 0 to 1, offered to AirPlay 2 senders as the volume to start with: without it
+  /// iOS starts at half volume after the receiver restarted.
+  void set_device_volume(float volume) { this->device_volume_.store(volume, std::memory_order_relaxed); }
   /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_command(SenderCommand command);
@@ -480,6 +484,7 @@ class Receiver {
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
   std::atomic<bool> event_channel_ready_{false};     // The playing sender has an event connection
+  std::atomic<float> device_volume_{-1.0f};          // Below 0 when unknown
   std::atomic<float> sender_volume_request_{-1.0f};  // For the sender's slider; below 0 when none
   std::atomic<uint8_t> sender_command_requests_{0};  // Bit per SenderCommand
 

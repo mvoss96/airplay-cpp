@@ -193,6 +193,8 @@ int main(int argc, char **argv) {
   if (const char *udp_port = std::getenv("AIRPLAY_UDP_PORT"))
     runner.set_udp_base_port(static_cast<uint16_t>(std::atoi(udp_port)));
   airplay::Receiver receiver(config, crypto, runner, sink, &listener);
+  if (const char *device_volume = std::getenv("AIRPLAY_DEVICE_VOLUME"))
+    receiver.set_device_volume(std::strtof(device_volume, nullptr));
   if (!receiver.begin() || !runner.begin(receiver, port)) {
     std::fprintf(stderr, "Failed to start\n");
     return 1;

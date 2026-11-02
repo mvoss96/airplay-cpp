@@ -697,7 +697,8 @@ void Receiver::send_media_remote_command_(const char *value, float volume) {
 
 void Receiver::build_info_(Response &response) {
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
-  writer.begin_dict(11);
+  const float device_volume = this->device_volume_.load(std::memory_order_relaxed);
+  writer.begin_dict(device_volume >= 0.0f ? 12 : 11);
   writer.key("deviceID");
   writer.string(this->device_id_);
   writer.key("macAddress");
@@ -720,6 +721,11 @@ void Receiver::build_info_(Response &response) {
   writer.data(this->public_key_, sizeof(this->public_key_));
   writer.key("vv");
   writer.integer(2);
+  if (device_volume >= 0.0f) {
+    // In AirPlay's dB: -30 to 0, -144 for silence
+    writer.key("initialVolume");
+    writer.real(device_volume <= 0.0f ? -144.0 : static_cast<double>(device_volume) * 30.0 - 30.0);
+  }
   response.body_length = writer.finish();
   if (response.body_length == 0) {
     response.status = 500;
@@ -853,8 +859,8 @@ static constexpr size_t BUFFERED_LENGTH_SIZE = 2;
 static constexpr size_t BUFFERED_RTP_HEADER_SIZE = 12;
 /// The connection is paused while less than this is free in the buffer, and resumed once twice as much is
 static constexpr size_t BUFFERED_PAUSE_BYTES = 8 * 1024;
-/// Packets decoded per poll, to spread the work
-static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 2;
+/// Packets decoded per poll, to spread the work: one packet is 23 ms of audio, a poll comes every few ms
+static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 1;
 static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
 
 /// Whether 24-bit sequence number a comes before b
