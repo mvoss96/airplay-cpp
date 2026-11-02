@@ -542,6 +542,7 @@ class Receiver {
 
   // Buffers
   char *rtsp_buffers_{nullptr};
+  char *extra_headers_{nullptr};  // Extra headers of a response, at the end of rtsp_buffers_
   PacketSlot *slots_{nullptr};
   uint8_t *packet_buffer_{nullptr};
   int16_t *output_buffer_{nullptr};

@@ -275,8 +275,10 @@ bool Receiver::begin() {
   // One spare frame, used when a frame is repeated to correct clock drift
   this->output_buffer_ =
       static_cast<int16_t *>(this->allocate_((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
-  // One extra byte per connection so that headers and body can be null terminated in place
-  this->rtsp_buffers_ = static_cast<char *>(this->allocate_(MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1)));
+  // One extra byte per connection so that headers and body can be null terminated in place. The extra headers of a
+  // response follow; kept off the stack, because pairing needs much of it.
+  this->rtsp_buffers_ =
+      static_cast<char *>(this->allocate_(MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1) + EXTRA_HEADERS_SIZE));
   if (this->slots_ == nullptr || this->packet_buffer_ == nullptr || this->output_buffer_ == nullptr ||
       this->rtsp_buffers_ == nullptr) {
     AIRPLAY_LOGE("Failed to allocate buffers");
@@ -290,6 +292,7 @@ bool Receiver::begin() {
     this->rtsp_buffers_ = nullptr;
     return false;
   }
+  this->extra_headers_ = this->rtsp_buffers_ + MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1);
   for (uint32_t i = 0; i < this->slot_count_; i++) {
     this->slots_[i].valid = false;
     this->slots_[i].missing_since_ms = 0;
@@ -560,6 +563,15 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
   }
 }
 
+/// AirPlay 1 senders name their device in every request; AirPlay 2 senders in the session SETUP. Not inlined, so that
+/// its buffer is not on the stack of the deep pairing path.
+__attribute__((noinline)) static void read_sender_name(const char *request, size_t header_length, char *name,
+                                                       size_t size) {
+  char value[SENDER_NAME_SIZE * 2];
+  if (get_header(request, header_length, "X-Apple-Client-Name", value, sizeof(value)))
+    copy_utf8(name, size, reinterpret_cast<const uint8_t *>(value), std::strlen(value));
+}
+
 bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_length, char *body, size_t body_length,
                                int64_t now_us) {
   Connection &c = this->connections_[connection];
@@ -577,7 +589,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   int status = 200;
   const char *status_text = "OK";
   bool keep_open = true;
-  char extra_headers[EXTRA_HEADERS_SIZE];
+  char *extra_headers = this->extra_headers_;
   extra_headers[0] = '\0';
   char response_body[RESPONSE_BODY_SIZE];
   response_body[0] = '\0';
@@ -585,7 +597,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   const bool is_owner = connection == this->session_owner_;
   Response airplay2_response;
   airplay2_response.headers = extra_headers;
-  airplay2_response.headers_size = sizeof(extra_headers);
+  airplay2_response.headers_size = EXTRA_HEADERS_SIZE;
   bool airplay2 = false;
 
   if (this->airplay2_ && this->handle_airplay2_request_(connection, method, request, header_length, body, body_length,
@@ -597,11 +609,10 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
              !this->check_authorization_(c, method, request, header_length)) {
     status = 401;
     status_text = "Unauthorized";
-    std::snprintf(extra_headers, sizeof(extra_headers), "WWW-Authenticate: Digest realm=\"raop\", nonce=\"%s\"\r\n",
+    std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "WWW-Authenticate: Digest realm=\"raop\", nonce=\"%s\"\r\n",
                   c.nonce);
   } else if (std::strcmp(method, "OPTIONS") == 0) {
-    std::snprintf(extra_headers, sizeof(extra_headers), "%s",
-                  this->airplay2_ ? AIRPLAY2_PUBLIC_METHODS : PUBLIC_METHODS);
+    std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "%s", this->airplay2_ ? AIRPLAY2_PUBLIC_METHODS : PUBLIC_METHODS);
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
     this->take_session_(connection, request, header_length);
     if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
@@ -611,7 +622,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   } else if (std::strcmp(method, "SETUP") == 0) {
     char transport[192] = "";
     get_header(request, header_length, "Transport", transport, sizeof(transport));
-    if (!is_owner || !this->handle_setup_(connection, transport, extra_headers, sizeof(extra_headers))) {
+    if (!is_owner || !this->handle_setup_(connection, transport, extra_headers, EXTRA_HEADERS_SIZE)) {
       status = 455;
       status_text = "Method Not Valid in This State";
     }
@@ -627,16 +638,16 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     if (!is_owner && c.session_pending) {
       // The sender's other session plays on until this one sets up its stream
       c.pending_recording = true;
-      std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
+      std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "Audio-Latency: 11025\r\n");
     } else if (is_owner && this->start_audio_(now_us)) {
       AIRPLAY_LOGI("Playback started");
       this->set_session_state_(SessionState::PLAYING);
       // The same value as shairport-sync and the AirPort Express
-      std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
+      std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "Audio-Latency: 11025\r\n");
     } else if (airplay2_session && this->codec_ == Codec::NONE && this->udp_open_) {
       // AirPlay 2 senders may send RECORD before they set up the audio stream
       AIRPLAY_LOGD("Waiting for the audio stream");
-      std::snprintf(extra_headers, sizeof(extra_headers), "Audio-Latency: 11025\r\n");
+      std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "Audio-Latency: 11025\r\n");
     } else {
       status = 455;
       status_text = "Method Not Valid in This State";
@@ -654,7 +665,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
       AIRPLAY_LOGI("Playback stopped");
       this->end_session_();
     }
-    std::snprintf(extra_headers, sizeof(extra_headers), "Connection: close\r\n");
+    std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "Connection: close\r\n");
     keep_open = false;
   } else if (std::strcmp(method, "SET_PARAMETER") == 0) {
     char content_type[48] = "";
@@ -677,12 +688,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     status_text = "Not Implemented";
   }
 
-  // AirPlay 1 senders name their device in every request; AirPlay 2 senders in the session SETUP
-  char client_name[SENDER_NAME_SIZE * 2];
-  if (get_header(request, header_length, "X-Apple-Client-Name", client_name, sizeof(client_name))) {
-    copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(client_name),
-              std::strlen(client_name));
-  }
+  read_sender_name(request, header_length, c.sender_name, sizeof(c.sender_name));
 
   // Remote control details of the sender that owns the session
   if (connection == this->session_owner_) {
@@ -698,7 +704,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
   const size_t extra_length = std::strlen(extra_headers);
   if (get_header(request, header_length, "Apple-Challenge", challenge, sizeof(challenge))) {
     if (!this->add_apple_response_(connection, challenge, extra_headers + extra_length,
-                                   sizeof(extra_headers) - extra_length)) {
+                                   EXTRA_HEADERS_SIZE - extra_length)) {
       AIRPLAY_LOGW("Failed to answer the Apple-Challenge");
     }
   }
