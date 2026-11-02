@@ -1,7 +1,17 @@
 # airplay-cpp
 
-An AirPlay 1 and 2 audio receiver in C++17, made for the ESP32. The same code runs on Linux, where the tests
-stream to it.
+Native C++17 AirPlay 1 and 2 audio receiver library.
+
+Targets:
+
+- **ESP-IDF** (5, 6): ESP32 with Wi-Fi, runs on an ESP32-S3; also as an ESPHome component,
+  [esphome-airplay](https://github.com/mvoss96/esphome-airplay)
+- **Arduino ESP32** (core 3): example built in CI
+- **Linux**: all interop tests run here
+- **Zephyr**: built and streamed to in CI as `native_sim`, not yet on a real board
+- **macOS**: POSIX example, not tested
+
+Crypto through mbedTLS 2.28, 3.x or 4.x.
 
 ## What makes it different
 
@@ -35,16 +45,10 @@ dependencies:
     git: https://github.com/mvoss96/airplay-cpp.git
 ```
 
-For ESPHome use [esphome-airplay](https://github.com/mvoss96/esphome-airplay).
+## Memory
 
-## Hardware
-
-ESP32 boards with Wi-Fi under ESP-IDF 5 or 6: CI builds for the ESP32, and it runs on an ESP32-S3. Synchronized
-playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for AAC audio, so both need PSRAM.
-Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer. mbedTLS 2.28, 3.x and 4.x are supported.
-
-The Arduino ESP32 and Zephyr examples are built in CI; Zephyr runs only as `native_sim`, not yet on a real board.
-macOS should work with the POSIX example but is not tested.
+On the ESP32, synchronized playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for AAC
+audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer.
 
 ## Limitations
 
