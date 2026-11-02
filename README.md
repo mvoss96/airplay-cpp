@@ -1,15 +1,13 @@
 # airplay-cpp
 
-An AirPlay audio receiver in C++17: turns an ESP32, a Zephyr board or a Linux or macOS machine into a speaker
-that iPhone, iPad, Mac, Music Assistant and other AirPlay senders can stream to. It speaks AirPlay 1 and
-AirPlay 2.
+An AirPlay 1 and 2 audio receiver in C++17, made for the ESP32. The same code runs on Linux, where the tests
+stream to it.
 
 ## What makes it different
 
 It is written for microcontrollers first. There are no exceptions, no RTTI and no heap allocation after
-`begin()`, and the large buffers can go to external RAM. The protocol core does no I/O of its own: a socket
-runner covers ESP-IDF, Arduino-ESP32, Zephyr, Linux and macOS, and other platforms implement a small
-`Transport` interface.
+`begin()`, and the large buffers can go to external RAM. The protocol core does no I/O of its own: a runner for
+BSD sockets is included, and other platforms implement a small `Transport` interface.
 
 Playback is synchronized to the sender's clock and corrects drift one frame at a time at the quietest point, so
 sound stays in sync with video. Lost packets are requested again. Cover art is passed on in pieces as it
@@ -41,10 +39,12 @@ For ESPHome use [esphome-airplay](https://github.com/mvoss96/esphome-airplay).
 
 ## Hardware
 
-ESP32 boards with Wi-Fi under ESP-IDF 5 or 6; CI builds for the ESP32, and it runs on an ESP32-S3 radio. Synchronized playback
-buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds an AAC decoder with 128 KB of buffered audio, so both
-need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer. mbedTLS 2.28, 3.x and 4.x are
-supported.
+ESP32 boards with Wi-Fi under ESP-IDF 5 or 6: CI builds for the ESP32, and it runs on an ESP32-S3. Synchronized
+playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for AAC audio, so both need PSRAM.
+Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer. mbedTLS 2.28, 3.x and 4.x are supported.
+
+The Arduino ESP32 and Zephyr examples are built in CI; Zephyr runs only as `native_sim`, not yet on a real board.
+macOS should work with the POSIX example but is not tested.
 
 ## Limitations
 
