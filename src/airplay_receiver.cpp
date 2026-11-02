@@ -113,7 +113,7 @@ static constexpr int32_t FILL_SMOOTHING_SHIFT = 8;
 /// Time for the output to finish its reset after request_output_restart()
 static constexpr uint32_t OUTPUT_RESTART_SETTLE_MS = 20;
 /// The session shows as paused when a playing sender sends no audio for this long
-static constexpr uint32_t SENDER_IDLE_MS = 10000;
+static constexpr uint32_t SENDER_IDLE_MS = 3000;
 /// The buffer for buffered audio holds at least this much, so that pausing the connection leaves room
 static constexpr size_t MIN_BUFFERED_AUDIO_BYTES = 32 * 1024;
 /// Statistics are logged at debug level this often during playback
@@ -792,10 +792,11 @@ bool Receiver::promote_pending_session_(uint8_t leaving) {
     Connection &c = this->connections_[i];
     if (i == leaving || !c.open || !c.session_pending)
       continue;
-    AIRPLAY_LOGI("The sender's other session took over");
+    const bool other_sender = leaving < MAX_CONNECTIONS && this->connections_[leaving].peer.address != c.peer.address;
+    AIRPLAY_LOGI(other_sender ? "A paused sender is next, still paused" : "The sender's other session took over");
     this->stop_audio_();
     this->stop_buffered_audio_();
-    if (leaving < MAX_CONNECTIONS && this->connections_[leaving].peer.address != c.peer.address)
+    if (other_sender)
       this->restart_clock_();
     this->session_owner_ = i;
     c.session_pending = false;
