@@ -4,8 +4,8 @@ Usage: check_lossy.py out.pcm reference.pcm [--pause]
 
 The output is compared block by block with the reference, each block lined up on its own: the receiver repeats or
 drops single frames to follow the sender's clock, and decoders differ only by rounding. All of the reference must
-arrive, except for the decoder's priming at the start and 50 ms at the end. With --pause the output has a gap of
-silence in the middle, after which it continues about where it stopped.
+arrive, except for the decoder's priming at the start and 50 ms at the end. With --pause the output has gaps of
+silence, after which it continues about where it stopped; blocks that are partly silent are left out.
 """
 import sys
 
@@ -50,8 +50,8 @@ gap = False
 offset = 0
 while offset + BLOCK <= len(out):
     block = out[offset : offset + BLOCK]
-    if not loud[offset : offset + BLOCK].any():
-        gap = True  # Silence, e.g. a pause
+    if loud[offset : offset + BLOCK].mean() < 0.9:
+        gap = True  # Silence, e.g. a pause or another sender taking over, or where it starts or ends
         offset += BLOCK
         continue
     if gap:

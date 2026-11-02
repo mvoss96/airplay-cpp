@@ -445,6 +445,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       }
       return;
     }
+    c.pending_timing_port = static_cast<uint16_t>(timing_port);  // Kept, should it be set aside and come back
     this->take_session_(connection, request, header_length);
     this->stop_buffered_audio_();
     this->airplay2_recording_ = false;

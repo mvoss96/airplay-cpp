@@ -733,13 +733,18 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
 void Receiver::take_session_(uint8_t connection, const char *request, size_t header_length) {
   if (connection != this->session_owner_ && this->session_owner_ != NO_CONNECTION) {
     AIRPLAY_LOGI("Another sender took over");
-    // Paused rather than left playing into nothing, as iOS does not notice that its connection is closed
-    AIRPLAY_LOGD("Pausing the previous sender");
-    this->send_media_remote_command_("paus", -1.0f);
     const uint8_t previous = this->session_owner_;
+    const bool keep = this->set_aside_owner_(connection);
+    const bool recording = this->airplay2_recording_;
     this->session_owner_ = NO_CONNECTION;  // Ends the session rather than handing it to a waiting one
-    this->end_session_();
-    this->close_connection_(previous);
+    this->end_session_(keep ? this->connections_[previous].peer.address : 0);
+    if (keep) {
+      // It does not send RECORD again when it comes back
+      this->connections_[previous].session_pending = true;
+      this->connections_[previous].pending_recording = recording;
+    } else {
+      this->close_connection_(previous);
+    }
   }
   this->stop_audio_();
   this->session_owner_ = connection;
@@ -749,13 +754,22 @@ void Receiver::take_session_(uint8_t connection, const char *request, size_t hea
 void Receiver::adopt_session_(uint8_t connection, const char *request, size_t header_length) {
   Connection &c = this->connections_[connection];
   const uint8_t previous = this->session_owner_;
-  AIRPLAY_LOGI("The sender's other session took over");
+  const bool other_sender = previous != NO_CONNECTION && this->connections_[previous].peer.address != c.peer.address;
+  AIRPLAY_LOGI(other_sender ? "A paused sender took over again" : "The sender's other session took over");
+  const bool keep = previous != NO_CONNECTION && previous != connection && this->set_aside_owner_(connection);
+  const bool recording = this->airplay2_recording_;
   this->stop_audio_();
   this->stop_buffered_audio_();
   // The new owner first, so that closing the previous one keeps the session and its sockets
   this->session_owner_ = connection;
-  if (previous != NO_CONNECTION && previous != connection)
+  if (keep) {
+    this->connections_[previous].session_pending = true;
+    this->connections_[previous].pending_recording = recording;
+  } else if (previous != NO_CONNECTION && previous != connection) {
     this->close_connection_(previous);
+  }
+  if (other_sender)
+    this->restart_clock_();
   c.session_pending = false;
   this->airplay2_recording_ = c.pending_recording;
   this->have_session_stream_key_ = false;
@@ -774,6 +788,8 @@ bool Receiver::promote_pending_session_(uint8_t leaving) {
     AIRPLAY_LOGI("The sender's other session took over");
     this->stop_audio_();
     this->stop_buffered_audio_();
+    if (leaving < MAX_CONNECTIONS && this->connections_[leaving].peer.address != c.peer.address)
+      this->restart_clock_();
     this->session_owner_ = i;
     c.session_pending = false;
     this->airplay2_recording_ = c.pending_recording;
@@ -786,6 +802,26 @@ bool Receiver::promote_pending_session_(uint8_t leaving) {
     return true;
   }
   return false;
+}
+
+bool Receiver::set_aside_owner_(uint8_t connection) {
+  const Connection &previous = this->connections_[this->session_owner_];
+  // An AirPlay 2 sender of another device stays connected, paused, so that it can take over again with a new
+  // stream: iOS keeps its route to a receiver that closes the connection and does not connect again by itself.
+  // Another session of the same sender replaces it, and AirPlay 1 senders cannot come back this way.
+  const bool keep = previous.encrypted && previous.peer.address != this->connections_[connection].peer.address;
+  AIRPLAY_LOGD("Pausing the previous sender%s", keep ? "; it can take over again" : "");
+  this->send_media_remote_command_("paus", -1.0f);
+  return keep;
+}
+
+void Receiver::restart_clock_() {
+  this->timing_requests_sent_ = 0;
+  this->last_timing_request_ms_ = 0;
+  this->timing_sample_count_ = 0;
+  this->timing_sample_index_ = 0;
+  this->clock_locked_ = false;
+  this->forget_timeline_();
 }
 
 void Receiver::read_sender_version_(const char *request, size_t header_length) {
@@ -1181,7 +1217,7 @@ void Receiver::update_remote_target_(const char *dacp_id, const char *active_rem
     this->listener_->on_remote_target(target);
 }
 
-void Receiver::end_session_() {
+void Receiver::end_session_(uint32_t keep_address) {
   this->stop_audio_();
   this->close_udp_();
   this->session_owner_ = NO_CONNECTION;
@@ -1191,10 +1227,11 @@ void Receiver::end_session_() {
   this->airplay2_recording_ = false;
   this->have_session_stream_key_ = false;
   this->stop_buffered_audio_();
-  // The sender's event connection goes with its session
+  // The sender's event connection goes with its session, unless the sender stays connected
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
-    if (c.open && (c.event_channel || c.audio_data)) {
+    const bool kept = c.event_channel && keep_address != 0 && c.peer.address == keep_address;
+    if (c.open && (c.event_channel || c.audio_data) && !kept) {
       c.open = false;
       this->transport_.close(i);
     }
@@ -1311,11 +1348,15 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
   if (!this->udp_open_ || length < RETRANSMIT_HEADER_SIZE)
     return;
   const uint8_t type = packet[1] & 0x7f;
+  if (type == PAYLOAD_TIMING_REQUEST) {
+    this->handle_timing_request_(channel, packet, length, from, now_us);
+    return;
+  }
+  // Only from the sender that plays, not from one that was set aside and goes on sending (Music Assistant does)
+  if (this->session_owner_ == NO_CONNECTION || from.address != this->connections_[this->session_owner_].peer.address)
+    return;
   // The clock exchange and sync packets start with SETUP, the audio with RECORD
   switch (type) {
-    case PAYLOAD_TIMING_REQUEST:
-      this->handle_timing_request_(channel, packet, length, from, now_us);
-      return;
     case PAYLOAD_TIMING_REPLY:
       this->handle_timing_reply_(packet, length, now_us);
       return;

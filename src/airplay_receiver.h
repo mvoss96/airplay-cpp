@@ -356,7 +356,13 @@ class Receiver {
     uint8_t key[CHACHA_KEY_SIZE];
     const char *name;
   };
-  void end_session_();
+  /// @param keep_address The event connection of a sender at this address stays open (0: none)
+  void end_session_(uint32_t keep_address = 0);
+  /// @brief Pauses the session owner before another sender takes over.
+  /// @return true if it stays connected, so that it can take over again
+  bool set_aside_owner_(uint8_t connection);
+  /// Starts the clock exchange over, for a sender of another device
+  void restart_clock_();
   void set_session_state_(SessionState state);
   void close_udp_();
 

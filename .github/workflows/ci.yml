@@ -156,6 +156,8 @@ jobs:
             network: second-session
           - sender: buffered
             network: handover
+          - sender: buffered
+            network: takeover
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -197,6 +199,7 @@ jobs:
             pause) export PAUSE=1 REMOTE_CONTROL=1 ;;
             second-session) export SECOND_SESSION=1 ;;
             handover) export HANDOVER=1 ;;
+            takeover) export TAKEOVER=1 ;;
           esac
           if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test
