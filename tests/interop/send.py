@@ -29,8 +29,9 @@ def record_before_stream_setup():
 
 def stream_without_key(mode):
     """Leaves the key out of the stream SETUP, as iOS does for realtime streams. The audio is then sent
-    unencrypted (mode "none"), encrypted with a zero key (mode "zero") or, as iOS does, with the key of a
-    buffered stream offered before (mode "earlier"), which the receiver turns down."""
+    unencrypted (mode "none"), encrypted with a zero key (mode "zero"), with the key of a buffered stream offered
+    before (mode "earlier"), which the receiver turns down, or as iOS 26 does, with a key derived from the pairing
+    and the stream's connection ID (mode "stream")."""
     from pyatv.protocols.raop.protocols import airplayv2
     from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
@@ -38,6 +39,14 @@ def stream_without_key(mode):
 
     async def setup_audio_stream(self, control_client_port):
         key = bytes(32)
+        if mode == "stream":
+            # As iOS 26 does: derived from the pairing with the stream's connection ID in the salt
+            key, _ = self._verifier.encryption_keys(
+                f"DataStream-Salt{self.rtsp.session_id}",
+                "DataStream-Output-Encryption-Key",
+                "DataStream-Input-Encryption-Key",
+            )
+            key = key[0:32]
         if mode == "earlier":
             key, _ = self._verifier.encryption_keys(
                 airplayv2.EVENTS_SALT, airplayv2.EVENTS_WRITE_INFO, airplayv2.EVENTS_READ_INFO
@@ -86,7 +95,7 @@ async def main():
     finally:
         atv.close()
 
-if os.environ.get("AUDIO_KEY") in ("none", "zero", "earlier"):
+if os.environ.get("AUDIO_KEY") in ("none", "zero", "earlier", "stream"):
     stream_without_key(os.environ["AUDIO_KEY"])
 if os.environ.get("RECORD_FIRST") == "1":
     record_before_stream_setup()

@@ -8,9 +8,10 @@
 # pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
 #   the receiver asks for it and pyatv logs in. With AIRPLAY2=1 pyatv uses AirPlay 2: transient pairing, an
 #   encrypted RTSP connection and ChaCha20-Poly1305 encrypted audio.
-#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero or
-#   earlier leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
-#   unencrypted, encrypted with a zero key or, as iOS does, with the key of a turned down buffered stream.
+#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero,
+#   earlier or stream leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
+#   unencrypted, encrypted with a zero key, with the key of a turned down buffered stream or, as iOS 26 does, with
+#   a key derived from the pairing and the stream's connection ID.
 #   AIRPLAY_TEST_SENDER_VOLUME=<0 to 1> makes the receiver send that volume and a "next track" command to the
 #   sender on the event connection.
 # buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder

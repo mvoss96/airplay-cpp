@@ -383,6 +383,26 @@ static void test_packet_queue() {
   }
 }
 
+// A realtime stream packet from iOS 26 (Spotify), whose stream setup had no key: the key is derived from the transient
+// pairing's secret with the stream's connection ID appended to the salt
+static void test_realtime_stream_key() {
+  const std::vector<uint8_t> secret = hex("e565269a980b49ef12d95fc0f6c70bcf8f337d4576f48d72bac2000fc574341b"
+                                          "e1689f0dd8bf07919b43f7a72efe40dcb0268d4e3688f13130ca9beab2e64198");
+  const std::vector<uint8_t> header = hex("80603de8f624815f00000000");
+  const std::vector<uint8_t> payload = hex("9f79d02de8b962326edca0380227377a1b99478c7a03b7cb8dd3f8a7101e07e7"
+                                           "c454662f42591d2949e2fd0012e349820700000000000000");
+  uint8_t key[CHACHA_KEY_SIZE];
+  hkdf_sha512_key("DataStream-Salt3864104479819057726", "DataStream-Output-Encryption-Key", secret.data(),
+                  secret.size(), key);
+  uint8_t nonce[CHACHA_NONCE_SIZE] = {};
+  std::memcpy(nonce + 4, payload.data() + payload.size() - 8, 8);
+  const size_t length = payload.size() - POLY1305_TAG_SIZE - 8;
+  uint8_t plain[64];
+  CHECK(chacha20_poly1305_decrypt(key, nonce, header.data() + 4, 8, payload.data(), length, payload.data() + length,
+                                  plain));
+  CHECK(plain[0] >> 5 == 1);  // An ALAC frame with a channel pair
+}
+
 int main() {
   test_sha512();
   test_hmac_hkdf();
@@ -393,5 +413,6 @@ int main() {
   test_plist_writer();
   test_fairplay_setup();
   test_packet_queue();
+  test_realtime_stream_key();
   return finish("test_hap");
 }

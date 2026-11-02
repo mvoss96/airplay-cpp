@@ -40,7 +40,9 @@ static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key"
 // The receiver writes on the event connection with this key, though the sender opened it
 static constexpr char EVENTS_SALT[] = "Events-Salt";
 static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Key";
-static constexpr char EVENTS_SENDER_WRITE_INFO[] = "Events-Read-Encryption-Key";
+// The key of a realtime stream that came without one; the salt gets the stream's connection ID appended
+static constexpr char DATA_STREAM_SALT[] = "DataStream-Salt";
+static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encryption-Key";
 
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
@@ -360,16 +362,6 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       std::memcpy(c.pair_secret, secret, sizeof(c.pair_secret));
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
-      // For working out a sender's stream encryption offline; transient pairing secrets are new for every
-      // connection. Here rather than with the packet dump, which comes in a burst.
-      if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
-        for (size_t offset = 0; offset < SHA512_SIZE; offset += 16) {
-          const uint8_t *p = c.pair_secret + offset;
-          AIRPLAY_LOGD("Pairing secret %u: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-                       static_cast<unsigned>(offset), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10],
-                       p[11], p[12], p[13], p[14], p[15]);
-        }
-      }
     } else {
       AIRPLAY_LOGW("Pairing failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
@@ -398,15 +390,6 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
   }
   const PlistReader::Object root = reader.root();
   const PlistReader::Object streams = reader.get(root, "streams");
-  if (streams == PlistReader::NONE && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
-    // In pieces, as log lines are short; the response is not built yet, so its buffer is free
-    auto *text = reinterpret_cast<char *>(this->body_buffer_);
-    const size_t text_length = reader.describe(root, text, AIRPLAY2_BODY_SIZE);
-    for (size_t offset = 0; offset < text_length; offset += 120) {
-      AIRPLAY_LOGD("Session setup (%u): %.*s", static_cast<unsigned>(offset / 120),
-                   static_cast<int>(std::min<size_t>(text_length - offset, 120)), text + offset);
-    }
-  }
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
 
   if (streams == PlistReader::NONE) {
@@ -574,22 +557,16 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
         AIRPLAY_LOGW("Unsupported audio format %" PRId64, compression);
         return;
       }
-      // iOS leaves the key out of realtime streams. Which key it uses then (or none) is told by the first packets.
+      // iOS leaves the key out of realtime streams it starts a session with. Which key it uses then (or none) is
+      // told by the first packets.
       if (key != nullptr) {
         std::memcpy(this->audio_key_, key, sizeof(this->audio_key_));
         this->audio_encryption_ = AudioEncryption::KEY;
       } else {
-        this->prepare_key_candidates_(c);
+        int64_t stream_id = 0;
+        const bool has_stream_id = reader.get_integer(reader.get(stream, "streamConnectionID"), &stream_id);
+        this->prepare_key_candidates_(c, has_stream_id ? &stream_id : nullptr);
         this->audio_encryption_ = AudioEncryption::UNKNOWN;
-        if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
-          // In pieces, as log lines are short
-          char text[800];
-          const size_t text_length = reader.describe(stream, text, sizeof(text));
-          for (size_t offset = 0; offset < text_length; offset += 120) {
-            AIRPLAY_LOGD("Stream without a key (%u): %.*s", static_cast<unsigned>(offset / 120),
-                         static_cast<int>(std::min<size_t>(text_length - offset, 120)), text + offset);
-          }
-        }
       }
       this->airplay2_audio_ = true;
       this->encrypted_ = false;
@@ -754,27 +731,26 @@ void Receiver::add_key_candidate_(const uint8_t *key, const char *name) {
   candidate.name = name;
 }
 
-void Receiver::prepare_key_candidates_(const Connection &c) {
-  // The most likely first: iOS uses the key of an earlier stream of the session (also one this receiver turned
-  // down). The others are guesses for senders that start a session with a realtime stream.
+void Receiver::prepare_key_candidates_(const Connection &c, const int64_t *stream_id) {
   this->key_candidate_count_ = 0;
   this->undecryptable_packets_ = 0;
   this->plain_packets_ = 0;
+  // iOS 26: derived from pair-setup's secret like a data stream key, with the stream's connection ID (an unsigned
+  // 64-bit number) appended to the salt
+  if (stream_id != nullptr && c.encrypted) {
+    char salt[sizeof(DATA_STREAM_SALT) + 20];
+    std::snprintf(salt, sizeof(salt), "%s%" PRIu64, DATA_STREAM_SALT, static_cast<uint64_t>(*stream_id));
+    uint8_t derived[CHACHA_KEY_SIZE];
+    hkdf_sha512_key(salt, DATA_STREAM_SENDER_WRITE_INFO, c.pair_secret, SHA512_SIZE, derived);
+    this->add_key_candidate_(derived, "the key of the stream connection");
+  }
+  // Earlier: the key of an earlier stream of the session, also one this receiver turned down
   if (this->have_session_stream_key_)
     this->add_key_candidate_(this->session_stream_key_, "the key of an earlier stream");
   if (this->remembered_key_address_ == c.peer.address)
     this->add_key_candidate_(this->remembered_stream_key_, "the key of the sender's previous session");
   const uint8_t zero[CHACHA_KEY_SIZE] = {};
   this->add_key_candidate_(zero, "a zero key");
-  if (c.encrypted) {
-    uint8_t derived[CHACHA_KEY_SIZE];
-    this->add_key_candidate_(c.pair_secret, "the pairing secret");
-    this->add_key_candidate_(c.event_key, "the event write key");
-    hkdf_sha512_key(EVENTS_SALT, EVENTS_SENDER_WRITE_INFO, c.pair_secret, SHA512_SIZE, derived);
-    this->add_key_candidate_(derived, "the event read key");
-    this->add_key_candidate_(c.read_key, "the control write key");
-    this->add_key_candidate_(c.write_key, "the control read key");
-  }
 }
 
 size_t Receiver::decrypt_airplay2_audio_(const uint8_t *header, const uint8_t *payload, size_t length,

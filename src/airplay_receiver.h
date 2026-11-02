@@ -330,7 +330,8 @@ class Receiver {
   void update_event_channel_ready_();
   void send_sender_requests_();
   void add_key_candidate_(const uint8_t *key, const char *name);
-  void prepare_key_candidates_(const Connection &c);
+  /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
+  void prepare_key_candidates_(const Connection &c, const int64_t *stream_id);
   /// Sends a media remote command on the playing sender's event connection; the volume only if not below 0
   void send_media_remote_command_(const char *value, float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
@@ -350,7 +351,7 @@ class Receiver {
     FAILED,  // No key fits: the audio cannot be decrypted
   };
   /// Keys tried for a realtime stream that came without one
-  static constexpr size_t MAX_KEY_CANDIDATES = 8;
+  static constexpr size_t MAX_KEY_CANDIDATES = 4;
   struct KeyCandidate {
     uint8_t key[CHACHA_KEY_SIZE];
     const char *name;
