@@ -1386,6 +1386,12 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
   }
   if (!this->audio_active_ || this->buffered_stream_)
     return;
+  // Held: dropped as it arrives, unless the sender is paused and its audio may show that it plays again
+  if (this->audio_held_ && this->session_state_ != SessionState::PAUSED) {
+    if (type == PAYLOAD_AUDIO)
+      this->last_packet_ms_ = to_ms(now_us);
+    return;
+  }
 
   switch (type) {
     case PAYLOAD_AUDIO:
@@ -1783,6 +1789,21 @@ void Receiver::poll(int64_t now_us) {
     }
   }
 
+  const bool hold = this->hold_requested_.load(std::memory_order_acquire);
+  if (hold != this->audio_held_) {
+    this->audio_held_ = hold;
+    if (hold) {
+      AIRPLAY_LOGD("Holding the sender's audio");
+    } else {
+      AIRPLAY_LOGD("Playing the sender's audio again");
+    }
+    // Audio was dropped meanwhile, so start over with what arrives next
+    if (this->audio_active_) {
+      this->reset_playback_();
+      this->accept_any_seq_ = true;
+    }
+  }
+
   if (this->output_restart_requested_.exchange(false, std::memory_order_acq_rel)) {
     this->output_restart_pending_ = true;
     this->output_restart_ms_ = now_ms;
@@ -1810,6 +1831,15 @@ void Receiver::poll(int64_t now_us) {
 
   if (!this->audio_active_)
     return;
+
+  if (this->audio_held_) {
+    // Buffered audio stays with the sender, which waits while the connection is not read. It pauses and plays by
+    // SETRATEANCHORTIME, so it is not shown as paused for sending nothing.
+    if (!this->buffered_stream_ && this->session_state_ == SessionState::PLAYING &&
+        now_ms - this->last_packet_ms_ > SENDER_IDLE_MS)
+      this->set_session_state_(SessionState::PAUSED);
+    return;
+  }
 
   if (this->buffered_stream_) {
     this->decode_buffered_audio_(now_ms);

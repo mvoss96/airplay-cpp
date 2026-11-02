@@ -483,6 +483,63 @@ static void test_control() {
   CHECK(f.listener.artwork_clears == 3);        // Also cleared when the first sender was taken over
 }
 
+/// Audio played since `from`, ignoring silence
+static size_t audible_frames(const std::vector<std::pair<int16_t, int16_t>> &played, size_t from) {
+  size_t count = 0;
+  for (size_t i = from; i < played.size(); i++)
+    count += played[i].first != 0 || played[i].second != 0;
+  return count;
+}
+
+static void test_audio_hold() {
+  Fixture f;
+  f.open(0);
+  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 200);
+  CHECK(status_code(f.request(0, "SETUP", "Transport: RTP/AVP/UDP;control_port=6001;timing_port=6002\r\n")) == 200);
+  CHECK(status_code(f.request(0, "RECORD", "RTP-Info: seq=1;rtptime=0\r\n")) == 200);
+  uint16_t seq = 1;
+  auto send = [&](uint32_t packets, bool audible) {
+    for (uint32_t i = 0; i < packets; i++, seq++) {
+      const uint32_t rtp = seq * FRAMES_PER_PACKET;
+      f.udp(UdpChannel::AUDIO, rtp_packet(0x60, seq, rtp, audible ? marked_pcm(rtp) : std::vector<uint8_t>(1408, 0)));
+      f.run(8000);
+    }
+  };
+  send(200, true);
+  CHECK(audible_frames(f.played, 0) > 0);
+
+  // Held: nothing more is played, but the sender still shows as playing while it sends
+  f.receiver.set_audio_held(true);
+  f.run(500000);  // The output plays what it has
+  size_t mark = f.played.size();
+  send(300, true);
+  CHECK(audible_frames(f.played, mark) == 0);
+  CHECK(f.listener.last_state() == SessionState::PLAYING);
+  CHECK(f.receiver.stats().resend_requests == 0);
+  CHECK(!f.receiver.needs_fast_polling());
+
+  // It stops sending, so it shows as paused; audible audio shows that it plays again, still held
+  f.run(4000000);
+  CHECK(f.listener.last_state() == SessionState::PAUSED);
+  seq += 100;
+  send(1, false);
+  CHECK(f.listener.last_state() == SessionState::PAUSED);
+  send(5, true);
+  CHECK(f.listener.last_state() == SessionState::PLAYING);
+  mark = f.played.size();
+  send(100, true);
+  CHECK(audible_frames(f.played, mark) == 0);
+
+  // Released: plays what arrives from then on, without asking for what was dropped
+  f.receiver.set_audio_held(false);
+  f.receiver.request_output_restart();
+  send(300, true);
+  CHECK(audible_frames(f.played, mark) > 0);
+  CHECK(f.receiver.stats().resend_requests == 0);
+  CHECK(f.receiver.needs_fast_polling());
+  f.receiver.set_audio_held(false);
+}
+
 static void test_artwork_flow_control() {
   Fixture f;
   f.open(0);
@@ -728,6 +785,7 @@ int main() {
   test_challenge();
   test_encrypted_session();
   test_control();
+  test_audio_hold();
   test_errors_and_disconnect();
   test_artwork_interrupted();
   test_artwork_flow_control();

@@ -167,7 +167,9 @@ class Receiver {
   bool is_session_owner(uint8_t connection) const { return this->session_owner_ == connection; }
   /// @brief Whether a connection belongs to the playing sender: its RTSP, event or buffered audio connection.
   bool is_session_connection(uint8_t connection) const;
-  bool needs_fast_polling() const { return this->audio_active_ || this->artwork_paused_ != NO_CONNECTION; }
+  bool needs_fast_polling() const {
+    return (this->audio_active_ && !this->audio_held_) || this->artwork_paused_ != NO_CONNECTION;
+  }
   SessionState session_state() const { return this->session_state_; }
   const ReceiverStats &stats() const { return this->stats_; }
 
@@ -179,6 +181,10 @@ class Receiver {
   void request_output_restart() { this->output_restart_requested_.store(true, std::memory_order_release); }
   /// @brief Ends the session at the next poll(), e.g. because another source takes over the speaker.
   void request_disconnect() { this->disconnect_requested_.store(true, std::memory_order_release); }
+  /// @brief Stops playing the sender's audio while its session stays, e.g. while another source has the speaker.
+  /// The audio is dropped as it arrives, without decoding it. The session state still follows the sender, so that
+  /// it shows when the sender pauses and plays again. Lasts across sessions until released.
+  void set_audio_held(bool held) { this->hold_requested_.store(held, std::memory_order_release); }
   /// @brief Moves the AirPlay 2 sender's volume slider, e.g. after the volume was changed on the device.
   /// @param volume 0 to 1, as Listener::on_volume() reports it.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
@@ -487,6 +493,7 @@ class Receiver {
   std::atomic<uint32_t> played_timestamp_{0};  // Low 32 bits of the time in microseconds; 0 = none
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
+  std::atomic<bool> hold_requested_{false};
   std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
   std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
   std::atomic<uint32_t> sender_address_{0};
@@ -534,6 +541,7 @@ class Receiver {
   uint32_t last_resend_scan_ms_{0};
   uint32_t output_restart_ms_{0};
   bool output_restart_pending_{false};
+  bool audio_held_{false};  // hold_requested_, applied in poll()
   bool playback_started_{false};
   bool synced_{false};
   bool sync_logged_{false};
