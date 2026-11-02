@@ -411,7 +411,14 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
 void Receiver::connection_closed(uint8_t connection) {
   if (connection >= MAX_CONNECTIONS || !this->connections_[connection].open)
     return;
-  AIRPLAY_LOGD("Connection closed");
+  const Connection &c = this->connections_[connection];
+  const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+  const char *kind = c.event_channel                      ? "event"
+                     : c.audio_data                       ? "audio"
+                     : c.session_pending                  ? "paused sender"
+                     : connection == this->session_owner_ ? "playing sender"
+                                                          : "other";
+  AIRPLAY_LOGD("Connection closed (%u.%u.%u.%u, %s)", ip[0], ip[1], ip[2], ip[3], kind);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
@@ -1289,6 +1296,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->restarts_ = 0;
   this->late_logged_ = false;
   this->timeline_mismatch_ = false;
+  this->timeline_unusable_ = false;
   this->audio_active_ = true;
   return true;
 }
@@ -1361,7 +1369,7 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
       this->handle_timing_reply_(packet, length, now_us);
       return;
     case PAYLOAD_SYNC:
-      this->handle_sync_packet_(packet, length);
+      this->handle_sync_packet_(packet, length, now_us);
       return;
     default:
       break;
@@ -1497,7 +1505,7 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
   }
 }
 
-void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length) {
+void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us) {
   if (length < SYNC_PACKET_SIZE)
     return;
   // The frame at bytes 4-7 is due at the sender's time in bytes 8-15, plus a fixed offset for current
@@ -1512,6 +1520,13 @@ void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length) {
   const uint16_t version = this->sender_version_;
   const bool fixed_offset = flags == 7 || (version > 0 && version <= 353) || version >= 371;
   int64_t remote_ns = read_ntp_ns(packet + 8);
+  // The sender's clock as its sync packets show it, for a sender whose clock requests answer on another one: the
+  // largest offset has the least network delay
+  this->sync_offsets_[this->sync_offset_index_] = remote_ns - local_ntp_ns(now_us);
+  this->sync_offset_index_ = (this->sync_offset_index_ + 1) % SYNC_OFFSET_COUNT;
+  if (this->sync_offset_count_ < SYNC_OFFSET_COUNT)
+    this->sync_offset_count_++;
+  this->sync_clock_offset_ns_ = *std::max_element(this->sync_offsets_, this->sync_offsets_ + this->sync_offset_count_);
   if (fixed_offset)
     remote_ns += frames_to_us(FIXED_LATENCY_OFFSET_FRAMES) * 1000;
   if (this->anchor_valid_ && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
@@ -1672,7 +1687,9 @@ bool Receiver::rtp_to_local_us_(uint32_t rtp, int64_t *local_us) const {
   const int64_t remote_ns =
       this->anchor_remote_ns_ + static_cast<int64_t>(static_cast<int32_t>(rtp - this->anchor_rtp_)) * 1000000000LL /
                                     static_cast<int64_t>(SAMPLE_RATE);
-  *local_us = (remote_ns - this->clock_offset_ns_ - NTP_UNIX_OFFSET_NS) / 1000;
+  const int64_t offset_ns =
+      this->timeline_mismatch_ && this->sync_offset_count_ > 0 ? this->sync_clock_offset_ns_ : this->clock_offset_ns_;
+  *local_us = (remote_ns - offset_ns - NTP_UNIX_OFFSET_NS) / 1000;
   return true;
 }
 
@@ -1862,7 +1879,7 @@ bool Receiver::start_playback_() {
   const bool fits = capacity_frames >= this->sender_latency_frames_ + SYNC_MARGIN_FRAMES;
 
   if (this->clock_locked_ && this->anchor_valid_ && fits && !this->played_reports_missing_ &&
-      !this->timeline_mismatch_) {
+      !this->timeline_unusable_) {
     this->synced_ = true;
   } else {
     // Wait for the sender's clock while the buffer has room, unless synchronized playback is impossible anyway.
@@ -1935,12 +1952,17 @@ bool Receiver::synced_step_(int64_t now_us) {
   // Positive: the packet would be heard too early; negative: too late
   const int64_t error_us = target_us - heard_us;
   if (error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) {
-    // The sender's sync packets and its clock disagree (Music Assistant in a group answers clock requests on the
-    // group's PTP timeline but sends its own time in sync packets): play without synchronization rather than not at
-    // all
-    AIRPLAY_LOGW("The sender's timeline is %" PRId64 " s off its clock, playing without synchronization",
-                 error_us / 1000000);
-    this->timeline_mismatch_ = true;
+    // The sender's sync packets and its clock disagree: Music Assistant answers clock requests on a group's PTP
+    // timeline, or 70 years apart, but sends its own time in sync packets. Its sync packets are followed instead,
+    // which only adds the network delay; if that does not fit either, it plays without synchronization.
+    if (!this->timeline_mismatch_) {
+      AIRPLAY_LOGW("The sender's timeline is %" PRId64 " s off its clock, following its sync packets",
+                   error_us / 1000000);
+      this->timeline_mismatch_ = true;
+    } else {
+      AIRPLAY_LOGW("The sender's timeline does not fit its sync packets either, playing without synchronization");
+      this->timeline_unusable_ = true;
+    }
     this->playback_started_ = false;
     return false;
   }

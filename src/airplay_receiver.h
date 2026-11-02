@@ -338,6 +338,8 @@ class Receiver {
   void forget_timeline_() {
     this->anchor_valid_ = false;
     this->sender_latency_frames_ = 0;
+    this->sync_offset_count_ = 0;
+    this->sync_offset_index_ = 0;
   }
   void update_receive_pause_();
   /// Takes a packet that did not decrypt with the zero key as unencrypted audio from now on
@@ -373,7 +375,7 @@ class Receiver {
   void reset_playback_();
   /// @param header The packet's RTP header
   void handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
-  void handle_sync_packet_(const uint8_t *packet, size_t length);
+  void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
                               int64_t now_us);
@@ -435,9 +437,16 @@ class Receiver {
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
   uint32_t event_cseq_{0};
   uint32_t last_sender_volume_ms_{0};
-  uint32_t restarts_{0};            // Of playback in this session
-  bool late_logged_{false};         // The first late packet since playback started was logged
-  bool timeline_mismatch_{false};   // The sender's sync packets do not fit its clock: play without synchronization
+  uint32_t restarts_{0};           // Of playback in this session
+  bool late_logged_{false};        // The first late packet since playback started was logged
+  bool timeline_mismatch_{false};  // The sender's sync packets do not fit its clock: they are followed instead
+  bool timeline_unusable_{false};  // Not even its sync packets fit: play without synchronization
+  // Offsets of the sender's clock as its last sync packets show it
+  static constexpr size_t SYNC_OFFSET_COUNT = 8;
+  int64_t sync_offsets_[SYNC_OFFSET_COUNT]{};
+  size_t sync_offset_index_{0};
+  size_t sync_offset_count_{0};
+  int64_t sync_clock_offset_ns_{0};
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};

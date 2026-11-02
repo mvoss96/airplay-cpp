@@ -366,10 +366,10 @@ int main(int argc, char **argv) {
                        .buffer_ms = 500,
                        .expect_synced = false,
                        .max_discontinuities = 5});
-  // Music Assistant in a group answers timing requests on the group's PTP timeline but sends its own time in sync
-  // packets
-  scenarios.push_back(
-      {.name = "sync packets off the clock (unsynced)", .sync_clock_offset_s = 1375607, .expect_synced = false});
+  // Music Assistant answers timing requests on a group's PTP timeline, or 70 years apart, but sends its own time in
+  // sync packets: those are followed
+  scenarios.push_back({.name = "sync packets 16 days off the clock", .sync_clock_offset_s = 1375607});
+  scenarios.push_back({.name = "sync packets 70 years off the clock", .sync_clock_offset_s = -2208988800LL});
   scenarios.push_back({.name = "no output reports (unsynced)",
                        .jitter_ms = 2,
                        .output_reports = false,

@@ -286,11 +286,18 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
                                  now_us);
     return true;
   }
-  if (std::strcmp(method, "TEARDOWN") == 0 && plist && data != nullptr && connection == this->session_owner_) {
+  if (std::strcmp(method, "TEARDOWN") == 0 && plist && data != nullptr &&
+      (connection == this->session_owner_ || this->connections_[connection].session_pending)) {
     // With a list of streams only the streams end; the session stays for the next track
     PlistReader reader;
     if (!reader.parse(data, body_length) || reader.get(reader.root(), "streams") == PlistReader::NONE)
       return false;
+    if (connection != this->session_owner_) {
+      // A sender that was set aside ends the stream it had (iOS does on the pause it gets); it stays connected to
+      // come back with a new one
+      AIRPLAY_LOGD("The paused sender ended its stream");
+      return true;
+    }
     AIRPLAY_LOGI("Stream stopped");
     this->stop_audio_();
     this->stop_buffered_audio_();

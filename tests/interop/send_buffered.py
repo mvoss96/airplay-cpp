@@ -143,6 +143,9 @@ async def main():
         # This sender is paused on its event connection and stays connected
         paused = await asyncio.wait_for(event_reader.read(1), 3)
         assert paused, "no request on the event connection"
+        # As iOS does on that pause: its stream ends, the connection stays
+        await exchange(rtsp, "TEARDOWN", {"streams": [{"type": 103}]})
+        data.close()
         for j in range(i, i + 20):
             await send(j, stream=other_stream)
         other_start = await anchor(other_rtsp, i, 0.3)
