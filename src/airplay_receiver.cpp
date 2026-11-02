@@ -732,6 +732,7 @@ void Receiver::take_session_(uint8_t connection, const char *request, size_t hea
   if (connection != this->session_owner_ && this->session_owner_ != NO_CONNECTION) {
     AIRPLAY_LOGI("Another sender took over");
     // Paused rather than left playing into nothing, as iOS does not notice that its connection is closed
+    AIRPLAY_LOGD("Pausing the previous sender");
     this->send_media_remote_command_("paus", -1.0f);
     const uint8_t previous = this->session_owner_;
     this->session_owner_ = NO_CONNECTION;  // Ends the session rather than handing it to a waiting one
@@ -1851,6 +1852,7 @@ bool Receiver::start_playback_() {
     }
   }
   this->playback_started_ = true;
+  this->late_logged_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -1903,6 +1905,14 @@ bool Receiver::synced_step_(int64_t now_us) {
 
   if (error_us < -EARLY_LATE_THRESHOLD_US) {
     AIRPLAY_LOGV("Packet %u is %" PRId32 " ms late", this->next_seq_, static_cast<int32_t>(-error_us / 1000));
+    if (!this->late_logged_) {
+      // Once per start: tells a sender's timing that does not fit its audio from a short hold-up
+      this->late_logged_ = true;
+      AIRPLAY_LOGD("First late packet after the start: %" PRId32 " ms late, %" PRIu32 " packets buffered, sender %u, "
+                   "latency %" PRIu32 " ms",
+                   static_cast<int32_t>(-error_us / 1000), this->buffered_packets_(), this->sender_version_,
+                   static_cast<uint32_t>(frames_to_us(this->sender_latency_frames_) / 1000));
+    }
     this->stats_.late_packets++;
     this->advance_head_();
     return true;
