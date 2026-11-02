@@ -328,7 +328,7 @@ class Receiver {
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
   void update_event_channel_ready_();
-  void send_sender_requests_();
+  void send_sender_requests_(uint32_t now_ms);
   void add_key_candidate_(const uint8_t *key, const char *name);
   /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
   void prepare_key_candidates_(const Connection &c, const int64_t *stream_id);
@@ -428,6 +428,7 @@ class Receiver {
   uint32_t event_channel_address_{0};
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
   uint32_t event_cseq_{0};
+  uint32_t last_sender_volume_ms_{0};
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};

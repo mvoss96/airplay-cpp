@@ -63,8 +63,9 @@ static constexpr uint32_t RESEND_SCAN_INTERVAL_MS = 50;
 static constexpr uint32_t MAX_RESEND_RANGES = 4;
 
 // Synchronized playback
-/// Audio is handed to the sink at most this far ahead, so that a pause or seek takes effect quickly
-static constexpr int64_t MAX_SPEAKER_QUEUE_US = 150000;
+/// Audio is handed to the sink at most this far ahead, so that a pause or seek takes effect quickly. Enough to ride
+/// out the driving thread being held up for a while, e.g. 200 ms on an ESP32 while its display redraws.
+static constexpr int64_t MAX_SPEAKER_QUEUE_US = 250000;
 /// Silence to line up the first packet is only written once it is due within this window
 static constexpr int64_t START_WINDOW_US = 100000;
 /// Packets later than this are dropped; packets earlier than this are lined up with silence
@@ -1692,7 +1693,7 @@ void Receiver::poll(int64_t now_us) {
   }
 
   this->update_event_channel_ready_();
-  this->send_sender_requests_();
+  this->send_sender_requests_(now_ms);
 
   // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again
   if (this->artwork_paused_ != NO_CONNECTION && this->listener_->artwork_room() >= ARTWORK_RESERVE + RTSP_BUFFER_SIZE)

@@ -624,11 +624,16 @@ bool Receiver::request_sender_command(SenderCommand command) {
   return true;
 }
 
-void Receiver::send_sender_requests_() {
-  const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
-  if (volume >= 0.0f) {
-    AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
-    this->send_media_remote_command_("dvlc", volume);
+void Receiver::send_sender_requests_(uint32_t now_ms) {
+  // While a knob turns, only the latest volume goes out every so often
+  static constexpr uint32_t VOLUME_INTERVAL_MS = 100;
+  if (now_ms - this->last_sender_volume_ms_ >= VOLUME_INTERVAL_MS) {
+    const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
+    if (volume >= 0.0f) {
+      this->last_sender_volume_ms_ = now_ms;
+      AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
+      this->send_media_remote_command_("dvlc", volume);
+    }
   }
   const uint8_t commands = this->sender_command_requests_.exchange(0, std::memory_order_acq_rel);
   // The codes a HomePod sends for its buttons, in the order of SenderCommand
