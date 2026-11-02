@@ -186,6 +186,9 @@ class Receiver {
   /// @brief The device's volume, 0 to 1, offered to AirPlay 2 senders as the volume to start with: without it
   /// iOS starts at half volume after the receiver restarted.
   void set_device_volume(float volume) { this->device_volume_.store(volume, std::memory_order_relaxed); }
+  /// @brief IPv4 address (network byte order) of the sender that owns the session, 0 if none; e.g. to tell a sender
+  /// that comes back from another one.
+  uint32_t sender_address() const { return this->sender_address_.load(std::memory_order_relaxed); }
   /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_command(SenderCommand command);
@@ -332,6 +335,7 @@ class Receiver {
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
   void update_event_channel_ready_();
+  void update_sender_address_();
   void send_sender_requests_(uint32_t now_ms);
   void add_key_candidate_(const uint8_t *key, const char *name);
   /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
@@ -483,8 +487,9 @@ class Receiver {
   std::atomic<uint32_t> played_timestamp_{0};  // Low 32 bits of the time in microseconds; 0 = none
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
-  std::atomic<bool> event_channel_ready_{false};     // The playing sender has an event connection
-  std::atomic<float> device_volume_{-1.0f};          // Below 0 when unknown
+  std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
+  std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
+  std::atomic<uint32_t> sender_address_{0};
   std::atomic<float> sender_volume_request_{-1.0f};  // For the sender's slider; below 0 when none
   std::atomic<uint8_t> sender_command_requests_{0};  // Bit per SenderCommand
 

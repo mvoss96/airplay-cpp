@@ -1265,8 +1265,15 @@ void Receiver::set_session_state_(SessionState state) {
   if (this->session_state_ == state)
     return;
   this->session_state_ = state;
+  this->update_sender_address_();
   if (this->listener_ != nullptr)
     this->listener_->on_session_state(state);
+}
+
+void Receiver::update_sender_address_() {
+  const uint32_t address =
+      this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].peer.address : 0;
+  this->sender_address_.store(address, std::memory_order_relaxed);
 }
 
 void Receiver::close_udp_() {
@@ -1762,6 +1769,7 @@ void Receiver::poll(int64_t now_us) {
   }
 
   this->update_event_channel_ready_();
+  this->update_sender_address_();
   this->send_sender_requests_(now_ms);
 
   // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again
