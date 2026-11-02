@@ -429,6 +429,7 @@ class Receiver {
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
   uint32_t event_cseq_{0};
   uint32_t last_sender_volume_ms_{0};
+  uint32_t restarts_{0};            // Of playback in this session
   bool airplay2_recording_{false};  // RECORD came; streams set up afterwards start playing at once  // The session
                                     // owner is about to open its event connection
   uint8_t audio_key_[CHACHA_KEY_SIZE]{};

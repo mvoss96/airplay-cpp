@@ -731,6 +731,8 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
 void Receiver::take_session_(uint8_t connection, const char *request, size_t header_length) {
   if (connection != this->session_owner_ && this->session_owner_ != NO_CONNECTION) {
     AIRPLAY_LOGI("Another sender took over");
+    // Paused rather than left playing into nothing, as iOS does not notice that its connection is closed
+    this->send_media_remote_command_("paus", -1.0f);
     const uint8_t previous = this->session_owner_;
     this->session_owner_ = NO_CONNECTION;  // Ends the session rather than handing it to a waiting one
     this->end_session_();
@@ -1244,6 +1246,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   // The sender's clock is kept from SETUP on: some senders send their first sync packet before RECORD
   this->played_reports_missing_ = false;
   this->sync_logged_ = false;
+  this->restarts_ = 0;
   this->audio_active_ = true;
   return true;
 }
@@ -1840,8 +1843,12 @@ bool Receiver::start_playback_() {
       AIRPLAY_LOGI("Playback not synchronized to the sender");
     }
   } else {
-    // After a pause, a seek or an underrun
-    AIRPLAY_LOGD("Playback restarted (%s)", this->synced_ ? "synchronized" : "not synchronized");
+    // After a pause, a seek or an underrun. When the output takes nothing (e.g. another source plays on the speaker),
+    // this repeats for every packet, so only every 100th is logged.
+    if (this->restarts_++ % 100 == 0) {
+      AIRPLAY_LOGD("Playback restarted (%s, %" PRIu32 " times)", this->synced_ ? "synchronized" : "not synchronized",
+                   this->restarts_);
+    }
   }
   this->playback_started_ = true;
   this->servo_error_us_ = 0;
