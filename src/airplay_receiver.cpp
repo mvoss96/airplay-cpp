@@ -561,11 +561,8 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
 
 /// AirPlay 1 senders name their device in every request; AirPlay 2 senders in the session SETUP. Not inlined, so that
 /// its buffer is not on the stack of the deep pairing path.
-#if defined(__GNUC__)
-__attribute__((noinline))
-#endif
-static void
-read_sender_name(const char *request, size_t header_length, char *name, size_t size) {
+__attribute__((noinline)) static void read_sender_name(const char *request, size_t header_length, char *name,
+                                                       size_t size) {
   char value[SENDER_NAME_SIZE * 2];
   if (get_header(request, header_length, "X-Apple-Client-Name", value, sizeof(value)))
     copy_utf8(name, size, reinterpret_cast<const uint8_t *>(value), std::strlen(value));
