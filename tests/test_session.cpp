@@ -370,9 +370,12 @@ static void test_encrypted_session() {
 static void test_control() {
   Fixture f;
   f.open(0);
-  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 200);
+  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\nX-Apple-Client-Name: Kitchen iPad\r\n",
+                              PCM_SDP)) == 200);
   CHECK(status_code(f.request(0, "SETUP", "Transport: RTP/AVP/UDP;control_port=6001;timing_port=6002\r\n")) == 200);
+  CHECK(f.listener.sender_names.empty());  // Reported once the session plays
   CHECK(status_code(f.request(0, "RECORD", "RTP-Info: seq=1;rtptime=0\r\n")) == 200);
+  CHECK(f.listener.sender_names.size() == 1 && f.listener.sender_names[0] == "Kitchen iPad");
 
   // Volume and mute
   CHECK(status_code(f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "volume: -15.000000\r\n")) ==
@@ -466,6 +469,7 @@ static void test_control() {
   CHECK(f.transport.closed[0] == 1);
   CHECK(f.receiver.is_session_owner(1));
   CHECK(f.listener.last_state() == SessionState::NONE);
+  CHECK(f.listener.sender_names.size() == 2 && f.listener.sender_names[1].empty());  // The new sender sent none
   CHECK(!f.transport.udp_open);
   CHECK(f.listener.mutes.size() == 2);
 

@@ -84,6 +84,9 @@ class Listener {
   virtual void on_progress(const Progress & /*progress*/) {}
   /// The sender's remote control details, see dacp.h
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
+  /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
+  /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
+  virtual void on_sender_name(const char * /*name*/) {}
 };
 
 struct ReceiverConfig {
@@ -235,6 +238,7 @@ class Receiver {
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};
+    char sender_name[SENDER_NAME_SIZE]{};  // The device name the sender sent, empty if none
     uint16_t pending_timing_port{0};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
@@ -342,6 +346,8 @@ class Receiver {
   void stop_buffered_audio_();
   void update_event_channel_ready_();
   void update_sender_address_();
+  /// Reports the name of the session owner's device when it changed
+  void update_sender_name_();
   void send_sender_requests_(uint32_t now_ms);
   void add_key_candidate_(const uint8_t *key, const char *name);
   /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
@@ -497,6 +503,7 @@ class Receiver {
   std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
   std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
   std::atomic<uint32_t> sender_address_{0};
+  char reported_sender_name_[SENDER_NAME_SIZE]{};
   std::atomic<float> sender_volume_request_{-1.0f};  // For the sender's slider; below 0 when none
   std::atomic<uint8_t> sender_command_requests_{0};  // Bit per SenderCommand
 

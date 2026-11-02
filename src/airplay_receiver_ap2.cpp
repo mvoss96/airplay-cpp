@@ -426,6 +426,10 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       AIRPLAY_LOGW("Only NTP timing is supported");
       return;
     }
+    const char *name = nullptr;
+    size_t name_length = 0;
+    if (reader.get_string(reader.get(root, "name"), &name, &name_length))
+      copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(name), name_length);
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     if (this->session_owner_ != NO_CONNECTION && this->session_owner_ != connection && this->udp_open_ &&

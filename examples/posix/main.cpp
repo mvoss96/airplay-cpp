@@ -93,6 +93,10 @@ class PrintingListener : public airplay::Listener {
   }
   void on_volume(float volume) override { std::fprintf(stderr, "Volume: %.0f%%\n", volume * 100); }
   void on_mute(bool muted) override { std::fprintf(stderr, "Muted: %s\n", muted ? "yes" : "no"); }
+  void on_sender_name(const char *name) override {
+    if (name[0] != '\0')
+      std::fprintf(stderr, "Sender: %s\n", name);
+  }
   void on_metadata(const airplay::Metadata &metadata) override {
     if (metadata.title[0] != '\0')
       std::fprintf(stderr, "Now playing: %s - %s (%s)\n", metadata.artist, metadata.title, metadata.album);

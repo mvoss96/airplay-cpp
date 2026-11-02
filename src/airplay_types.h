@@ -24,6 +24,8 @@ enum class UdpChannel : uint8_t {
   TIMING = 2,
 };
 inline constexpr size_t NUM_UDP_CHANNELS = 3;
+/// Longest device name of a sender that is passed on, including the terminating zero
+inline constexpr size_t SENDER_NAME_SIZE = 64;
 
 enum class SessionState : uint8_t {
   NONE = 0,  // No sender is streaming

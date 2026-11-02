@@ -372,6 +372,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.session_pending = false;
   c.pending_recording = false;
+  c.sender_name[0] = '\0';
   c.frame_length = 0;
   // An AirPlay 2 sender connects its event connection right after setting up its session
   if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
@@ -670,6 +671,13 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     AIRPLAY_LOGD("Unsupported request: %.*s", line_length, request);
     status = 501;
     status_text = "Not Implemented";
+  }
+
+  // AirPlay 1 senders name their device in every request; AirPlay 2 senders in the session SETUP
+  char client_name[SENDER_NAME_SIZE * 2];
+  if (get_header(request, header_length, "X-Apple-Client-Name", client_name, sizeof(client_name))) {
+    copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(client_name),
+              std::strlen(client_name));
   }
 
   // Remote control details of the sender that owns the session
@@ -1266,6 +1274,7 @@ void Receiver::set_session_state_(SessionState state) {
     return;
   this->session_state_ = state;
   this->update_sender_address_();
+  this->update_sender_name_();
   if (this->listener_ != nullptr)
     this->listener_->on_session_state(state);
 }
@@ -1274,6 +1283,17 @@ void Receiver::update_sender_address_() {
   const uint32_t address =
       this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].peer.address : 0;
   this->sender_address_.store(address, std::memory_order_relaxed);
+}
+
+void Receiver::update_sender_name_() {
+  const char *name = this->session_owner_ != NO_CONNECTION && this->session_state_ != SessionState::NONE
+                         ? this->connections_[this->session_owner_].sender_name
+                         : "";
+  if (std::strcmp(name, this->reported_sender_name_) == 0)
+    return;
+  std::snprintf(this->reported_sender_name_, sizeof(this->reported_sender_name_), "%s", name);
+  if (this->listener_ != nullptr)
+    this->listener_->on_sender_name(this->reported_sender_name_);
 }
 
 void Receiver::close_udp_() {
@@ -1776,6 +1796,7 @@ void Receiver::poll(int64_t now_us) {
 
   this->update_event_channel_ready_();
   this->update_sender_address_();
+  this->update_sender_name_();
   this->send_sender_requests_(now_ms);
 
   // Room again for cover art: at least what may arrive at once, so that reading does not stop right away again

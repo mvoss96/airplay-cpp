@@ -92,6 +92,7 @@ class RecordingListener : public Listener {
     this->metadata = value;
     this->metadata_count++;
   }
+  void on_sender_name(const char *name) override { this->sender_names.emplace_back(name); }
   void on_remote_target(const RemoteTarget &value) override {
     this->remote = value;
     this->remote_count++;
@@ -126,6 +127,7 @@ class RecordingListener : public Listener {
   std::vector<bool> mutes;
   Metadata metadata{};
   int metadata_count{0};
+  std::vector<std::string> sender_names;
   RemoteTarget remote{};
   int remote_count{0};
   size_t artwork_limit{100000};

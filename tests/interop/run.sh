@@ -113,6 +113,7 @@ if [ "$SENDER" = pyatv ]; then
   if [ "$AIRPLAY2" = 1 ] && [ -z "$PASSWORD" ]; then  # Not offered with a password
     grep -q "Paired" receiver.log
     grep -q "Stream: .*, AirPlay 2" receiver.log
+    grep -q "Sender: pyatv" receiver.log  # The device name from the session SETUP
     if [ -n "$AIRPLAY_TEST_SENDER_VOLUME" ]; then
       grep -q "Volume .* sent to the sender" receiver.log  # On the event connection
       grep -q "Command nitm sent to the sender" receiver.log
