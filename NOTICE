@@ -44,3 +44,10 @@ Protocol references
 Trademarks
   AirPlay is a trademark of Apple Inc., registered in the U.S. and other countries. This
   project is not affiliated with, authorized or endorsed by Apple Inc.
+
+Monocypher
+  src/third_party/monocypher contains Monocypher 4.0.2 (https://monocypher.org) for Ed25519 and X25519,
+  dual-licensed under the 2-clause BSD licence and CC0, see src/third_party/monocypher/LICENCE.md.
+    Copyright (c) 2017-2023, Loup Vaillant
+    Copyright (c) 2017-2019, Michael Savage
+    Copyright (c) 2017-2023, Fabio Scotoni

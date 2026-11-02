@@ -80,8 +80,25 @@ async def main():
     props = dict(kv.split("=", 1) for kv in sys.argv[3:])
     # AIRPLAY_PASSWORD makes the sender log in with RTSP Digest authentication
     password = os.environ.get("AIRPLAY_PASSWORD")
+    credentials = None
+    if os.environ.get("HOMEKIT") == "1":
+        # As the Home app does: a HomeKit pairing with the fixed PIN, then pair-verify with its keys
+        pairing_conf = AppleTV("127.0.0.1", "airplay-cpp test")
+        pairing_conf.add_service(ManualService(sys.argv[2], Protocol.AirPlay, 5000, props))
+        pairing = await pyatv.pair(pairing_conf, Protocol.AirPlay, loop)
+        try:
+            await pairing.begin()
+            pairing.pin(3939)
+            await pairing.finish()
+            assert pairing.has_paired, "HomeKit pairing failed"
+            credentials = pairing.service.credentials
+        finally:
+            await pairing.close()
     conf.add_service(
-        ManualService(sys.argv[2], Protocol.RAOP, 5000, props, password=password, requires_password=bool(password))
+        ManualService(
+            sys.argv[2], Protocol.RAOP, 5000, props, password=password, requires_password=bool(password),
+            credentials=credentials,
+        )
     )
     atv = await pyatv.connect(conf, loop)
     try:

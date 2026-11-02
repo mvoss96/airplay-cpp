@@ -31,9 +31,29 @@ static constexpr int64_t STATUS_FLAGS = 0x4;
 static constexpr char CONTENT_TYPE_PLIST[] = "application/x-apple-binary-plist";
 static constexpr char CONTENT_TYPE_OCTET_STREAM[] = "application/octet-stream";
 
-// Transient pair-setup: the PIN is fixed and the result is only used for this connection
+// Pair-setup: the PIN is fixed. Senders use it for transient pairing, and the Home app for HomeKit pairing.
 static constexpr char PAIR_SETUP_USERNAME[] = "Pair-Setup";
-static constexpr char TRANSIENT_PIN[] = "3939";
+static constexpr char PAIR_SETUP_PIN[] = "3939";
+// HomeKit pairing (HAP specification, chapter 5)
+static constexpr char PAIR_SETUP_ENCRYPT_SALT[] = "Pair-Setup-Encrypt-Salt";
+static constexpr char PAIR_SETUP_ENCRYPT_INFO[] = "Pair-Setup-Encrypt-Info";
+static constexpr char PAIR_SETUP_CONTROLLER_SALT[] = "Pair-Setup-Controller-Sign-Salt";
+static constexpr char PAIR_SETUP_CONTROLLER_INFO[] = "Pair-Setup-Controller-Sign-Info";
+static constexpr char PAIR_SETUP_ACCESSORY_SALT[] = "Pair-Setup-Accessory-Sign-Salt";
+static constexpr char PAIR_SETUP_ACCESSORY_INFO[] = "Pair-Setup-Accessory-Sign-Info";
+static constexpr char PAIR_VERIFY_ENCRYPT_SALT[] = "Pair-Verify-Encrypt-Salt";
+static constexpr char PAIR_VERIFY_ENCRYPT_INFO[] = "Pair-Verify-Encrypt-Info";
+static constexpr uint8_t PAIRING_METHOD_ADD = 3;
+static constexpr uint8_t PAIRING_METHOD_REMOVE = 4;
+static constexpr uint8_t PAIRING_METHOD_LIST = 5;
+static constexpr uint8_t PERMISSION_ADMIN = 1;
+static constexpr uint8_t TLV_PERMISSIONS = 0x0b;
+static constexpr uint8_t TLV_SEPARATOR = 0xff;
+static constexpr uint8_t TLV_ERROR_MAX_PEERS = 0x04;
+/// Status flag: set up for HomeKit access control through the Home app
+static constexpr int64_t STATUS_FLAG_HOMEKIT_ACCESS_CONTROL = 1 << 10;
+/// Longest encrypted TLV of a pairing step: identifier, public key and signature, with the tag
+static constexpr size_t PAIRING_SUB_TLV_SIZE = 256;
 static constexpr char CONTROL_SALT[] = "Control-Salt";
 static constexpr char CONTROL_SENDER_WRITE_INFO[] = "Control-Write-Encryption-Key";
 static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key";
@@ -63,6 +83,12 @@ static void make_nonce(uint64_t counter, uint8_t *nonce) {
     nonce[4 + i] = static_cast<uint8_t>(counter >> (8 * i));
 }
 
+/// Nonce of a pairing message: 4 zero bytes and an 8 character name such as "PS-Msg05"
+static void pairing_nonce(const char *name, uint8_t *nonce) {
+  std::memset(nonce, 0, CHACHA_NONCE_SIZE);
+  std::memcpy(nonce + 4, name, 8);
+}
+
 /// Whether the request's path (up to any query) is `path`
 static bool path_is(const char *request, const char *path) {
   const char *start = std::strchr(request, ' ');
@@ -82,13 +108,19 @@ void Receiver::init_airplay2_() {
   std::snprintf(this->features_, sizeof(this->features_), "0x%" PRIX32 ",0x%" PRIX32,
                 static_cast<uint32_t>(this->airplay2_features_), static_cast<uint32_t>(this->airplay2_features_ >> 32));
 
-  // Key and pairing id stay the same across restarts. Senders only show the key; transient pairing does not use it.
+  // Key and pairing id stay the same across restarts
   uint8_t digest[SHA512_SIZE];
   Sha512 hash;
   hash.update(reinterpret_cast<const uint8_t *>("airplay-cpp"), 11);
   hash.update(mac, 6);
   hash.finish(digest);
-  std::memcpy(this->public_key_, digest, sizeof(this->public_key_));
+  // The HomeKit key pair; derived from the MAC address like shairport-sync derives it from the device ID
+  uint8_t seed[SHA512_SIZE];
+  Sha512 seed_hash;
+  seed_hash.update(reinterpret_cast<const uint8_t *>("airplay-cpp-ed25519"), 19);
+  seed_hash.update(mac, 6);
+  seed_hash.finish(seed);
+  ed25519_key_pair(seed, this->accessory_secret_key_, this->public_key_);
   for (size_t i = 0; i < sizeof(this->public_key_); i++)
     std::snprintf(this->public_key_hex_ + 2 * i, 3, "%02x", this->public_key_[i]);
   for (auto [id_text, id] :
@@ -251,14 +283,22 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     } else if (path_is(request, "/pair-setup")) {
       this->handle_pair_setup_(connection, data, body_length, response);
     } else if (path_is(request, "/pair-verify")) {
-      // Only transient pairing is offered, which needs no verification
-      AIRPLAY_LOGW("pair-verify is not supported, only transient pair-setup");
-      Tlv8Writer writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
-      writer.add_byte(TLV_STATE, 2);
-      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
-      response.content_type = CONTENT_TYPE_OCTET_STREAM;
-      response.body = this->body_buffer_;
-      response.body_length = writer.length();
+      this->handle_pair_verify_(connection, data, body_length, response);
+    } else if (path_is(request, "/pair-add") || path_is(request, "/pair-remove") || path_is(request, "/pair-list")) {
+      // Only after pairing
+      if (!this->connections_[connection].encrypted) {
+        response.status = 470;
+        response.status_text = "Connection Authorization Required";
+      } else {
+        this->handle_pairings_(data, data != nullptr ? body_length : 0, response);
+      }
+    } else if (path_is(request, "/configure")) {
+      if (!this->connections_[connection].encrypted) {
+        response.status = 470;
+        response.status_text = "Connection Authorization Required";
+      } else {
+        this->handle_configure_(data, data != nullptr ? body_length : 0, response);
+      }
     } else if (path_is(request, "/feedback") && this->buffered_stream_) {
       // Keeps buffered streams alive while paused
       PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
@@ -331,19 +371,15 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
     tlv8_find(body, length, TLV_STATE, &state, 1, &value_length);
 
   if (state == 1) {
+    // Transient for a sender's session, otherwise a HomeKit pairing by the Home app
     uint8_t flags = 0;
-    if (!tlv8_find(body, length, TLV_FLAGS, &flags, 1, &value_length) || (flags & TLV_FLAG_TRANSIENT) == 0) {
-      AIRPLAY_LOGW("Only transient pairing is supported");
-      writer.add_byte(TLV_STATE, 2);
-      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
-      response.body_length = writer.length();
-      return;
-    }
+    this->pairing_transient_ =
+        tlv8_find(body, length, TLV_FLAGS, &flags, 1, &value_length) && (flags & TLV_FLAG_TRANSIENT) != 0;
     uint8_t salt[SRP_SALT_SIZE];
     uint8_t secret[SRP_SECRET_SIZE];
     this->config_.random(salt, sizeof(salt));
     this->config_.random(secret, sizeof(secret));
-    this->srp_->begin(PAIR_SETUP_USERNAME, TRANSIENT_PIN, salt, secret);
+    this->srp_->begin(PAIR_SETUP_USERNAME, PAIR_SETUP_PIN, salt, secret);
     std::memset(secret, 0, sizeof(secret));
     this->pairing_connection_ = connection;
     writer.add_byte(TLV_STATE, 2);
@@ -361,16 +397,32 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
         tlv8_find(body, length, TLV_PROOF, proof, sizeof(proof), &proof_length) &&
         this->srp_->verify(client_key, client_key_length, proof, proof_length, server_proof)) {
       writer.add(TLV_PROOF, server_proof, sizeof(server_proof));
+      if (!this->pairing_transient_) {
+        // The keys are exchanged next, in M5 and M6
+        this->pairing_connection_ = connection;
+        response.body_length = writer.length();
+        return;
+      }
       // The sender's write key is the receiver's read key
       const uint8_t *secret = this->srp_->session_key();
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, SHA512_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, SHA512_SIZE, c.write_key);
       hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, SHA512_SIZE, c.event_key);
       std::memcpy(c.pair_secret, secret, sizeof(c.pair_secret));
+      c.pair_secret_length = SHA512_SIZE;
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
     } else {
       AIRPLAY_LOGW("Pairing failed");
+      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+    }
+  } else if (state == 5 && connection == this->pairing_connection_ && !this->pairing_transient_) {
+    this->pairing_connection_ = NO_CONNECTION;
+    writer.add_byte(TLV_STATE, 6);
+    if (this->finish_pair_setup_(body, length, writer)) {
+      AIRPLAY_LOGI("Paired with HomeKit");
+    } else {
+      AIRPLAY_LOGW("HomeKit pairing failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     }
   } else {
@@ -378,6 +430,267 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
     writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
   }
   response.body_length = writer.length();
+}
+
+bool Receiver::finish_pair_setup_(const uint8_t *body, size_t length, Tlv8Writer &writer) {
+  uint8_t encrypted[PAIRING_SUB_TLV_SIZE];
+  size_t encrypted_length = 0;
+  if (!tlv8_find(body, length, TLV_ENCRYPTED_DATA, encrypted, sizeof(encrypted), &encrypted_length) ||
+      encrypted_length < POLY1305_TAG_SIZE)
+    return false;
+  const uint8_t *session_key = this->srp_->session_key();
+  uint8_t key[CHACHA_KEY_SIZE];
+  uint8_t nonce[CHACHA_NONCE_SIZE];
+  hkdf_sha512_key(PAIR_SETUP_ENCRYPT_SALT, PAIR_SETUP_ENCRYPT_INFO, session_key, SHA512_SIZE, key);
+  pairing_nonce("PS-Msg05", nonce);
+  uint8_t plain[PAIRING_SUB_TLV_SIZE];
+  const size_t plain_length = encrypted_length - POLY1305_TAG_SIZE;
+  if (!chacha20_poly1305_decrypt(key, nonce, nullptr, 0, encrypted, plain_length, encrypted + plain_length, plain))
+    return false;
+
+  // The controller signs its pairing identifier and long-term key
+  uint8_t id[HOMEKIT_ID_SIZE];
+  size_t id_length = 0;
+  uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
+  size_t public_key_length = 0;
+  uint8_t signature[ED25519_SIGNATURE_SIZE];
+  size_t signature_length = 0;
+  if (!tlv8_find(plain, plain_length, TLV_IDENTIFIER, id, sizeof(id) - 1, &id_length) || id_length == 0 ||
+      !tlv8_find(plain, plain_length, TLV_PUBLIC_KEY, public_key, sizeof(public_key), &public_key_length) ||
+      public_key_length != sizeof(public_key) ||
+      !tlv8_find(plain, plain_length, TLV_SIGNATURE, signature, sizeof(signature), &signature_length) ||
+      signature_length != sizeof(signature))
+    return false;
+  uint8_t info[CHACHA_KEY_SIZE + HOMEKIT_ID_SIZE + ED25519_PUBLIC_KEY_SIZE];
+  hkdf_sha512_key(PAIR_SETUP_CONTROLLER_SALT, PAIR_SETUP_CONTROLLER_INFO, session_key, SHA512_SIZE, info);
+  std::memcpy(info + CHACHA_KEY_SIZE, id, id_length);
+  std::memcpy(info + CHACHA_KEY_SIZE + id_length, public_key, sizeof(public_key));
+  if (!ed25519_verify(signature, public_key, info, CHACHA_KEY_SIZE + id_length + sizeof(public_key)))
+    return false;
+  if (!this->add_controller_(id, id_length, public_key, PERMISSION_ADMIN))
+    return false;
+
+  // The receiver answers with its own
+  const size_t accessory_id_length = std::strlen(this->pairing_id_);
+  hkdf_sha512_key(PAIR_SETUP_ACCESSORY_SALT, PAIR_SETUP_ACCESSORY_INFO, session_key, SHA512_SIZE, info);
+  std::memcpy(info + CHACHA_KEY_SIZE, this->pairing_id_, accessory_id_length);
+  std::memcpy(info + CHACHA_KEY_SIZE + accessory_id_length, this->public_key_, sizeof(this->public_key_));
+  ed25519_sign(this->accessory_secret_key_, info, CHACHA_KEY_SIZE + accessory_id_length + sizeof(this->public_key_),
+               signature);
+  Tlv8Writer sub(plain, sizeof(plain) - POLY1305_TAG_SIZE);
+  sub.add(TLV_IDENTIFIER, reinterpret_cast<const uint8_t *>(this->pairing_id_), accessory_id_length);
+  sub.add(TLV_PUBLIC_KEY, this->public_key_, sizeof(this->public_key_));
+  sub.add(TLV_SIGNATURE, signature, sizeof(signature));
+  const size_t sub_length = sub.length();
+  if (sub_length == 0)
+    return false;
+  pairing_nonce("PS-Msg06", nonce);
+  chacha20_poly1305_encrypt(key, nonce, nullptr, 0, plain, sub_length, plain, plain + sub_length);
+  writer.add(TLV_ENCRYPTED_DATA, plain, sub_length + POLY1305_TAG_SIZE);
+  return true;
+}
+
+void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size_t length, Response &response) {
+  Connection &c = this->connections_[connection];
+  Tlv8Writer writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  response.content_type = CONTENT_TYPE_OCTET_STREAM;
+  response.body = this->body_buffer_;
+
+  uint8_t state = 0;
+  size_t value_length = 0;
+  if (body != nullptr)
+    tlv8_find(body, length, TLV_STATE, &state, 1, &value_length);
+  uint8_t key[CHACHA_KEY_SIZE];
+  uint8_t nonce[CHACHA_NONCE_SIZE];
+  uint8_t plain[PAIRING_SUB_TLV_SIZE];
+  const size_t accessory_id_length = std::strlen(this->pairing_id_);
+
+  if (state == 1) {
+    writer.add_byte(TLV_STATE, 2);
+    size_t peer_length = 0;
+    this->config_.random(this->verify_secret_, sizeof(this->verify_secret_));
+    x25519_public_key(this->verify_secret_, this->verify_public_);
+    if (!tlv8_find(body, length, TLV_PUBLIC_KEY, this->verify_peer_public_, sizeof(this->verify_peer_public_),
+                   &peer_length) ||
+        peer_length != X25519_KEY_SIZE ||
+        !x25519(this->verify_secret_, this->verify_peer_public_, this->verify_shared_)) {
+      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+      response.body_length = writer.length();
+      return;
+    }
+    // The receiver signs both ephemeral keys and its identifier
+    uint8_t info[2 * X25519_KEY_SIZE + HOMEKIT_ID_SIZE];
+    std::memcpy(info, this->verify_public_, X25519_KEY_SIZE);
+    std::memcpy(info + X25519_KEY_SIZE, this->pairing_id_, accessory_id_length);
+    std::memcpy(info + X25519_KEY_SIZE + accessory_id_length, this->verify_peer_public_, X25519_KEY_SIZE);
+    uint8_t signature[ED25519_SIGNATURE_SIZE];
+    ed25519_sign(this->accessory_secret_key_, info, 2 * X25519_KEY_SIZE + accessory_id_length, signature);
+    Tlv8Writer sub(plain, sizeof(plain) - POLY1305_TAG_SIZE);
+    sub.add(TLV_IDENTIFIER, reinterpret_cast<const uint8_t *>(this->pairing_id_), accessory_id_length);
+    sub.add(TLV_SIGNATURE, signature, sizeof(signature));
+    const size_t sub_length = sub.length();
+    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, this->verify_shared_, X25519_KEY_SIZE, key);
+    pairing_nonce("PV-Msg02", nonce);
+    chacha20_poly1305_encrypt(key, nonce, nullptr, 0, plain, sub_length, plain, plain + sub_length);
+    writer.add(TLV_PUBLIC_KEY, this->verify_public_, X25519_KEY_SIZE);
+    writer.add(TLV_ENCRYPTED_DATA, plain, sub_length + POLY1305_TAG_SIZE);
+    this->verify_connection_ = connection;
+  } else if (state == 3 && connection == this->verify_connection_) {
+    this->verify_connection_ = NO_CONNECTION;
+    writer.add_byte(TLV_STATE, 4);
+    uint8_t encrypted[PAIRING_SUB_TLV_SIZE];
+    size_t encrypted_length = 0;
+    uint8_t id[HOMEKIT_ID_SIZE];
+    size_t id_length = 0;
+    uint8_t signature[ED25519_SIGNATURE_SIZE];
+    size_t signature_length = 0;
+    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, this->verify_shared_, X25519_KEY_SIZE, key);
+    pairing_nonce("PV-Msg03", nonce);
+    bool ok = tlv8_find(body, length, TLV_ENCRYPTED_DATA, encrypted, sizeof(encrypted), &encrypted_length) &&
+              encrypted_length >= POLY1305_TAG_SIZE;
+    const size_t plain_length = ok ? encrypted_length - POLY1305_TAG_SIZE : 0;
+    ok = ok &&
+         chacha20_poly1305_decrypt(key, nonce, nullptr, 0, encrypted, plain_length, encrypted + plain_length, plain) &&
+         tlv8_find(plain, plain_length, TLV_IDENTIFIER, id, sizeof(id) - 1, &id_length) && id_length > 0 &&
+         tlv8_find(plain, plain_length, TLV_SIGNATURE, signature, sizeof(signature), &signature_length) &&
+         signature_length == sizeof(signature);
+    // A known controller must sign with its key. One that is not known (the pairings are lost on restart) is let
+    // in like a transient pairing.
+    const Controller *controller = ok ? this->find_controller_(id, id_length) : nullptr;
+    if (ok && controller != nullptr) {
+      uint8_t info[2 * X25519_KEY_SIZE + HOMEKIT_ID_SIZE];
+      std::memcpy(info, this->verify_peer_public_, X25519_KEY_SIZE);
+      std::memcpy(info + X25519_KEY_SIZE, id, id_length);
+      std::memcpy(info + X25519_KEY_SIZE + id_length, this->verify_public_, X25519_KEY_SIZE);
+      ok = ed25519_verify(signature, controller->public_key, info, 2 * X25519_KEY_SIZE + id_length);
+    }
+    if (!ok) {
+      AIRPLAY_LOGW("pair-verify failed");
+      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+    } else {
+      const uint8_t *secret = this->verify_shared_;
+      hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, X25519_KEY_SIZE, c.read_key);
+      hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, X25519_KEY_SIZE, c.write_key);
+      hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, X25519_KEY_SIZE, c.event_key);
+      std::memcpy(c.pair_secret, secret, X25519_KEY_SIZE);
+      c.pair_secret_length = X25519_KEY_SIZE;
+      c.encrypt_after_response = true;
+      AIRPLAY_LOGD("Verified %s", controller != nullptr ? "a paired controller" : "a controller paired before");
+    }
+  } else {
+    writer.add_byte(TLV_STATE, static_cast<uint8_t>(state + 1));
+    writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
+  }
+  response.body_length = writer.length();
+}
+
+Receiver::Controller *Receiver::find_controller_(const uint8_t *id, size_t length) {
+  for (Controller &controller : this->controllers_) {
+    if (controller.id[0] != '\0' && std::strlen(controller.id) == length && std::memcmp(controller.id, id, length) == 0)
+      return &controller;
+  }
+  return nullptr;
+}
+
+bool Receiver::add_controller_(const uint8_t *id, size_t length, const uint8_t *public_key, uint8_t permissions) {
+  if (length == 0 || length >= HOMEKIT_ID_SIZE)
+    return false;
+  Controller *controller = this->find_controller_(id, length);
+  for (size_t i = 0; controller == nullptr && i < MAX_CONTROLLERS; i++) {
+    if (this->controllers_[i].id[0] == '\0')
+      controller = &this->controllers_[i];
+  }
+  if (controller == nullptr)
+    return false;
+  std::memcpy(controller->id, id, length);
+  controller->id[length] = '\0';
+  std::memcpy(controller->public_key, public_key, ED25519_PUBLIC_KEY_SIZE);
+  controller->permissions = permissions;
+  return true;
+}
+
+void Receiver::handle_pairings_(const uint8_t *body, size_t length, Response &response) {
+  Tlv8Writer writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  response.content_type = CONTENT_TYPE_OCTET_STREAM;
+  response.body = this->body_buffer_;
+  writer.add_byte(TLV_STATE, 2);
+
+  uint8_t method = 0xff;
+  size_t value_length = 0;
+  tlv8_find(body, length, TLV_METHOD, &method, 1, &value_length);
+  uint8_t id[HOMEKIT_ID_SIZE];
+  size_t id_length = 0;
+  const bool has_id = tlv8_find(body, length, TLV_IDENTIFIER, id, sizeof(id) - 1, &id_length) && id_length > 0;
+  if (method == PAIRING_METHOD_ADD) {
+    uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
+    size_t public_key_length = 0;
+    uint8_t permissions = 0;
+    tlv8_find(body, length, TLV_PERMISSIONS, &permissions, 1, &value_length);
+    if (!has_id || !tlv8_find(body, length, TLV_PUBLIC_KEY, public_key, sizeof(public_key), &public_key_length) ||
+        public_key_length != sizeof(public_key)) {
+      writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
+    } else if (!this->add_controller_(id, id_length, public_key, permissions)) {
+      writer.add_byte(TLV_ERROR, TLV_ERROR_MAX_PEERS);
+    } else {
+      AIRPLAY_LOGD("HomeKit pairing added: %.*s", static_cast<int>(id_length), reinterpret_cast<const char *>(id));
+    }
+  } else if (method == PAIRING_METHOD_REMOVE) {
+    Controller *controller = has_id ? this->find_controller_(id, id_length) : nullptr;
+    if (controller != nullptr) {
+      AIRPLAY_LOGD("HomeKit pairing removed: %s", controller->id);
+      controller->id[0] = '\0';
+    }
+  } else if (method == PAIRING_METHOD_LIST) {
+    bool first = true;
+    for (const Controller &controller : this->controllers_) {
+      if (controller.id[0] == '\0')
+        continue;
+      if (!first)
+        writer.add(TLV_SEPARATOR, nullptr, 0);
+      first = false;
+      writer.add(TLV_IDENTIFIER, reinterpret_cast<const uint8_t *>(controller.id), std::strlen(controller.id));
+      writer.add(TLV_PUBLIC_KEY, controller.public_key, sizeof(controller.public_key));
+      writer.add_byte(TLV_PERMISSIONS, controller.permissions);
+    }
+  } else {
+    writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
+  }
+  response.body_length = writer.length();
+}
+
+void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &response) {
+  PlistReader reader;
+  if (body == nullptr || !reader.parse(body, length)) {
+    response.status = 400;
+    response.status_text = "Bad Request";
+    return;
+  }
+  const PlistReader::Object settings = reader.get(reader.root(), "ConfigurationDictionary");
+  bool enable = false;
+  if (reader.get_bool(reader.get(settings, "Enable_HK_Access_Control"), &enable)) {
+    this->homekit_access_control_ = enable;
+    AIRPLAY_LOGI("HomeKit access control %s", enable ? "enabled" : "disabled");
+  }
+  // As shairport-sync answers: the receiver's identity, and access for everyone on the network
+  PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  if (this->homekit_access_control_) {
+    writer.begin_dict(5);
+    writer.key("Identifier");
+    writer.string(this->pairing_id_);
+    writer.key("Enable_HK_Access_Control");
+    writer.boolean(true);
+    writer.key("PublicKey");
+    writer.data(this->public_key_, sizeof(this->public_key_));
+    writer.key("Device_Name");
+    writer.string(this->config_.name);
+    writer.key("Access_Control_Level");
+    writer.integer(0);
+  } else {
+    writer.begin_dict(0);
+  }
+  response.body_length = writer.finish();
+  response.content_type = CONTENT_TYPE_PLIST;
+  response.body = this->body_buffer_;
 }
 
 void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length,
@@ -710,7 +1023,7 @@ void Receiver::build_info_(Response &response) {
   writer.key("features");
   writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
-  writer.integer(STATUS_FLAGS);
+  writer.integer(STATUS_FLAGS | (this->homekit_access_control_ ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0));
   writer.key("model");
   writer.string(this->config_.model);
   writer.key("name");
@@ -764,7 +1077,7 @@ void Receiver::prepare_key_candidates_(const Connection &c, const int64_t *strea
     char salt[sizeof(DATA_STREAM_SALT) + 20];
     std::snprintf(salt, sizeof(salt), "%s%" PRIu64, DATA_STREAM_SALT, static_cast<uint64_t>(*stream_id));
     uint8_t derived[CHACHA_KEY_SIZE];
-    hkdf_sha512_key(salt, DATA_STREAM_SENDER_WRITE_INFO, c.pair_secret, SHA512_SIZE, derived);
+    hkdf_sha512_key(salt, DATA_STREAM_SENDER_WRITE_INFO, c.pair_secret, c.pair_secret_length, derived);
     this->add_key_candidate_(derived, "the key of the stream connection");
   }
   // Earlier: the key of an earlier stream of the session, also one this receiver turned down

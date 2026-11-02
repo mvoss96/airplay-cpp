@@ -8,7 +8,8 @@
 # pyatv: Python sender; sends track details, cover art, progress and volume, unencrypted. With PASSWORD=<password>
 #   the receiver asks for it and pyatv logs in. With AIRPLAY2=1 pyatv uses AirPlay 2: transient pairing, an
 #   encrypted RTSP connection and ChaCha20-Poly1305 encrypted audio.
-#   RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero,
+#   HOMEKIT=1 makes it pair through HomeKit with the fixed PIN first, as the Home app does, and stream after a
+#   pair-verify with those keys. RECORD_FIRST=1 makes it send RECORD before setting up the audio stream, as iOS does. AUDIO_KEY=none, zero,
 #   earlier or stream leaves the key out of the stream setup, as iOS does for realtime streams, and sends the audio
 #   unencrypted, encrypted with a zero key, with the key of a turned down buffered stream or, as iOS 26 does, with
 #   a key derived from the pairing and the stream's connection ID.
@@ -75,7 +76,7 @@ elif [ "$SENDER" = pyatv ]; then
   if [ "$AIRPLAY2" = 1 ]; then
     TXT="$TXT $(sed -n 's/.*_airplay._tcp.* \(features=[^ ]*\).*/\1/p' receiver.log | sed 's/features=/ft=/')"
   fi
-  AIRPLAY_PASSWORD=$PASSWORD RECORD_FIRST=$RECORD_FIRST AUDIO_KEY=$AUDIO_KEY python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
+  AIRPLAY_PASSWORD=$PASSWORD RECORD_FIRST=$RECORD_FIRST AUDIO_KEY=$AUDIO_KEY HOMEKIT=$HOMEKIT python3 "$HERE/send.py" ramp.wav 020000A1B2C3@Interop $TXT || echo "The sender failed"
   sleep 2
 else
   export XDG_RUNTIME_DIR="$WORK/run" XDG_CONFIG_HOME="$WORK/config"
@@ -114,6 +115,10 @@ if [ "$SENDER" = pyatv ]; then
     grep -q "Paired" receiver.log
     grep -q "Stream: .*, AirPlay 2" receiver.log
     grep -q "Sender: pyatv" receiver.log  # The device name from the session SETUP
+    if [ "$HOMEKIT" = 1 ]; then
+      grep -q "Paired with HomeKit" receiver.log
+      grep -q "Verified a paired controller" receiver.log
+    fi
     if [ -n "$AIRPLAY_TEST_SENDER_VOLUME" ]; then
       grep -q "Volume .* sent to the sender" receiver.log  # On the event connection
       grep -q "Command nitm sent to the sender" receiver.log

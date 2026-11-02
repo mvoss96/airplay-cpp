@@ -18,7 +18,7 @@ jobs:
     # PipeWire's RAOP sink (C, RSA/AES encrypted ALAC, does not retransmit). The lossy runs drop, reorder and
     # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
     # Digest authentication. The airplay2 runs make pyatv use AirPlay 2 (transient pairing, encrypted RTSP and
-    # ChaCha20-Poly1305 audio), one of them in the order iOS uses. The buffered runs send AirPlay 2 buffered audio
+    # ChaCha20-Poly1305 audio), one of them in the order iOS uses, one after a HomeKit pairing as the Home app makes it. The buffered runs send AirPlay 2 buffered audio
     # (AAC over TCP, as iOS streams most apps) and compare the output with ffmpeg's decoding. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
     strategy:
@@ -37,6 +37,8 @@ jobs:
             network: airplay2-record-first
           - sender: pyatv
             network: airplay2-stream-key
+          - sender: pyatv
+            network: airplay2-homekit
           - sender: buffered
             network: clean
           - sender: buffered
@@ -83,6 +85,8 @@ jobs:
             *record-first) export RECORD_FIRST=1 AUDIO_KEY=earlier AIRPLAY_TEST_SENDER_VOLUME=0.4 ;;
             # As iOS 26 sends a realtime stream it starts a session with: a key derived from the pairing
             *stream-key) export RECORD_FIRST=1 AUDIO_KEY=stream AIRPLAY_DEVICE_VOLUME=0.6 ;;
+            # As the Home app adds the receiver: a HomeKit pairing with the fixed PIN, then pair-verify
+            *homekit) export HOMEKIT=1 ;;
           esac
           case "${{ matrix.network }}" in
             *lossy) export IMPAIR_SO=build/impair.so IMPAIR_LOSS=0.05 IMPAIR_REORDER=0.02 IMPAIR_DUPLICATE=0.01 ;;

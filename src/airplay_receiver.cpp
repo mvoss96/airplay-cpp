@@ -422,6 +422,8 @@ void Receiver::connection_closed(uint8_t connection) {
   AIRPLAY_LOGD("Connection closed (%u.%u.%u.%u, %s)", ip[0], ip[1], ip[2], ip[3], kind);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
+  if (connection == this->verify_connection_)
+    this->verify_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
@@ -436,6 +438,8 @@ void Receiver::close_connection_(uint8_t connection) {
     this->end_session_();
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
+  if (connection == this->verify_connection_)
+    this->verify_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;

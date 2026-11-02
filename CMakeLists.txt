@@ -9,11 +9,14 @@ cmake_minimum_required(VERSION 3.16)
 set(AIRPLAY_SOURCES
     src/airplay_alac.cpp
     src/airplay_crypto_mbedtls.cpp
+    src/airplay_curve25519.cpp
     src/airplay_dacp.cpp
     src/airplay_fairplay.cpp
     src/airplay_hap_crypto.cpp
     src/airplay_key.cpp
     src/airplay_log.cpp
+    src/airplay_monocypher.cpp
+    src/airplay_monocypher_ed25519.cpp
     src/airplay_packet_queue.cpp
     src/airplay_plist.cpp
     src/airplay_receiver.cpp

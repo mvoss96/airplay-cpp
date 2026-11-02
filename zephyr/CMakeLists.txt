@@ -5,11 +5,14 @@ if(CONFIG_AIRPLAY_CPP)
   zephyr_library_sources(
     ${AIRPLAY_DIR}/src/airplay_alac.cpp
     ${AIRPLAY_DIR}/src/airplay_crypto_mbedtls.cpp
+    ${AIRPLAY_DIR}/src/airplay_curve25519.cpp
     ${AIRPLAY_DIR}/src/airplay_dacp.cpp
     ${AIRPLAY_DIR}/src/airplay_fairplay.cpp
     ${AIRPLAY_DIR}/src/airplay_hap_crypto.cpp
     ${AIRPLAY_DIR}/src/airplay_key.cpp
     ${AIRPLAY_DIR}/src/airplay_log.cpp
+    ${AIRPLAY_DIR}/src/airplay_monocypher.cpp
+    ${AIRPLAY_DIR}/src/airplay_monocypher_ed25519.cpp
     ${AIRPLAY_DIR}/src/airplay_packet_queue.cpp
     ${AIRPLAY_DIR}/src/airplay_plist.cpp
     ${AIRPLAY_DIR}/src/airplay_receiver.cpp

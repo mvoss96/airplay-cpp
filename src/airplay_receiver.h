@@ -3,6 +3,7 @@
 #include "airplay_aac.h"
 #include "airplay_alac.h"
 #include "airplay_crypto.h"
+#include "airplay_curve25519.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
 #include "airplay_types.h"
@@ -12,6 +13,8 @@
 #include <cstdint>
 
 namespace airplay {
+
+class Tlv8Writer;
 
 class SrpServer;
 
@@ -242,8 +245,9 @@ class Receiver {
     uint16_t pending_timing_port{0};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
-    uint8_t event_key[CHACHA_KEY_SIZE];  // From pair-setup, for writing on the event connection that follows
-    uint8_t pair_secret[SHA512_SIZE];    // Pair-setup's shared secret, from which stream keys may be derived
+    uint8_t event_key[CHACHA_KEY_SIZE];       // From pair-setup, for writing on the event connection that follows
+    uint8_t pair_secret[SHA512_SIZE];         // The pairing's shared secret, from which stream keys may be derived
+    uint8_t pair_secret_length{SHA512_SIZE};  // 64 from pair-setup, 32 from pair-verify
     uint64_t read_counter{0};
     uint64_t write_counter{0};
     uint8_t *frame{nullptr};  // An incoming encrypted frame, until it is complete
@@ -286,6 +290,15 @@ class Receiver {
   static constexpr size_t HAP_FRAME_DATA_SIZE = 1024;
   static constexpr size_t HAP_FRAME_SIZE = 2 + HAP_FRAME_DATA_SIZE + POLY1305_TAG_SIZE;
   static constexpr size_t AIRPLAY2_BODY_SIZE = 1024;
+  static constexpr size_t HOMEKIT_ID_SIZE = 64;  // A controller's pairing identifier, usually a UUID
+  static constexpr size_t MAX_CONTROLLERS = 8;
+  /// A device paired through HomeKit pair-setup or pair-add
+  struct Controller {
+    char id[HOMEKIT_ID_SIZE];  // Empty when the entry is free
+    uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
+    uint8_t permissions;
+  };
+
   /// Version announced to AirPlay 2 senders
   static constexpr char AIRPLAY2_SOURCE_VERSION[] = "366.0";
 
@@ -329,6 +342,15 @@ class Receiver {
   bool handle_airplay2_request_(uint8_t connection, const char *method, const char *request, size_t header_length,
                                 const char *body, size_t body_length, Response &response, int64_t now_us);
   void handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response);
+  /// pair-setup M5 of a HomeKit pairing: checks the controller's key and writes M6. @return false if it failed.
+  bool finish_pair_setup_(const uint8_t *body, size_t length, Tlv8Writer &writer);
+  void handle_pair_verify_(uint8_t connection, const uint8_t *body, size_t length, Response &response);
+  /// pair-add, pair-remove and pair-list
+  void handle_pairings_(const uint8_t *body, size_t length, Response &response);
+  void handle_configure_(const uint8_t *body, size_t length, Response &response);
+  /// @return the controller's entry, nullptr if unknown
+  Controller *find_controller_(const uint8_t *id, size_t length);
+  bool add_controller_(const uint8_t *id, size_t length, const uint8_t *public_key, uint8_t permissions);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
                               size_t length, Response &response, int64_t now_us);
   void build_info_(Response &response);
@@ -447,12 +469,23 @@ class Receiver {
   char features_base64_[16]{};    // "fex": the feature bits as little endian bytes
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
   SrpServer *srp_{nullptr};
-  uint8_t pairing_connection_{0xff};   // Connection between pair-setup M1 and M3
-  uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
-  uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
-  uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response
-  bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
-  bool event_channel_pending_{false};  // A sender is about to open its event connection, from this address:
+  uint8_t pairing_connection_{0xff};  // Connection between pair-setup M1 and M3, or M5 of a HomeKit pairing
+  bool pairing_transient_{true};
+  // HomeKit pairing. Like shairport-sync, the pairings are kept in RAM only and pair-verify accepts controllers it
+  // does not know: access is not restricted beyond what transient pairing allows.
+  uint8_t accessory_secret_key_[ED25519_SECRET_KEY_SIZE]{};
+  Controller controllers_[MAX_CONTROLLERS]{};
+  uint8_t verify_connection_{0xff};  // Connection between pair-verify M1 and M3
+  uint8_t verify_secret_[X25519_KEY_SIZE]{};
+  uint8_t verify_public_[X25519_KEY_SIZE]{};
+  uint8_t verify_peer_public_[X25519_KEY_SIZE]{};
+  uint8_t verify_shared_[X25519_KEY_SIZE]{};
+  bool homekit_access_control_{false};  // Set up through the Home app (POST /configure)
+  uint8_t *frames_{nullptr};            // Per connection: an incoming encrypted frame
+  uint8_t *send_buffer_{nullptr};       // An outgoing encrypted frame
+  uint8_t *body_buffer_{nullptr};       // Body of an AirPlay 2 response
+  bool airplay2_audio_{false};          // The session's audio is encrypted with audio_key_
+  bool event_channel_pending_{false};   // A sender is about to open its event connection, from this address:
   uint32_t event_channel_address_{0};
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
   uint32_t event_cseq_{0};

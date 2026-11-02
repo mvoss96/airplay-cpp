@@ -1,5 +1,7 @@
-// AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, TLV8 and binary property lists
+// AirPlay 2 building blocks: SHA-512, HMAC, HKDF, ChaCha20-Poly1305, SRP-6a, Ed25519, X25519, TLV8 and binary
+// property lists
 #include "airplay_crypto_mbedtls.h"
+#include "airplay_curve25519.h"
 #include "airplay_fairplay.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
@@ -184,6 +186,48 @@ static void test_srp() {
   const std::vector<uint8_t> all_ones(SRP_KEY_SIZE, 0xff);
   CHECK(!server.verify(all_ones.data(), all_ones.size(), m1.data(), m1.size(), m2));
   CHECK(!server.verify(a.data(), a.size(), m1.data(), m1.size() - 1, m2));
+}
+
+static void test_curve25519() {
+  // RFC 8032, section 7.1, test 1 (empty message) and test 2
+  const std::vector<uint8_t> seed = hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+  uint8_t secret_key[ED25519_SECRET_KEY_SIZE];
+  uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
+  ed25519_key_pair(seed.data(), secret_key, public_key);
+  CHECK(same(public_key, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"));
+  uint8_t signature[ED25519_SIGNATURE_SIZE];
+  ed25519_sign(secret_key, nullptr, 0, signature);
+  CHECK(same(signature, "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b4"
+                        "6bd25bf5f0595bbe24655141438e7a100b"));
+  CHECK(ed25519_verify(signature, public_key, nullptr, 0));
+  signature[10] ^= 1;
+  CHECK(!ed25519_verify(signature, public_key, nullptr, 0));
+
+  const std::vector<uint8_t> seed2 = hex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+  const uint8_t message[] = {0x72};
+  ed25519_key_pair(seed2.data(), secret_key, public_key);
+  CHECK(same(public_key, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"));
+  ed25519_sign(secret_key, message, sizeof(message), signature);
+  CHECK(same(signature, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d"
+                        "8c387b2eaeb4302aeeb00d291612bb0c00"));
+  CHECK(ed25519_verify(signature, public_key, message, sizeof(message)));
+
+  // RFC 7748, section 6.1
+  const std::vector<uint8_t> alice = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+  const std::vector<uint8_t> bob = hex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+  uint8_t alice_public[X25519_KEY_SIZE];
+  uint8_t bob_public[X25519_KEY_SIZE];
+  x25519_public_key(alice.data(), alice_public);
+  x25519_public_key(bob.data(), bob_public);
+  CHECK(same(alice_public, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"));
+  CHECK(same(bob_public, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"));
+  uint8_t shared[X25519_KEY_SIZE];
+  CHECK(x25519(alice.data(), bob_public, shared));
+  CHECK(same(shared, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"));
+  CHECK(x25519(bob.data(), alice_public, shared));
+  CHECK(same(shared, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"));
+  const uint8_t zero[X25519_KEY_SIZE] = {};
+  CHECK(!x25519(alice.data(), zero, shared));  // A weak point gives an all-zero secret
 }
 
 static void test_tlv8() {
@@ -408,6 +452,7 @@ int main() {
   test_hmac_hkdf();
   test_chacha20_poly1305();
   test_srp();
+  test_curve25519();
   test_tlv8();
   test_plist_reader();
   test_plist_writer();
