@@ -1461,10 +1461,20 @@ void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length) {
 
   const uint16_t version = this->sender_version_;
   const bool fixed_offset = flags == 7 || (version > 0 && version <= 353) || version >= 371;
-  this->anchor_rtp_ = rtp_less_latency;
-  this->anchor_remote_ns_ = read_ntp_ns(packet + 8);
+  int64_t remote_ns = read_ntp_ns(packet + 8);
   if (fixed_offset)
-    this->anchor_remote_ns_ += frames_to_us(FIXED_LATENCY_OFFSET_FRAMES) * 1000;
+    remote_ns += frames_to_us(FIXED_LATENCY_OFFSET_FRAMES) * 1000;
+  if (this->anchor_valid_ && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+    // Where the previous anchor puts this frame: a steady difference means the sender's timeline drifts
+    const int64_t expected_ns =
+        this->anchor_remote_ns_ + static_cast<int64_t>(static_cast<int32_t>(rtp_less_latency - this->anchor_rtp_)) *
+                                      1000000000LL / static_cast<int64_t>(SAMPLE_RATE);
+    const auto moved_us = static_cast<int32_t>((remote_ns - expected_ns) / 1000);
+    if (moved_us > 2000 || moved_us < -2000)
+      AIRPLAY_LOGD("Sender timeline moved by %" PRId32 " us", moved_us);
+  }
+  this->anchor_rtp_ = rtp_less_latency;
+  this->anchor_remote_ns_ = remote_ns;
   this->sender_latency_frames_ = latency + (fixed_offset ? FIXED_LATENCY_OFFSET_FRAMES : 0);
   if (!this->anchor_valid_)
     AIRPLAY_LOGV("Timeline of the sender received (latency %" PRIu32 " frames)", this->sender_latency_frames_);
