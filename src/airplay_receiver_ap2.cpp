@@ -44,8 +44,9 @@ static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Ke
 static constexpr char DATA_STREAM_SALT[] = "DataStream-Salt";
 static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encryption-Key";
 
-/// Unanswered requests on an event connection after which that is logged
-static constexpr uint16_t UNANSWERED_REQUESTS_LOGGED = 3;
+/// Unanswered requests after which nothing more is sent on an event connection. Music Assistant never reads it, and
+/// the requests that pile up there made the receiver lose audio packets.
+static constexpr uint16_t MAX_UNANSWERED_REQUESTS = 3;
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
 static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
@@ -645,8 +646,8 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
     const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
     if (volume >= 0.0f) {
       this->last_sender_volume_ms_ = now_ms;
-      AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
-      this->send_media_remote_command_("dvlc", volume);
+      if (this->send_media_remote_command_("dvlc", volume))
+        AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
     }
   }
   const uint8_t commands = this->sender_command_requests_.exchange(0, std::memory_order_acq_rel);
@@ -654,20 +655,22 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
   static constexpr const char *CODES[] = {"play", "paus", "plps", "nitm", "pitm"};
   for (uint8_t i = 0; i < sizeof(CODES) / sizeof(CODES[0]); i++) {
     if ((commands & (1u << i)) != 0) {
-      AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
-      this->send_media_remote_command_(CODES[i], -1.0f);
+      if (this->send_media_remote_command_(CODES[i], -1.0f))
+        AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
     }
   }
 }
 
-void Receiver::send_media_remote_command_(const char *value, float volume) {
+bool Receiver::send_media_remote_command_(const char *value, float volume) {
   if (this->session_owner_ == NO_CONNECTION)
-    return;
+    return false;
   const uint32_t address = this->connections_[this->session_owner_].peer.address;
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
+    if (c.event_answers == 0 && c.event_requests >= MAX_UNANSWERED_REQUESTS)
+      return false;
     // A volume is given at the top level and in the parameters; senders read either
     uint8_t body[192];
     PlistWriter writer(body, sizeof(body));
@@ -687,20 +690,21 @@ void Receiver::send_media_remote_command_(const char *value, float volume) {
     }
     const size_t body_length = writer.finish();
     if (body_length == 0)
-      return;
+      return false;
     char message[512];
     const int header_length =
         std::snprintf(message, sizeof(message),
                       "POST /command RTSP/1.0\r\nCSeq: %" PRIu32 "\r\nContent-Type: %s\r\nContent-Length: %u\r\n\r\n",
                       ++this->event_cseq_, CONTENT_TYPE_PLIST, static_cast<unsigned>(body_length));
     if (header_length <= 0 || static_cast<size_t>(header_length) + body_length > sizeof(message))
-      return;
+      return false;
     std::memcpy(message + header_length, body, body_length);
     this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
-    if (++c.event_requests == UNANSWERED_REQUESTS_LOGGED && c.event_answers == 0)
-      AIRPLAY_LOGD("The sender has not answered %u requests on its event connection", c.event_requests);
-    return;
+    if (++c.event_requests == MAX_UNANSWERED_REQUESTS && c.event_answers == 0)
+      AIRPLAY_LOGI("The sender does not answer on its event connection; nothing more is sent on it");
+    return true;
   }
+  return false;
 }
 
 void Receiver::build_info_(Response &response) {

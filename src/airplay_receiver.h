@@ -356,7 +356,8 @@ class Receiver {
   /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
   void prepare_key_candidates_(const Connection &c, const int64_t *stream_id);
   /// Sends a media remote command on the playing sender's event connection; the volume only if not below 0
-  void send_media_remote_command_(const char *value, float volume);
+  /// @return false if nothing was sent, e.g. because the sender does not answer on its event connection
+  bool send_media_remote_command_(const char *value, float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
   void forget_timeline_() {
     this->anchor_valid_ = false;
