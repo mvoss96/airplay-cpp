@@ -365,6 +365,16 @@ static void test_encrypted_session() {
   CHECK(last == rtp - 1);
   CHECK(steps_bad == 0);
   CHECK(f.receiver.stats().late_packets == 1);  // Packet 99
+
+  // The next session of the same sender reports its remote control details again, though they are the same
+  CHECK(status_code(f.request(0, "TEARDOWN", "")) == 200);
+  f.open(1);
+  response = f.request(1, "ANNOUNCE",
+                       "Content-Type: application/sdp\r\nUser-Agent: AirPlay/381.13\r\n"
+                       "DACP-ID: A1B2C3D4E5F60718\r\nActive-Remote: 1986535575\r\n",
+                       encrypted_sdp(key));
+  CHECK(status_code(response) == 200);
+  CHECK(f.listener.remote_count == 2);
 }
 
 static void test_control() {

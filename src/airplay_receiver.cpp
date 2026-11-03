@@ -1274,6 +1274,8 @@ void Receiver::end_session_(uint32_t keep_address) {
   this->stop_audio_();
   this->close_udp_();
   this->session_owner_ = NO_CONNECTION;
+  // Reported again in the next session, also when the same sender opens it with the same details
+  this->remote_target_ = RemoteTarget{};
   this->codec_ = Codec::NONE;
   this->airplay2_audio_ = false;
   this->event_channel_pending_ = false;

@@ -82,7 +82,8 @@ class Listener {
   /// Position and length of the current track (config.progress), sent at the start of a track and after seeking.
   /// The position then advances in real time while the session plays.
   virtual void on_progress(const Progress & /*progress*/) {}
-  /// The sender's remote control details, see dacp.h
+  /// The sender's remote control details, see dacp.h. Reported in every session that has them, and again when
+  /// they change.
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
