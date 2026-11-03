@@ -46,6 +46,8 @@ class ALACDecoder {
   bool last_uncompressed() const { return this->last_uncompressed_; }
   /// Predictor order of the first channel of the last compressed packet
   uint32_t last_predictor_order() const { return this->last_predictor_order_; }
+  /// The decoder's work buffer, e.g. to check which memory it is in
+  const void *work_buffer() const { return this->predictor_.get(); }
 
  protected:
   std::unique_ptr<int32_t[]> predictor_;

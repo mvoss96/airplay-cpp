@@ -4,6 +4,10 @@
 #include "airplay_srp.h"
 #include "airplay_util.h"
 
+#if defined(ESP_PLATFORM)
+#include <esp_memory_utils.h>
+#endif
+
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -237,6 +241,8 @@ Receiver::~Receiver() {
   this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
   this->free_(this->slots_);
+  std::free(this->benchmark_input_);
+  std::free(this->benchmark_output_);
   this->free_(this->packet_buffer_);
   this->free_(this->output_buffer_);
   this->free_(this->rtsp_buffers_);
@@ -262,6 +268,10 @@ bool Receiver::begin() {
   if (!this->decoder_.init(FRAMES_PER_PACKET)) {
     AIRPLAY_LOGE("Failed to allocate the decoder");
     return false;
+  }
+  if (this->config_.clock_us != nullptr) {
+    this->benchmark_input_ = static_cast<uint8_t *>(std::malloc(PACKET_BUFFER_SIZE));
+    this->benchmark_output_ = static_cast<int16_t *>(std::malloc(FRAMES_PER_PACKET * BYTES_PER_FRAME));
   }
 
   // Synchronized playback holds the sender's whole latency (about 2.25 s) in this buffer. Unsynchronized
@@ -1461,6 +1471,41 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
   this->timed_packets_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Receiver::benchmark_decoder_(const uint8_t *data, size_t length, int16_t *output) {
+  if (this->benchmark_input_ == nullptr || this->benchmark_output_ == nullptr || length > PACKET_BUFFER_SIZE)
+    return;
+  static constexpr uint32_t RUNS = 50;
+  std::memcpy(this->benchmark_input_, data, length);
+  struct Result {
+    uint32_t average_us;
+    uint32_t fastest_us;
+  };
+  const auto run = [&](const uint8_t *input, int16_t *samples) {
+    int64_t total = 0;
+    uint32_t fastest = UINT32_MAX;
+    for (uint32_t i = 0; i < RUNS; i++) {
+      const int64_t start = this->config_.clock_us();
+      this->decoder_.decode(input, length, samples);
+      const auto took = static_cast<uint32_t>(this->config_.clock_us() - start);
+      total += took;
+      fastest = std::min(fastest, took);
+    }
+    return Result{static_cast<uint32_t>(total / RUNS), fastest};
+  };
+  const Result internal = run(this->benchmark_input_, this->benchmark_output_);
+  const Result actual = run(data, output);
+  AIRPLAY_LOGD("ALAC benchmark, %" PRIu32 " decodes of %u bytes: separate buffers %" PRIu32 " us (fastest %" PRIu32
+               "), the receiver's %" PRIu32 " us (fastest %" PRIu32 ")",
+               RUNS, static_cast<unsigned>(length), internal.average_us, internal.fastest_us, actual.average_us,
+               actual.fastest_us);
+#if defined(ESP_PLATFORM)
+  AIRPLAY_LOGD("In PSRAM: separate input %d, output %d; the receiver's input %d, output %d; decoder %d",
+               esp_ptr_external_ram(this->benchmark_input_), esp_ptr_external_ram(this->benchmark_output_),
+               esp_ptr_external_ram(data), esp_ptr_external_ram(output),
+               esp_ptr_external_ram(this->decoder_.work_buffer()));
+#endif
+}
+
 Receiver::PacketTiming Receiver::take_packet_timing() {
   return PacketTiming{this->timed_packets_.exchange(0, std::memory_order_relaxed),
                       this->decrypt_us_.exchange(0, std::memory_order_relaxed),
@@ -1543,6 +1588,8 @@ void Receiver::handle_audio_packet_timed_(const uint8_t *header, const uint8_t *
     if (!this->alac_logged_ && frames > 0) {
       // Once per stream: some senders store the audio uncompressed in ALAC packets
       this->alac_logged_ = true;
+      if (this->config_.clock_us != nullptr)
+        this->benchmark_decoder_(data, length, slot.samples);
       if (this->decoder_.last_uncompressed()) {
         AIRPLAY_LOGD("ALAC packets of %u bytes, stored uncompressed", static_cast<unsigned>(length));
       } else {

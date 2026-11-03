@@ -412,6 +412,9 @@ class Receiver {
   /// @param header The packet's RTP header
   void handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
   void handle_audio_packet_timed_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
+  /// Diagnostics (with config.clock_us): decodes a packet many times, from internal memory and from the receiver's
+  /// buffers, and logs how long it takes
+  void benchmark_decoder_(const uint8_t *data, size_t length, int16_t *output);
   void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
@@ -587,8 +590,10 @@ class Receiver {
   uint32_t last_stats_log_ms_{0};
   uint32_t last_report_us_{0};  // Timestamp of the latest report of played audio seen by poll()
   bool late_detail_logged_{false};
-  bool alac_logged_{false};  // The kind of ALAC packets was logged for this stream  // A late packet was explained in
-                             // the log since the last statistics
+  bool alac_logged_{false};
+  uint8_t *benchmark_input_{nullptr};   // With config.clock_us: plain heap memory, internal on the ESP32
+  int16_t *benchmark_output_{nullptr};  // The kind of ALAC packets was logged for this stream  // A late packet was
+                                        // explained in the log since the last statistics
   uint32_t last_poll_ms_{0};
   bool output_dry_{false};
   ReceiverStats stats_{};
