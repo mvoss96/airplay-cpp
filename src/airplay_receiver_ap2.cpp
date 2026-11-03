@@ -917,6 +917,8 @@ static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 1;
 /// polls come late (a busy thread, or much logging)
 static constexpr uint32_t BUFFERED_LOW_FRAMES = SAMPLE_RATE / 4;
 static constexpr uint32_t BUFFERED_DECODES_PER_POLL_LOW = 4;
+/// Packets that are due already and dropped without decoding, at most per poll
+static constexpr uint32_t MAX_SKIPPED_PER_POLL = 64;
 static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
 
 /// Whether 24-bit sequence number a comes before b
@@ -1004,14 +1006,16 @@ void Receiver::update_receive_pause_() {
   }
 }
 
-void Receiver::decode_buffered_audio_(uint32_t now_ms) {
+void Receiver::decode_buffered_audio_(int64_t now_us) {
   if (!this->audio_active_)
     return;
+  const auto now_ms = static_cast<uint32_t>(now_us / 1000);
   const uint32_t pieces = (AAC_FRAMES_PER_PACKET + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
   const uint32_t decodes = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
                                ? BUFFERED_DECODES_PER_POLL_LOW
                                : BUFFERED_DECODES_PER_POLL;
-  for (uint32_t i = 0; i < decodes; i++) {
+  uint32_t skipped = 0;
+  for (uint32_t i = 0; i < decodes;) {
     // Room in the jitter buffer for the pieces of one packet
     if (this->have_seq_ &&
         static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)
@@ -1022,6 +1026,18 @@ void Receiver::decode_buffered_audio_(uint32_t now_ms) {
     uint16_t length;
     if (!this->buffered_queue_.front(&rtp, &seq, &data, &length))
       break;
+    // Audio that is due already is dropped without decoding it: macOS starts each stream with seconds of audio
+    // from before its anchor, and decoding that held up the audio that can still be played
+    int64_t due_us = 0;
+    if (this->buffered_playing_ && skipped < MAX_SKIPPED_PER_POLL &&
+        this->rtp_to_local_us_(rtp + AAC_FRAMES_PER_PACKET, &due_us) && due_us < now_us) {
+      this->buffered_queue_.pop();
+      this->buffered_next_seq_ += pieces;
+      this->stats_.late_packets += pieces;
+      skipped++;
+      continue;
+    }
+    i++;
     const size_t frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
     this->buffered_queue_.pop();
     this->last_packet_ms_ = now_ms;

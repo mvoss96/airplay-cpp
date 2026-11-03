@@ -2110,7 +2110,7 @@ void Receiver::poll(int64_t now_us) {
   const int64_t timers_end = this->clock_now_();
   add_us(this->timers_us_, timers_end - poll_start);
   if (this->buffered_stream_) {
-    this->decode_buffered_audio_(now_ms);
+    this->decode_buffered_audio_(now_us);
   } else if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
     this->last_resend_scan_ms_ = now_ms;
     this->retry_resends_(now_ms);

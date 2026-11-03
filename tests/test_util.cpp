@@ -246,6 +246,25 @@ static void test_ptp() {
     sync_at(1000, offset - 1000000000LL);
   CHECK(busy.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000000LL + -1000000)) < 100000);
 
+  // A single sample 100 ms too high (a wrong correction) is ignored; three in a row raise the estimate
+  PtpClocks outlier;
+  now_us = 20000000;
+  auto outlier_sync = [&](int64_t error_ns) {
+    outlier.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + 1000);
+    outlier.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + offset + error_ns).data(), 44, 1,
+                   now_us + 1000);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    outlier_sync(0);
+  outlier_sync(100000000);
+  outlier_sync(0);
+  CHECK(outlier.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000)) < 100000);
+  for (int i = 0; i < 3; i++)
+    outlier_sync(10000000);
+  CHECK(outlier.offset_ns(clock, now_us, &found) && std::llabs(found - (offset + 9000000)) < 100000);
+
   // One-step Sync carries its own time
   PtpClocks one_step;
   for (uint16_t seq = 0; seq < 4; seq++)

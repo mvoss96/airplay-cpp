@@ -34,6 +34,10 @@ static constexpr int64_t MAX_DRIFT_PPM = 100;
 /// Samples this far below the estimate all the time mean the clock was set back
 static constexpr int64_t STEP_NS = 20000000;
 static constexpr uint32_t STEP_SAMPLES = 64;  // 8 s of Sync messages
+/// After the first second, a sample more than this above the estimate counts only when the next ones confirm it
+static constexpr int64_t RISE_NS = 2000000;
+static constexpr uint32_t RISE_CONFIRMATIONS = 3;
+static constexpr uint32_t SETTLE_SAMPLES = 8;
 
 static uint64_t read_be(const uint8_t *data, size_t bytes) {
   uint64_t value = 0;
@@ -202,7 +206,17 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
     clock.estimate = sample;
   } else {
     const int64_t drifted = clock.estimate - (now_us - clock.last_sample_us) * MAX_DRIFT_PPM / 1000;
-    clock.estimate = std::max(sample, drifted);
+    if (sample > drifted + RISE_NS && clock.count >= SETTLE_SAMPLES) {
+      // Far better than the estimate: a single one is an error (macOS sends a correction of 100 ms now and then),
+      // several in a row show that the estimate was low
+      clock.above_lowest = clock.above == 0 ? sample : std::min(clock.above_lowest, sample);
+      clock.estimate = ++clock.above >= RISE_CONFIRMATIONS ? clock.above_lowest : drifted;
+      if (clock.above >= RISE_CONFIRMATIONS)
+        clock.above = 0;
+    } else {
+      clock.above = 0;
+      clock.estimate = std::max(sample, drifted);
+    }
     // A clock that was set back sends samples far below the estimate for longer than the receiver is ever busy:
     // start over from them
     if (sample < clock.estimate - STEP_NS) {

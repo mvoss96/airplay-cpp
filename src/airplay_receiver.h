@@ -378,7 +378,7 @@ class Receiver {
   // Buffered audio (airplay_receiver_ap2.cpp)
   void receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms);
   /// Decodes queued audio into the jitter buffer while it has room
-  void decode_buffered_audio_(uint32_t now_ms);
+  void decode_buffered_audio_(int64_t now_us);
   void handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
