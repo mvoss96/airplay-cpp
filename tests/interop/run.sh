@@ -140,9 +140,10 @@ fi
 if [ "$MODE" = posix ]; then
   python3 "$HERE/check.py" out.pcm $FRAMES $CHECK_OPTIONS
 else
-  # The null output counts what it played: the whole stream minus what the sender cut off at the end
+  # The null output counts what it played: the whole stream minus what the sender cut off at the end, plus the
+  # silence that starts the output and lines up the first packet (up to 0.5 s)
   PLAYED=$(sed -n 's/^Session: stopped (\([0-9]*\) frames played)$/\1/p' receiver.log | tail -1)
   echo "played=$PLAYED"
-  test -n "$PLAYED" && test "$PLAYED" -gt $((FRAMES - 8820)) && test "$PLAYED" -lt $((FRAMES + 4410))
+  test -n "$PLAYED" && test "$PLAYED" -gt $((FRAMES - 8820)) && test "$PLAYED" -lt $((FRAMES + 22050))
   echo "INTEROP OK"
 fi
