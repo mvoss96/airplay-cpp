@@ -346,52 +346,56 @@ class Poly1305 {
   }
 
  private:
-  AIRPLAY_HOT void block_(const uint8_t *m) {
-    const uint32_t r0 = this->r_[0], r1 = this->r_[1], r2 = this->r_[2], r3 = this->r_[3], r4 = this->r_[4];
-    const uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
-    uint32_t h0 = this->h_[0] + (load_le32(m) & 0x3ffffff);
-    uint32_t h1 = this->h_[1] + ((load_le32(m + 3) >> 2) & 0x3ffffff);
-    uint32_t h2 = this->h_[2] + ((load_le32(m + 6) >> 4) & 0x3ffffff);
-    uint32_t h3 = this->h_[3] + ((load_le32(m + 9) >> 6) & 0x3ffffff);
-    uint32_t h4 = this->h_[4] + ((load_le32(m + 12) >> 8) | (1UL << 24));
-
-    using u64 = uint64_t;
-    const u64 d0 = (u64) h0 * r0 + (u64) h1 * s4 + (u64) h2 * s3 + (u64) h3 * s2 + (u64) h4 * s1;
-    u64 d1 = (u64) h0 * r1 + (u64) h1 * r0 + (u64) h2 * s4 + (u64) h3 * s3 + (u64) h4 * s2;
-    u64 d2 = (u64) h0 * r2 + (u64) h1 * r1 + (u64) h2 * r0 + (u64) h3 * s4 + (u64) h4 * s3;
-    u64 d3 = (u64) h0 * r3 + (u64) h1 * r2 + (u64) h2 * r1 + (u64) h3 * r0 + (u64) h4 * s4;
-    u64 d4 = (u64) h0 * r4 + (u64) h1 * r3 + (u64) h2 * r2 + (u64) h3 * r1 + (u64) h4 * r0;
-
-    uint32_t c = static_cast<uint32_t>(d0 >> 26);
-    h0 = static_cast<uint32_t>(d0) & 0x3ffffff;
-    d1 += c;
-    c = static_cast<uint32_t>(d1 >> 26);
-    h1 = static_cast<uint32_t>(d1) & 0x3ffffff;
-    d2 += c;
-    c = static_cast<uint32_t>(d2 >> 26);
-    h2 = static_cast<uint32_t>(d2) & 0x3ffffff;
-    d3 += c;
-    c = static_cast<uint32_t>(d3 >> 26);
-    h3 = static_cast<uint32_t>(d3) & 0x3ffffff;
-    d4 += c;
-    c = static_cast<uint32_t>(d4 >> 26);
-    h4 = static_cast<uint32_t>(d4) & 0x3ffffff;
-    h0 += c * 5;
-    c = h0 >> 26;
-    h0 &= 0x3ffffff;
-    h1 += c;
-
-    this->h_[0] = h0;
-    this->h_[1] = h1;
-    this->h_[2] = h2;
-    this->h_[3] = h3;
-    this->h_[4] = h4;
-  }
+  // Defined outside the class: a function defined in it is inline, and IRAM_ATTR on it would leave its literals in
+  // flash, out of reach
+  void block_(const uint8_t *m);
 
   uint32_t r_[5];
   uint32_t h_[5]{};
   uint32_t pad_[4];
 };
+
+AIRPLAY_HOT void Poly1305::block_(const uint8_t *m) {
+  const uint32_t r0 = this->r_[0], r1 = this->r_[1], r2 = this->r_[2], r3 = this->r_[3], r4 = this->r_[4];
+  const uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
+  uint32_t h0 = this->h_[0] + (load_le32(m) & 0x3ffffff);
+  uint32_t h1 = this->h_[1] + ((load_le32(m + 3) >> 2) & 0x3ffffff);
+  uint32_t h2 = this->h_[2] + ((load_le32(m + 6) >> 4) & 0x3ffffff);
+  uint32_t h3 = this->h_[3] + ((load_le32(m + 9) >> 6) & 0x3ffffff);
+  uint32_t h4 = this->h_[4] + ((load_le32(m + 12) >> 8) | (1UL << 24));
+
+  using u64 = uint64_t;
+  const u64 d0 = (u64) h0 * r0 + (u64) h1 * s4 + (u64) h2 * s3 + (u64) h3 * s2 + (u64) h4 * s1;
+  u64 d1 = (u64) h0 * r1 + (u64) h1 * r0 + (u64) h2 * s4 + (u64) h3 * s3 + (u64) h4 * s2;
+  u64 d2 = (u64) h0 * r2 + (u64) h1 * r1 + (u64) h2 * r0 + (u64) h3 * s4 + (u64) h4 * s3;
+  u64 d3 = (u64) h0 * r3 + (u64) h1 * r2 + (u64) h2 * r1 + (u64) h3 * r0 + (u64) h4 * s4;
+  u64 d4 = (u64) h0 * r4 + (u64) h1 * r3 + (u64) h2 * r2 + (u64) h3 * r1 + (u64) h4 * r0;
+
+  uint32_t c = static_cast<uint32_t>(d0 >> 26);
+  h0 = static_cast<uint32_t>(d0) & 0x3ffffff;
+  d1 += c;
+  c = static_cast<uint32_t>(d1 >> 26);
+  h1 = static_cast<uint32_t>(d1) & 0x3ffffff;
+  d2 += c;
+  c = static_cast<uint32_t>(d2 >> 26);
+  h2 = static_cast<uint32_t>(d2) & 0x3ffffff;
+  d3 += c;
+  c = static_cast<uint32_t>(d3 >> 26);
+  h3 = static_cast<uint32_t>(d3) & 0x3ffffff;
+  d4 += c;
+  c = static_cast<uint32_t>(d4 >> 26);
+  h4 = static_cast<uint32_t>(d4) & 0x3ffffff;
+  h0 += c * 5;
+  c = h0 >> 26;
+  h0 &= 0x3ffffff;
+  h1 += c;
+
+  this->h_[0] = h0;
+  this->h_[1] = h1;
+  this->h_[2] = h2;
+  this->h_[3] = h3;
+  this->h_[4] = h4;
+}
 
 // ===== ChaCha20-Poly1305 =====
 
