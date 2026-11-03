@@ -455,7 +455,8 @@ class Receiver {
   bool rtp_to_local_us_(uint32_t rtp, int64_t *local_us) const;
   bool write_pending_output_(uint32_t now_ms);
   /// @param trim 0, or +1/-1 to repeat/drop one frame for clock correction
-  void queue_packet_output_(const PacketSlot &slot, int32_t trim);
+  /// @param skip Frames left out at the start of the packet
+  void queue_packet_output_(const PacketSlot &slot, int32_t trim, uint32_t skip = 0);
   void queue_silence_output_();
   void playback_step_(int64_t now_us);
   bool start_playback_();
@@ -609,7 +610,9 @@ class Receiver {
   bool output_restart_pending_{false};
   bool audio_held_{false};  // hold_requested_, applied in poll()
   bool playback_started_{false};
-  bool output_starting_{false};  // Silence started the output; the audio is lined up once it plays
+  bool output_starting_{false};
+  bool start_aligned_{false};  // The first packet after the start of playback was lined up  // Silence started the
+                               // output; the audio is lined up once it plays
   bool synced_{false};
   bool sync_logged_{false};
   bool played_reports_missing_{false};

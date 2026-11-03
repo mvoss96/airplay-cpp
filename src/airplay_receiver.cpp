@@ -1972,11 +1972,11 @@ bool Receiver::write_pending_output_(uint32_t now_ms) {
   return this->output_offset_ >= this->output_length_;
 }
 
-void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
+void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim, uint32_t skip) {
   const int64_t copy_start = this->clock_now_();
   int16_t *samples = this->output_buffer_;
-  uint32_t frames = slot.frames;
-  std::memcpy(samples, slot.samples, frames * BYTES_PER_FRAME);
+  uint32_t frames = slot.frames - skip;
+  std::memcpy(samples, slot.samples + skip * NUM_CHANNELS, frames * BYTES_PER_FRAME);
 
   const auto count = static_cast<uint32_t>(std::min(std::abs(trim), MAX_TRIM_FRAMES));
   if (count > 0 && frames > count + 2) {
@@ -2239,6 +2239,7 @@ bool Receiver::start_playback_() {
   }
   this->playback_started_ = true;
   this->output_starting_ = false;
+  this->start_aligned_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -2342,6 +2343,22 @@ bool Receiver::synced_step_(int64_t now_us) {
     this->advance_head_();
     return true;
   }
+  // The first packets after a start may be due already (macOS anchors a stream at the present): those that are
+  // past are dropped and the late part of the next one is left out, which lines up exactly instead of trimming
+  // frames for seconds
+  if (!this->start_aligned_ && error_us < 0) {
+    const auto late_frames = static_cast<uint32_t>(-error_us * SAMPLE_RATE / 1000000);
+    if (late_frames >= slot.frames) {
+      this->stats_.late_packets++;
+      this->advance_head_();
+      return true;
+    }
+    this->start_aligned_ = true;
+    this->servo_error_us_ = 0;
+    this->queue_packet_output_(slot, 0, late_frames);
+    this->advance_head_();
+    return true;
+  }
   // Line up with silence when starting from an empty output, or when far too early
   if (error_us > EARLY_LATE_THRESHOLD_US || (queued_us == 0 && error_us > 0)) {
     this->silence_pending_frames_ = static_cast<uint32_t>(error_us * SAMPLE_RATE / 1000000);
@@ -2376,6 +2393,7 @@ bool Receiver::synced_step_(int64_t now_us) {
     trim = this->servo_error_us_ > 0 ? frames : -frames;  // Early: repeat frames; late: drop some
   }
 
+  this->start_aligned_ = true;
   this->queue_packet_output_(slot, trim);
   this->advance_head_();
   return true;
