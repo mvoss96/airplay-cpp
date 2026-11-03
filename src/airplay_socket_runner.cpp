@@ -293,13 +293,16 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
                  static_cast<unsigned>(wait_ms));
   if (any_ready) {
     const int64_t udp_start = SocketRunner::now_us();
+    size_t packets = 0;
     for (size_t i = 0; i < NUM_UDP_CHANNELS; i++) {
       if (ready[i] && this->udp_fds_[i] == fds[i])
-        this->receive_udp_(static_cast<UdpChannel>(i));
+        packets += this->receive_udp_(static_cast<UdpChannel>(i));
     }
+    // Many packets: catching up after the thread was held up; few: held up while handling them
     const int64_t udp_ms = (SocketRunner::now_us() - udp_start) / 1000;
     if (udp_ms >= SLOW_STEP_MS)
-      AIRPLAY_LOGW("Receiving UDP packets took %u ms", static_cast<unsigned>(udp_ms));
+      AIRPLAY_LOGW("Receiving %u UDP packets took %u ms", static_cast<unsigned>(packets),
+                   static_cast<unsigned>(udp_ms));
     for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
       if (ready[NUM_UDP_CHANNELS + i] && this->connection_fds_[i] == fds[NUM_UDP_CHANNELS + i] &&
           fds[NUM_UDP_CHANNELS + i] >= 0) {
@@ -387,20 +390,21 @@ void SocketRunner::receive_tcp_(uint8_t connection) {
   this->receiver_->connection_data(connection, buffer, static_cast<size_t>(received), SocketRunner::now_us());
 }
 
-void SocketRunner::receive_udp_(UdpChannel channel) {
+size_t SocketRunner::receive_udp_(UdpChannel channel) {
   for (size_t i = 0; i < MAX_PACKETS_PER_READ; i++) {
     const int fd = this->udp_fds_[static_cast<size_t>(channel)];
     if (fd < 0)
-      return;  // Closed by the receiver while handling a packet
+      return i;  // Closed by the receiver while handling a packet
     struct sockaddr_in source {};
     socklen_t source_length = sizeof(source);
     const auto received = net::recvfrom(fd, this->udp_buffer_, sizeof(this->udp_buffer_), net::MSG_DONT_WAIT,
                                         reinterpret_cast<struct sockaddr *>(&source), &source_length);
     if (received <= 0)
-      return;
+      return i;
     this->receiver_->udp_packet(channel, this->udp_buffer_, static_cast<size_t>(received),
                                 Endpoint{source.sin_addr.s_addr, ntohs(source.sin_port)}, SocketRunner::now_us());
   }
+  return MAX_PACKETS_PER_READ;
 }
 
 bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) {

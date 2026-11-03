@@ -57,7 +57,8 @@ class SocketRunner final : public Transport {
  protected:
   void accept_connection_();
   void receive_tcp_(uint8_t connection);
-  void receive_udp_(UdpChannel channel);
+  /// @return the number of packets read
+  size_t receive_udp_(UdpChannel channel);
 
   Receiver *receiver_{nullptr};
   int listen_fd_{-1};
