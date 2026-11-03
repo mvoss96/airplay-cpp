@@ -35,6 +35,8 @@ class Transport {
   /// Opens UDP ports 319 and 320 for PTP and joins its multicast group 224.0.1.129, and hands what arrives to
   /// Receiver::ptp_packet(). Only for ReceiverConfig::ptp; without it senders that need PTP (macOS) are turned down.
   virtual bool open_ptp() { return false; }
+  /// Sends from PTP port 320 (`general`) or 319
+  virtual void send_ptp(bool /*general*/, const Endpoint & /*to*/, const uint8_t * /*data*/, size_t /*length*/) {}
 };
 
 /// Audio output. Must not block.

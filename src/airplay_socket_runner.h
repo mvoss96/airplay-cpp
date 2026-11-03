@@ -67,6 +67,7 @@ class SocketRunner final : public Transport {
   void close_udp() override;
   void send_udp(UdpChannel channel, const Endpoint &to, const uint8_t *data, size_t length) override;
   bool open_ptp() override;
+  void send_ptp(bool general, const Endpoint &to, const uint8_t *data, size_t length) override;
 
  protected:
   void accept_connection_();

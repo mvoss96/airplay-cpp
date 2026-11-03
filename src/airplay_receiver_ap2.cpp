@@ -323,12 +323,13 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     return true;
   }
   if (std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0) {
-    // The devices of a PTP group; the receiver only listens to whatever clocks send it Sync messages
-    if (plist && data != nullptr && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+    // The devices of a PTP group (macOS sends it as "/peer-list-changed", a property list all the same)
+    if (data != nullptr && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
       PlistReader reader;
-      char text[256];
-      if (reader.parse(data, body_length) && reader.describe(reader.root(), text, sizeof(text)) > 0)
-        AIRPLAY_LOGD("%s: %s", method, text);
+      auto *text = reinterpret_cast<char *>(this->body_buffer_);
+      const size_t length = reader.parse(data, body_length) ? reader.describe(reader.root(), text, 1024) : 0;
+      for (size_t offset = 0; offset < length; offset += 150)
+        AIRPLAY_LOGD("%s: %.*s", method, static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
     }
     return true;
   }

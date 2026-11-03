@@ -362,6 +362,7 @@ bool Receiver::begin() {
   }
   if (this->airplay2_ && this->config_.ptp) {
     this->ptp_open_ = this->transport_.open_ptp();
+    this->ptp_clocks_.set_identity(this->config_.mac);
     if (!this->ptp_open_)
       AIRPLAY_LOGW("PTP is not available; senders that need it (macOS) are turned down");
   }
@@ -2078,8 +2079,15 @@ void Receiver::poll(int64_t now_us) {
     this->ptp_clocks_.log_status(now_us);
   if (!this->udp_open_)
     return;
-  if (this->ptp_timing_)
+  if (this->ptp_timing_) {
+    uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
+    uint32_t to = 0;
+    bool general = false;
+    if (const size_t length = this->ptp_clocks_.next_message(message, now_us, &to, &general)) {
+      this->transport_.send_ptp(general, Endpoint{to, general ? PTP_GENERAL_PORT : PTP_EVENT_PORT}, message, length);
+    }
     this->update_ptp_clock_(now_us);
+  }
   // Keep asking quickly until the clock locks, so that a lost packet does not delay synchronized playback
   const uint32_t timing_interval = this->timing_requests_sent_ < TIMING_BURST_COUNT || !this->clock_locked_
                                        ? TIMING_BURST_INTERVAL_MS

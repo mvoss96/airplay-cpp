@@ -563,6 +563,17 @@ bool SocketRunner::open_ptp() {
 #endif
 }
 
+void SocketRunner::send_ptp(bool general, const Endpoint &to, const uint8_t *data, size_t length) {
+  const int fd = this->ptp_fds_[general ? 1 : 0];
+  if (fd < 0)
+    return;
+  struct sockaddr_in address {};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(to.port);
+  address.sin_addr.s_addr = to.address;
+  net::sendto(fd, data, length, 0, reinterpret_cast<struct sockaddr *>(&address), sizeof(address));
+}
+
 int send_dacp_command(const RemoteTarget &target, uint16_t port, const char *command, uint32_t timeout_ms) {
   char request[256];
   const size_t request_length = dacp_format_request(target, port, command, request, sizeof(request));
