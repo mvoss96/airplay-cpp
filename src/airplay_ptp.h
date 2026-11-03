@@ -47,6 +47,10 @@ class PtpClocks {
     int64_t last_seen_us;  // 0 for a free slot
     int64_t last_sample_us;
     int64_t samples[WINDOW];
+    // The same without the correction fields, and the range of those, to see whether a sender's corrections help
+    int64_t raw_samples[WINDOW];
+    int64_t correction_min_ns;
+    int64_t correction_max_ns;
     uint32_t count;  // Samples in total
     // The offset less the least delay: rises with every better sample, falls only as fast as clocks drift apart,
     // so that samples taken late while the receiver was busy do not move it
@@ -87,6 +91,7 @@ class PtpClocks {
   // Messages seen per type (the low 4 bits of the first byte) since the last status line, and which were logged
   uint32_t type_counts_[16]{};
   uint32_t types_logged_{0};
+  bool signaling_logged_{false};
 };
 
 }  // namespace airplay

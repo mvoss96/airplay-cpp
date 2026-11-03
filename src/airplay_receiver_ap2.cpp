@@ -913,6 +913,10 @@ static constexpr size_t BUFFERED_RTP_HEADER_SIZE = 12;
 static constexpr size_t BUFFERED_PAUSE_BYTES = 8 * 1024;
 /// Packets decoded per poll, to spread the work: one packet is 23 ms of audio, a poll comes every few ms
 static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 1;
+/// While the jitter buffer holds less than this, more packets are decoded per poll, so that it fills up even when
+/// polls come late (a busy thread, or much logging)
+static constexpr uint32_t BUFFERED_LOW_FRAMES = SAMPLE_RATE / 4;
+static constexpr uint32_t BUFFERED_DECODES_PER_POLL_LOW = 4;
 static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
 
 /// Whether 24-bit sequence number a comes before b
@@ -966,7 +970,8 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     if (audio_length == 0)
       continue;  // iOS sends one without audio after a flush
     int64_t due_us = 0;
-    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && this->rtp_to_local_us_(rtp, &due_us)) {
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && this->buffered_playing_ &&
+        this->rtp_to_local_us_(rtp, &due_us)) {
       const auto lead_ms = static_cast<int32_t>((due_us - static_cast<int64_t>(now_ms) * 1000) / 1000);
       this->lead_min_ms_ = std::min(this->lead_min_ms_, lead_ms);
       this->lead_max_ms_ = std::max(this->lead_max_ms_, lead_ms);
@@ -1003,7 +1008,10 @@ void Receiver::decode_buffered_audio_(uint32_t now_ms) {
   if (!this->audio_active_)
     return;
   const uint32_t pieces = (AAC_FRAMES_PER_PACKET + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
-  for (uint32_t i = 0; i < BUFFERED_DECODES_PER_POLL; i++) {
+  const uint32_t decodes = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
+                               ? BUFFERED_DECODES_PER_POLL_LOW
+                               : BUFFERED_DECODES_PER_POLL;
+  for (uint32_t i = 0; i < decodes; i++) {
     // Room in the jitter buffer for the pieces of one packet
     if (this->have_seq_ &&
         static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)

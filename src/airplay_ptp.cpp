@@ -17,7 +17,9 @@ static constexpr uint8_t TYPE_FOLLOW_UP = 0x8;
 static constexpr uint8_t TYPE_DELAY_RESP = 0x9;
 static constexpr uint8_t TYPE_ANNOUNCE = 0xb;
 static constexpr size_t DELAY_RESP_SIZE = 54;
-static constexpr uint8_t FLAG_TWO_STEP = 0x02;  // In the first byte of the flags
+static constexpr uint8_t TYPE_SIGNALING = 0xc;
+static constexpr size_t SIGNALING_TLV_OFFSET = 44;  // After the header and the target port identity
+static constexpr uint8_t FLAG_TWO_STEP = 0x02;      // In the first byte of the flags
 /// Samples a clock needs before its offset is used
 static constexpr uint32_t MIN_SAMPLES = 4;
 /// A clock without samples for this long is not used, and its slot may go to another one
@@ -93,6 +95,24 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
   }
   if (length < TIMESTAMP_MESSAGE_SIZE)
     return;
+  if (type == TYPE_SIGNALING && !this->signaling_logged_ && length >= SIGNALING_TLV_OFFSET + 4) {
+    // Signaling carries requests as TLVs after the target port; logged once to see what a sender asks for
+    this->signaling_logged_ = true;
+    char text[160];
+    size_t used = 0;
+    for (size_t at = SIGNALING_TLV_OFFSET; at + 4 <= length && used + 40 < sizeof(text);) {
+      const auto tlv_type = static_cast<unsigned>(read_be(data + at, 2));
+      const auto tlv_length = static_cast<size_t>(read_be(data + at + 2, 2));
+      used += static_cast<size_t>(
+          std::snprintf(text + used, sizeof(text) - used, " %04x/%u:", tlv_type, static_cast<unsigned>(tlv_length)));
+      for (size_t i = 0; i < tlv_length && i < 10 && at + 4 + i < length; i++)
+        used += static_cast<size_t>(std::snprintf(text + used, sizeof(text) - used, "%02x", data[at + 4 + i]));
+      at += 4 + tlv_length;
+    }
+    AIRPLAY_LOGD("PTP Signaling from %016" PRIx64 " to %016" PRIx64 ", TLVs (type/length:data)%s", id,
+                 read_be(data + 34, 8), used > 0 ? text : " none");
+    return;
+  }
   if (type == TYPE_DELAY_RESP && general && length >= DELAY_RESP_SIZE) {
     // The grandmaster's receive time of our Delay_Req
     if (!this->delay_pending_ || id != this->delay_clock_ || sequence != this->delay_sequence_ ||
@@ -143,6 +163,12 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
                    clock->id, sent_ns / 1000000000, sent_ns % 1000000000, clock->sync_correction_ns, correction_ns,
                    clock->sync_received_ns / 1000000000, (clock->sync_received_ns / 1000) % 1000000);
     }
+    const int64_t correction = correction_ns + clock->sync_correction_ns;
+    clock->raw_samples[clock->count % WINDOW] = sent_ns - correction - clock->sync_received_ns;
+    if (clock->follow_ups == 1 || correction < clock->correction_min_ns)
+      clock->correction_min_ns = correction;
+    if (clock->follow_ups == 1 || correction > clock->correction_max_ns)
+      clock->correction_max_ns = correction;
     this->add_sample_(*clock, sent_ns - clock->sync_received_ns, now_us);
   }
 }
@@ -302,10 +328,16 @@ void PtpClocks::log_status(int64_t now_us) {
           *std::min_element(clock.delay_samples, clock.delay_samples + std::min<size_t>(clock.delay_count, WINDOW));
       delay = (back - best) / 2;
     }
+    int64_t raw_spread = 0;
+    if (used > 0) {
+      const auto [low, high] = std::minmax_element(clock.raw_samples, clock.raw_samples + used);
+      raw_spread = *high - *low;
+    }
     AIRPLAY_LOGD("PTP clock %016" PRIx64 ": %" PRIu32 " Sync, %" PRIu32 " Follow_Up, %" PRIu32
-                 " Delay_Resp, offset %" PRId64 " ms, spread %" PRId64 " us, delay %" PRId64 " us",
+                 " Delay_Resp, offset %" PRId64 " ms, spread %" PRId64 " us (%" PRId64
+                 " us without corrections, which range from %" PRId64 " to %" PRId64 " us), delay %" PRId64 " us",
                  clock.id, clock.syncs, clock.follow_ups, clock.delay_responses, best / 1000000, spread / 1000,
-                 delay / 1000);
+                 raw_spread / 1000, clock.correction_min_ns / 1000, clock.correction_max_ns / 1000, delay / 1000);
     clock.syncs = 0;
     clock.follow_ups = 0;
     clock.delay_responses = 0;
