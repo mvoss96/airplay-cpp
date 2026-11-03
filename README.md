@@ -53,8 +53,9 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 ## Limitations
 
 - 44.1 kHz, 16-bit stereo: no lossless high resolution, no video or screen mirroring
-- AirPlay 2 uses transient pairing and NTP timing: no groups with HomePods or other AirPlay 2 speakers, and no
-  Home app
+- AirPlay 2 uses transient pairing: no groups with HomePods or other AirPlay 2 speakers, and no Home app.
+  macOS streams only with PTP timing, which needs `ReceiverConfig::ptp` and UDP ports 319 and 320 (not on
+  Zephyr; root on Linux)
 - A password works with AirPlay 1 only
 - AirPlay 2 buffered audio needs an AAC decoder from the application (`AacDecoder`)
 

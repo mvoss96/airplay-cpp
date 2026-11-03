@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- PTP timing for AirPlay 2 (`ReceiverConfig::ptp`, `Transport::open_ptp()`), which macOS needs: the receiver
+  follows the sender's PTP clock and takes part in PTP as a clock that never becomes master
+- Buffered audio: overdue audio is dropped without decoding, and decoding speeds up while the jitter buffer is low
+- The first packets after a start are lined up exactly when they are late
+- Synchronized start waits until the output plays, so that an output that starts slowly does not play late
+- `ReceiverConfig::output_queue_ms`; `Receiver::take_playback_timing()`
+- Remote control details are reported in every session; silence does not keep a held sender playing
+- Faster ALAC decoding and ChaCha20-Poly1305 on the ESP32 (internal RAM, no calls in the inner loops)
+
 ## v0.1.0
 
 First release.
