@@ -46,6 +46,9 @@ static constexpr uint32_t MAX_CHUNKS_PER_STEP = 8;
 static constexpr uint8_t PAYLOAD_TIMING_REQUEST = 0x52;
 static constexpr uint8_t PAYLOAD_TIMING_REPLY = 0x53;
 static constexpr uint8_t PAYLOAD_SYNC = 0x54;
+/// Sync packet of a sender that times its audio with PTP: a frame, its PTP time and the clock
+static constexpr uint8_t PAYLOAD_PTP_SYNC = 0x57;
+static constexpr size_t PTP_SYNC_PACKET_SIZE = 28;
 static constexpr uint8_t PAYLOAD_RESEND_REQUEST = 0x55;
 static constexpr uint8_t PAYLOAD_RETRANSMIT = 0x56;
 static constexpr uint8_t PAYLOAD_AUDIO = 0x60;
@@ -357,8 +360,18 @@ bool Receiver::begin() {
       this->buffered_queue_.init(this->buffered_storage_, bytes);
     }
   }
+  if (this->airplay2_ && this->config_.ptp) {
+    this->ptp_open_ = this->transport_.open_ptp();
+    if (!this->ptp_open_)
+      AIRPLAY_LOGW("PTP is not available; senders that need it (macOS) are turned down");
+  }
   AIRPLAY_LOGD("Buffer of %" PRIu32 " packets", this->slot_count_);
   return true;
+}
+
+void Receiver::ptp_packet(bool general, const uint8_t *data, size_t length, uint32_t from_address, int64_t now_us) {
+  if (this->ptp_open_)
+    this->ptp_clocks_.handle(general, data, length, from_address, now_us);
 }
 
 size_t Receiver::service_instance_name(char *buffer, size_t size) const {
@@ -832,6 +845,7 @@ void Receiver::adopt_session_(uint8_t connection, const char *request, size_t he
   this->airplay2_audio_ = false;
   this->encrypted_ = false;
   this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+  this->set_ptp_timing_(c.pending_ptp);
   this->read_sender_version_(request, header_length);
 }
 
@@ -853,6 +867,7 @@ bool Receiver::promote_pending_session_(uint8_t leaving) {
     this->codec_ = Codec::NONE;
     this->airplay2_audio_ = false;
     this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+    this->set_ptp_timing_(c.pending_ptp);
     if (this->session_state_ == SessionState::PLAYING)
       this->set_session_state_(SessionState::PAUSED);
     return true;
@@ -1444,6 +1459,9 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     case PAYLOAD_SYNC:
       this->handle_sync_packet_(packet, length, now_us);
       return;
+    case PAYLOAD_PTP_SYNC:
+      this->handle_ptp_sync_packet_(packet, length);
+      return;
     default:
       break;
   }
@@ -1728,6 +1746,63 @@ void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length, int64_t
   this->anchor_valid_ = true;
 }
 
+void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
+  if (length < PTP_SYNC_PACKET_SIZE)
+    return;
+  // As shairport-sync reads it: the frame at bytes 4-7 is due at the PTP time in nanoseconds at bytes 8-15 on the
+  // clock at bytes 20-27; bytes 16-19 hold the frame being sent now
+  const uint32_t rtp = read_be32(packet + 4);
+  const auto remote_ns =
+      static_cast<int64_t>((static_cast<uint64_t>(read_be32(packet + 8)) << 32) | read_be32(packet + 12));
+  const uint32_t rtp_now = read_be32(packet + 16);
+  const uint64_t clock = (static_cast<uint64_t>(read_be32(packet + 20)) << 32) | read_be32(packet + 24);
+  if (this->ptp_sync_logged_ < 3) {
+    this->ptp_sync_logged_++;
+    AIRPLAY_LOGD("PTP sync packet: frame %" PRIu32 " at %" PRId64 ".%09" PRId64 " s on clock %016" PRIx64
+                 ", frame %" PRIu32 " now (%" PRId32 " frames ahead), flags %02x%02x",
+                 rtp, remote_ns / 1000000000, remote_ns % 1000000000, clock, rtp_now,
+                 static_cast<int32_t>(rtp_now - rtp), packet[2], packet[3]);
+  }
+  if (!this->ptp_timing_)
+    return;
+  const uint32_t latency = rtp_now - rtp;
+  if (latency > MAX_SENDER_LATENCY_FRAMES)
+    return;
+  this->ptp_timeline_ = clock;
+  this->anchor_rtp_ = rtp;
+  this->anchor_remote_ns_ = remote_ns;
+  this->sender_latency_frames_ = latency;
+  this->anchor_valid_ = true;
+}
+
+void Receiver::update_ptp_clock_(int64_t now_us) {
+  int64_t offset = 0;
+  uint64_t clock = this->ptp_timeline_;
+  if (!this->ptp_clocks_.offset_ns(clock, now_us, &offset)) {
+    // The timeline may be named after a clock that is not the one that sends Sync messages
+    clock = 0;
+    if (this->ptp_timeline_ == 0 || !this->ptp_clocks_.offset_ns(0, now_us, &offset))
+      return;
+  }
+  // rtp_to_local_us_() takes offsets to the local time on the NTP time scale
+  this->clock_offset_ns_ = offset - NTP_UNIX_OFFSET_NS;
+  if (!this->clock_locked_) {
+    this->clock_locked_ = true;
+    AIRPLAY_LOGD("Clock locked to PTP clock %016" PRIx64 "%s", clock != 0 ? clock : this->ptp_clocks_.grandmaster(),
+                 clock == 0 && this->ptp_timeline_ != 0 ? " (the grandmaster, not the timeline's clock)" : "");
+  }
+}
+
+void Receiver::set_ptp_timing_(bool ptp) {
+  if (ptp)
+    AIRPLAY_LOGD("Timing with PTP");
+  this->ptp_timing_ = ptp;
+  this->ptp_timeline_ = 0;
+  this->ptp_sync_logged_ = 0;
+  if (ptp)
+    this->clock_locked_ = false;
+}
+
 void Receiver::send_timing_request_(int64_t now_us) {
   this->last_timing_request_ms_ = to_ms(now_us);
   this->timing_requests_sent_++;
@@ -1999,8 +2074,12 @@ void Receiver::poll(int64_t now_us) {
     this->played_timestamp_.store(0, std::memory_order_relaxed);
   }
 
+  if (this->ptp_open_)
+    this->ptp_clocks_.log_status(now_us);
   if (!this->udp_open_)
     return;
+  if (this->ptp_timing_)
+    this->update_ptp_clock_(now_us);
   // Keep asking quickly until the clock locks, so that a lost packet does not delay synchronized playback
   const uint32_t timing_interval = this->timing_requests_sent_ < TIMING_BURST_COUNT || !this->clock_locked_
                                        ? TIMING_BURST_INTERVAL_MS

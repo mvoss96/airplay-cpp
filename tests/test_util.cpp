@@ -1,10 +1,12 @@
 // base64, DMAP metadata and DACP helpers
 #include "airplay_dacp.h"
+#include "airplay_ptp.h"
 #include "airplay_util.h"
 #include "test_common.h"
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 using namespace airplay;
 
@@ -125,10 +127,73 @@ static void test_md5() {
   }
 }
 
+/// A PTP message: header with type, clock, sequence and flags, then a timestamp
+static std::vector<uint8_t> ptp_message(uint8_t type, uint64_t clock, uint16_t sequence, bool two_step,
+                                        int64_t timestamp_ns, size_t length = 44) {
+  std::vector<uint8_t> m(length, 0);
+  m[0] = type;
+  m[1] = 2;
+  m[2] = static_cast<uint8_t>(length >> 8);
+  m[3] = static_cast<uint8_t>(length);
+  m[6] = two_step ? 0x02 : 0x00;
+  for (int i = 0; i < 8; i++)
+    m[20 + i] = static_cast<uint8_t>(clock >> (56 - 8 * i));
+  m[30] = static_cast<uint8_t>(sequence >> 8);
+  m[31] = static_cast<uint8_t>(sequence);
+  const auto seconds = static_cast<uint64_t>(timestamp_ns / 1000000000);
+  const auto nanoseconds = static_cast<uint32_t>(timestamp_ns % 1000000000);
+  for (int i = 0; i < 6; i++)
+    m[34 + i] = static_cast<uint8_t>(seconds >> (40 - 8 * i));
+  for (int i = 0; i < 4; i++)
+    m[40 + i] = static_cast<uint8_t>(nanoseconds >> (24 - 8 * i));
+  return m;
+}
+
+static void test_ptp() {
+  using airplay::PtpClocks;
+  PtpClocks clocks;
+  const uint64_t clock = 0x1122334455667788ULL;
+  const int64_t offset = 5000LL * 1000000000LL + 123456789;  // The master's time minus local time
+  int64_t found = 0;
+  CHECK(!clocks.offset_ns(clock, 1000000, &found));
+  // Two-step Sync messages every 125 ms; the delay varies from 1 to 4 ms, the least is 1 ms
+  int64_t now_us = 1000000;
+  for (uint16_t seq = 0; seq < 20; seq++) {
+    const int64_t sent_ns = now_us * 1000 + offset;
+    const int64_t delay_us = 1000 + (seq % 4) * 1000;
+    const int64_t arrival_us = now_us + delay_us;
+    clocks.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0100000a, arrival_us);
+    clocks.handle(true, ptp_message(0x8, clock, seq, false, sent_ns).data(), 44, 0x0100000a, arrival_us + 200);
+    // A Follow_Up for another Sync is ignored
+    clocks.handle(true, ptp_message(0x8, clock, static_cast<uint16_t>(seq + 100), false, 0).data(), 44, 0x0100000a,
+                  arrival_us + 300);
+    now_us += 125000;
+  }
+  CHECK(clocks.offset_ns(clock, now_us, &found));
+  CHECK(found == offset - 1000000);  // Less the shortest delay, which is not measured
+  CHECK(clocks.grandmaster() == clock);
+  CHECK(clocks.offset_ns(0, now_us, &found));  // 0 is the grandmaster
+  // An Announce names another grandmaster
+  std::vector<uint8_t> announce = ptp_message(0xb, clock, 1, false, 0, 64);
+  for (int i = 0; i < 8; i++)
+    announce[53 + i] = static_cast<uint8_t>(0xaabbccddeeff0011ULL >> (56 - 8 * i));
+  clocks.handle(true, announce.data(), announce.size(), 0x0100000a, now_us);
+  CHECK(clocks.grandmaster() == 0xaabbccddeeff0011ULL);
+  // Unknown or silent clocks have no offset
+  CHECK(!clocks.offset_ns(0x99, now_us, &found));
+  CHECK(!clocks.offset_ns(clock, now_us + 10000000, &found));
+  // One-step Sync carries its own time
+  PtpClocks one_step;
+  for (uint16_t seq = 0; seq < 4; seq++)
+    one_step.handle(false, ptp_message(0x0, clock, seq, false, 2000000000LL + offset).data(), 44, 1, 2000000 + 500);
+  CHECK(one_step.offset_ns(clock, 2000000, &found) && found == offset - 500000);
+}
+
 int main() {
   test_base64();
   test_md5();
   test_dmap();
   test_dacp();
+  test_ptp();
   return finish("test_util");
 }

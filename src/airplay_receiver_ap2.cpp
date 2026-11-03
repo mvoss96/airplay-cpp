@@ -25,6 +25,8 @@ namespace airplay {
 // FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
 // of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
 static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405C4A00ULL;
+/// PTP timing (41), with ReceiverConfig::ptp. macOS only streams to receivers with it, and then only with PTP.
+static constexpr uint64_t FEATURE_PTP = 1ULL << 41;
 /// Status flags: an audio receiver
 static constexpr int64_t STATUS_FLAGS = 0x4;
 
@@ -80,7 +82,9 @@ void Receiver::init_airplay2_() {
   const uint8_t *mac = this->config_.mac;
   std::snprintf(this->device_id_, sizeof(this->device_id_), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2],
                 mac[3], mac[4], mac[5]);
-  this->airplay2_features_ = this->config_.airplay2_features != 0 ? this->config_.airplay2_features : DEFAULT_FEATURES;
+  this->airplay2_features_ = this->config_.airplay2_features != 0
+                                 ? this->config_.airplay2_features
+                                 : DEFAULT_FEATURES | (this->config_.ptp ? FEATURE_PTP : 0);
   // Lower 32 bits first
   std::snprintf(this->features_, sizeof(this->features_), "0x%" PRIX32 ",0x%" PRIX32,
                 static_cast<uint32_t>(this->airplay2_features_), static_cast<uint32_t>(this->airplay2_features_ >> 32));
@@ -318,8 +322,17 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       this->handle_flush_buffered_(data, body_length);
     return true;
   }
-  // Timing peers for PTP, which is not used
-  return std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0;
+  if (std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0) {
+    // The devices of a PTP group; the receiver only listens to whatever clocks send it Sync messages
+    if (plist && data != nullptr && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+      PlistReader reader;
+      char text[256];
+      if (reader.parse(data, body_length) && reader.describe(reader.root(), text, sizeof(text)) > 0)
+        AIRPLAY_LOGD("%s: %s", method, text);
+    }
+    return true;
+  }
+  return false;
 }
 
 void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response) {
@@ -425,10 +438,32 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       }
       return;
     }
-    if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP")) {
-      AIRPLAY_LOGW("Only NTP timing is supported");
+    const bool ptp = reader.string_equals(timing_protocol, "PTP");
+    if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP") &&
+        !(ptp && this->ptp_open_)) {
+      AIRPLAY_LOGW(ptp ? "PTP timing is not enabled (ReceiverConfig::ptp)" : "Only NTP and PTP timing are supported");
       return;
     }
+    char local_address[16];
+    {
+      const auto *ip = reinterpret_cast<const uint8_t *>(&c.local.address);
+      std::snprintf(local_address, sizeof(local_address), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    }
+    // With PTP the answer names the receiver as a timing peer instead of a port for clock requests
+    const auto write_timing = [&](PlistWriter &out) {
+      if (ptp) {
+        out.key("timingPeerInfo");
+        out.begin_dict(2);
+        out.key("Addresses");
+        out.begin_array(1);
+        out.string(local_address);
+        out.key("ID");
+        out.string(local_address);
+      } else {
+        out.key("timingPort");
+        out.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+      }
+    };
     const char *name = nullptr;
     size_t name_length = 0;
     if (reader.get_string(reader.get(root, "name"), &name, &name_length))
@@ -445,11 +480,11 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
+      c.pending_ptp = ptp;
       writer.begin_dict(2);
       writer.key("eventPort");
       writer.integer(c.local.port);
-      writer.key("timingPort");
-      writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+      write_timing(writer);
       response.body_length = writer.finish();
       if (response.body_length > 0) {
         response.status = 200;
@@ -460,6 +495,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       return;
     }
     c.pending_timing_port = static_cast<uint16_t>(timing_port);  // Kept, should it be set aside and come back
+    c.pending_ptp = ptp;
     this->take_session_(connection, request, header_length);
     this->stop_buffered_audio_();
     this->airplay2_recording_ = false;
@@ -469,6 +505,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     this->airplay2_audio_ = false;
     if (!this->open_udp_(connection, 0, static_cast<uint32_t>(timing_port), this->udp_ports_))
       return;
+    this->set_ptp_timing_(ptp);
     this->event_channel_pending_ = true;
     this->event_channel_address_ = c.peer.address;
     this->event_channel_source_ = connection;
@@ -476,8 +513,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     writer.begin_dict(2);
     writer.key("eventPort");
     writer.integer(c.local.port);
-    writer.key("timingPort");
-    writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+    write_timing(writer);
   } else {
     // An audio stream
     if (c.session_pending && this->udp_open_)
@@ -1012,9 +1048,19 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
     reader.get_integer(reader.get(root, "networkTimeFrac"), &fraction);
     // The fraction is of a second in 64 bits
     const uint64_t fraction_ns = ((static_cast<uint64_t>(fraction) >> 32) * 1000000000ULL) >> 32;
-    // The NTP timeline counts from 1900; a time from 1970 is moved onto it
-    if (seconds < NTP_UNIX_OFFSET_S)
+    if (this->ptp_timing_) {
+      // On the PTP clock that names the timeline
+      int64_t timeline = 0;
+      if (reader.get_integer(reader.get(root, "networkTimeTimelineID"), &timeline) &&
+          static_cast<uint64_t>(timeline) != this->ptp_timeline_) {
+        this->ptp_timeline_ = static_cast<uint64_t>(timeline);
+        this->clock_locked_ = false;
+        AIRPLAY_LOGD("Timeline on PTP clock %016" PRIx64, this->ptp_timeline_);
+      }
+    } else if (seconds < NTP_UNIX_OFFSET_S) {
+      // The NTP timeline counts from 1900; a time from 1970 is moved onto it
       seconds += NTP_UNIX_OFFSET_S;
+    }
     this->anchor_rtp_ = static_cast<uint32_t>(rtp);
     this->anchor_remote_ns_ = seconds * 1000000000LL + static_cast<int64_t>(fraction_ns);
     this->anchor_valid_ = true;

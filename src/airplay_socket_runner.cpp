@@ -3,6 +3,7 @@
 #ifdef AIRPLAY_HAS_SOCKETS
 
 #include "airplay_dacp.h"
+#include "airplay_ptp.h"
 #include "airplay_log.h"
 
 #include <algorithm>
@@ -268,6 +269,8 @@ void SocketRunner::end() {
     }
   }
   this->close_udp();
+  for (int &fd : this->ptp_fds_)
+    close_fd(&fd);
   close_fd(&this->listen_fd_);
 }
 
@@ -283,10 +286,12 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
 
   // Sockets in the order they are handled: UDP first, as the audio is the most urgent. Existing connections are
   // read before accepting, so a new connection cannot reuse a descriptor number that is still marked as ready.
-  int fds[NUM_UDP_CHANNELS + Receiver::MAX_CONNECTIONS + 1];
-  bool ready[NUM_UDP_CHANNELS + Receiver::MAX_CONNECTIONS + 1] = {};
+  int fds[NUM_UDP_CHANNELS + 2 + Receiver::MAX_CONNECTIONS + 1];
+  bool ready[NUM_UDP_CHANNELS + 2 + Receiver::MAX_CONNECTIONS + 1] = {};
   size_t count = 0;
   for (int fd : this->udp_fds_)
+    fds[count++] = fd;
+  for (int fd : this->ptp_fds_)
     fds[count++] = fd;
   for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++)
     fds[count++] = this->receive_paused_[i] ? -1 : this->connection_fds_[i];
@@ -308,6 +313,10 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
       if (ready[i] && this->udp_fds_[i] == fds[i])
         packets += this->receive_udp_(static_cast<UdpChannel>(i));
     }
+    for (size_t i = 0; i < 2; i++) {
+      if (ready[NUM_UDP_CHANNELS + i] && this->ptp_fds_[i] == fds[NUM_UDP_CHANNELS + i])
+        this->receive_ptp_(i);
+    }
     // Many packets: catching up after the thread was held up; few: held up while handling them
     const int64_t udp_end = SocketRunner::now_us();
     this->udp_us_.fetch_add(static_cast<uint32_t>(udp_end - udp_start), std::memory_order_relaxed);
@@ -316,8 +325,8 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
       AIRPLAY_LOGW("Receiving %u UDP packets took %u ms", static_cast<unsigned>(packets),
                    static_cast<unsigned>(udp_ms));
     for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
-      if (ready[NUM_UDP_CHANNELS + i] && this->connection_fds_[i] == fds[NUM_UDP_CHANNELS + i] &&
-          fds[NUM_UDP_CHANNELS + i] >= 0) {
+      const size_t at = NUM_UDP_CHANNELS + 2 + i;
+      if (ready[at] && this->connection_fds_[i] == fds[at] && fds[at] >= 0) {
         const int64_t start = SocketRunner::now_us();
         this->receive_tcp_(i);
         const int64_t end = SocketRunner::now_us();
@@ -439,6 +448,20 @@ size_t SocketRunner::receive_udp_(UdpChannel channel) {
   return MAX_PACKETS_PER_READ;
 }
 
+void SocketRunner::receive_ptp_(size_t index) {
+  for (size_t i = 0; i < MAX_PACKETS_PER_READ; i++) {
+    struct sockaddr_in source {};
+    socklen_t source_length = sizeof(source);
+    const auto received =
+        net::recvfrom(this->ptp_fds_[index], this->udp_buffer_, sizeof(this->udp_buffer_), net::MSG_DONT_WAIT,
+                      reinterpret_cast<struct sockaddr *>(&source), &source_length);
+    if (received <= 0)
+      return;
+    this->receiver_->ptp_packet(index == 1, this->udp_buffer_, static_cast<size_t>(received), source.sin_addr.s_addr,
+                                SocketRunner::now_us());
+  }
+}
+
 bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) {
   if (connection >= Receiver::MAX_CONNECTIONS || this->connection_fds_[connection] < 0)
     return false;
@@ -501,6 +524,43 @@ void SocketRunner::send_udp(UdpChannel channel, const Endpoint &to, const uint8_
   address.sin_port = htons(to.port);
   address.sin_addr.s_addr = to.address;
   net::sendto(fd, data, length, 0, reinterpret_cast<struct sockaddr *>(&address), sizeof(address));
+}
+
+bool SocketRunner::open_ptp() {
+#if defined(__ZEPHYR__)
+  return false;  // Two more sockets than CONFIG_ZVFS_POLL_MAX allows for
+#else
+  if (this->ptp_fds_[0] >= 0)
+    return true;
+  const uint16_t ports[2] = {PTP_EVENT_PORT, PTP_GENERAL_PORT};
+  for (size_t i = 0; i < 2; i++) {
+    const int fd = net::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int enable = 1;
+    if (fd >= 0)
+      net::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+    struct sockaddr_in address {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(ports[i]);
+    if (fd < 0 || net::bind(fd, reinterpret_cast<struct sockaddr *>(&address), sizeof(address)) != 0) {
+      AIRPLAY_LOGW("Failed to open PTP port %u: %d", ports[i], errno);
+      if (fd >= 0)
+        net::close(fd);
+      for (int &open_fd : this->ptp_fds_)
+        close_fd(&open_fd);
+      return false;
+    }
+    // Senders may send to the PTP multicast group as well as to the receiver
+    struct ip_mreq group {};
+    group.imr_multiaddr.s_addr = htonl(0xe0000181);  // 224.0.1.129
+    group.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (net::setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) != 0)
+      AIRPLAY_LOGD("Failed to join the PTP multicast group on port %u: %d", ports[i], errno);
+    this->ptp_fds_[i] = fd;
+  }
+  AIRPLAY_LOGI("Listening for PTP on ports %u and %u", PTP_EVENT_PORT, PTP_GENERAL_PORT);
+  return true;
+#endif
 }
 
 int send_dacp_command(const RemoteTarget &target, uint16_t port, const char *command, uint32_t timeout_ms) {

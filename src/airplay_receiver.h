@@ -5,6 +5,7 @@
 #include "airplay_crypto.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
+#include "airplay_ptp.h"
 #include "airplay_types.h"
 
 #include <atomic>
@@ -31,6 +32,9 @@ class Transport {
   /// Stops or resumes reading a connection, so that a sender that sends audio ahead waits while the receiver's
   /// buffer is full. Without it the receiver drops what does not fit.
   virtual void pause_receiving(uint8_t /*connection*/, bool /*paused*/) {}
+  /// Opens UDP ports 319 and 320 for PTP and joins its multicast group 224.0.1.129, and hands what arrives to
+  /// Receiver::ptp_packet(). Only for ReceiverConfig::ptp; without it senders that need PTP (macOS) are turned down.
+  virtual bool open_ptp() { return false; }
 };
 
 /// Audio output. Must not block.
@@ -121,6 +125,8 @@ struct ReceiverConfig {
   int64_t (*clock_us)(){nullptr};
   /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
   uint64_t airplay2_features{0};
+  /// Also offer AirPlay 2 timing with PTP, which macOS needs (iOS then uses it too). Needs Transport::open_ptp().
+  bool ptp{false};
   /// Decoder for AirPlay 2 buffered audio (AAC), which iOS uses for most apps; not offered without one. Must stay
   /// valid while the receiver exists.
   AacDecoder *aac_decoder{nullptr};
@@ -171,6 +177,8 @@ class Receiver {
   void connection_closed(uint8_t connection);
   void connection_data(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
   void udp_packet(UdpChannel channel, const uint8_t *data, size_t length, const Endpoint &from, int64_t now_us);
+  /// A message on PTP port 320 (`general`) or 319, see Transport::open_ptp()
+  void ptp_packet(bool general, const uint8_t *data, size_t length, uint32_t from_address, int64_t now_us);
   /// Drives timing, retransmission and playback. Call about every 10 ms during a session
   /// (needs_fast_polling()), otherwise every 100 ms or so.
   void poll(int64_t now_us);
@@ -267,6 +275,7 @@ class Receiver {
     bool pending_recording{false};
     char sender_name[SENDER_NAME_SIZE]{};  // The device name the sender sent, empty if none
     uint16_t pending_timing_port{0};
+    bool pending_ptp{false};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint8_t event_key[CHACHA_KEY_SIZE];  // From pair-setup, for writing on the event connection that follows
@@ -428,6 +437,9 @@ class Receiver {
   /// buffers, and logs how long it takes
   void benchmark_decoder_(const uint8_t *data, size_t length, int16_t *output);
   void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
+  void handle_ptp_sync_packet_(const uint8_t *packet, size_t length);
+  void update_ptp_clock_(int64_t now_us);
+  void set_ptp_timing_(bool ptp);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
                               int64_t now_us);
@@ -627,6 +639,12 @@ class Receiver {
   uint32_t last_timing_request_ms_{0};
   int64_t clock_offset_ns_{0};
   bool clock_locked_{false};
+  // PTP: the clocks seen, whether the session is timed with PTP, and the clock its timeline follows (0: grandmaster)
+  PtpClocks ptp_clocks_;
+  bool ptp_open_{false};
+  bool ptp_timing_{false};
+  uint64_t ptp_timeline_{0};
+  uint32_t ptp_sync_logged_{0};
   bool anchor_valid_{false};
   uint32_t anchor_rtp_{0};
   int64_t anchor_remote_ns_{0};

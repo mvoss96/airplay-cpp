@@ -66,12 +66,14 @@ class SocketRunner final : public Transport {
   bool open_udp(uint16_t *ports) override;
   void close_udp() override;
   void send_udp(UdpChannel channel, const Endpoint &to, const uint8_t *data, size_t length) override;
+  bool open_ptp() override;
 
  protected:
   void accept_connection_();
   void receive_tcp_(uint8_t connection);
   /// @return the number of packets read
   size_t receive_udp_(UdpChannel channel);
+  void receive_ptp_(size_t index);
 
   Receiver *receiver_{nullptr};
   int listen_fd_{-1};
@@ -89,6 +91,7 @@ class SocketRunner final : public Transport {
   std::atomic<uint32_t> polls_{0};
   int64_t last_poll_us_{0};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
+  int ptp_fds_[2]{-1, -1};  // Event and general port
   uint8_t udp_buffer_[1600];
 };
 
