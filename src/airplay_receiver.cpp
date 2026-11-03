@@ -2396,8 +2396,8 @@ bool Receiver::synced_step_(int64_t now_us) {
     this->advance_head_();
     return true;
   }
-  // Line up with silence when starting from an empty output, or when far too early
-  if (error_us > EARLY_LATE_THRESHOLD_US || (queued_us == 0 && error_us > 0)) {
+  // Line up with silence when far too early, and the first packet after a start exactly
+  if (error_us > EARLY_LATE_THRESHOLD_US || (error_us > 0 && (queued_us == 0 || !this->start_aligned_))) {
     this->silence_pending_frames_ = static_cast<uint32_t>(error_us * SAMPLE_RATE / 1000000);
     this->servo_error_us_ = 0;
     if (this->silence_pending_frames_ > 0)
