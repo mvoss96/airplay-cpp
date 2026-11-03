@@ -167,7 +167,7 @@ class Receiver {
   void connection_closed(uint8_t connection);
   void connection_data(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
   void udp_packet(UdpChannel channel, const uint8_t *data, size_t length, const Endpoint &from, int64_t now_us);
-  /// Drives timing, retransmission and playback. Call at least every 5 ms during a session
+  /// Drives timing, retransmission and playback. Call about every 10 ms during a session
   /// (needs_fast_polling()), otherwise every 100 ms or so.
   void poll(int64_t now_us);
 

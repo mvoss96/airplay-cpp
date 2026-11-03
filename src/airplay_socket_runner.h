@@ -40,7 +40,7 @@ class SocketRunner final : public Transport {
   void set_udp_base_port(uint16_t base) { this->udp_base_port_ = base; }
 
   /// @brief Waits up to max_wait_ms for network traffic, hands it to the receiver and calls Receiver::poll().
-  /// The wait is shortened to 5 ms while a session plays.
+  /// While a session plays, Receiver::poll() runs every 10 ms and the wait ends in time for it.
   void run_once(uint32_t max_wait_ms = 100);
 
   /// @brief Monotonic time in microseconds, the clock the runner passes to the receiver. Use it for the
@@ -55,6 +55,7 @@ class SocketRunner final : public Transport {
     uint32_t recv_ms;  // Of that, taking them from the network stack (recvfrom)
     uint32_t tcp_ms;   // Receiving and handling TCP data
     uint32_t poll_ms;  // Receiver::poll(): playback and timers
+    uint32_t polls;    // Calls of Receiver::poll()
   };
   Timing take_timing();
 
@@ -85,6 +86,8 @@ class SocketRunner final : public Transport {
   std::atomic<uint32_t> recv_us_{0};
   std::atomic<uint32_t> tcp_us_{0};
   std::atomic<uint32_t> poll_us_{0};
+  std::atomic<uint32_t> polls_{0};
+  int64_t last_poll_us_{0};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
   uint8_t udp_buffer_[1600];
 };

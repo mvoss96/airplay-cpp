@@ -265,7 +265,7 @@ struct Sim : Transport {
         this->measure_from_us = this->now_us + 4000000;
       }
       if (this->now_us >= next_poll) {
-        next_poll = this->now_us + 5000;
+        next_poll = this->now_us + 10000;
         this->receiver.poll(this->now_us);
       }
     }

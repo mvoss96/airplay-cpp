@@ -157,7 +157,9 @@ inline bool set_nonblocking(int fd, bool enable) {
 #endif
 }  // namespace net
 
-static constexpr uint32_t FAST_POLL_MS = 5;
+/// Receiver::poll() interval while a session plays. Each call costs about the same however little there is to do
+/// (on the ESP32 mostly cache misses), so it does not follow every packet.
+static constexpr int64_t FAST_POLL_US = 10000;
 static constexpr size_t MAX_PACKETS_PER_READ = 16;
 static constexpr size_t TCP_READ_SIZE = 1024;
 /// Steps that take this long can starve the output and other tasks, so they are logged
@@ -272,7 +274,12 @@ void SocketRunner::end() {
 void SocketRunner::run_once(uint32_t max_wait_ms) {
   if (this->receiver_ == nullptr)
     return;
-  const uint32_t wait_ms = this->receiver_->needs_fast_polling() ? std::min(max_wait_ms, FAST_POLL_MS) : max_wait_ms;
+  const bool fast = this->receiver_->needs_fast_polling();
+  uint32_t wait_ms = max_wait_ms;
+  if (fast) {
+    const int64_t due_in_us = this->last_poll_us_ + FAST_POLL_US - SocketRunner::now_us();
+    wait_ms = due_in_us > 0 ? std::min(max_wait_ms, static_cast<uint32_t>((due_in_us + 999) / 1000)) : 0;
+  }
 
   // Sockets in the order they are handled: UDP first, as the audio is the most urgent. Existing connections are
   // read before accepting, so a new connection cannot reuse a descriptor number that is still marked as ready.
@@ -324,6 +331,10 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
       this->accept_connection_();
   }
   const int64_t start = SocketRunner::now_us();
+  if (fast && start - this->last_poll_us_ < FAST_POLL_US)
+    return;
+  this->last_poll_us_ = start;
+  this->polls_.fetch_add(1, std::memory_order_relaxed);
   this->receiver_->poll(start);
   const int64_t end = SocketRunner::now_us();
   this->poll_us_.fetch_add(static_cast<uint32_t>(end - start), std::memory_order_relaxed);
@@ -338,7 +349,8 @@ SocketRunner::Timing SocketRunner::take_timing() {
                 this->udp_us_.exchange(0, std::memory_order_relaxed) / 1000,
                 this->recv_us_.exchange(0, std::memory_order_relaxed) / 1000,
                 this->tcp_us_.exchange(0, std::memory_order_relaxed) / 1000,
-                this->poll_us_.exchange(0, std::memory_order_relaxed) / 1000};
+                this->poll_us_.exchange(0, std::memory_order_relaxed) / 1000,
+                this->polls_.exchange(0, std::memory_order_relaxed)};
 }
 
 void SocketRunner::accept_connection_() {
