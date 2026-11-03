@@ -3,6 +3,15 @@
 #include <algorithm>
 #include <cstring>
 
+// The decoding loops run for every sample. On the ESP32 they go to internal RAM, so that they do not wait for the
+// flash cache while other tasks (display, network) push them out of it.
+#if defined(ESP_PLATFORM)
+#include <esp_attr.h>
+#define AIRPLAY_HOT IRAM_ATTR
+#else
+#define AIRPLAY_HOT
+#endif
+
 namespace airplay {
 
 // Constants of the adaptive Golomb-Rice coder (ag_dec.c in Apple's reference decoder)
@@ -47,11 +56,20 @@ inline int32_t sign_extend(int32_t value, uint32_t shift) {
 /// MSB-first bit reader. Reads past the end return zero bits and set the overrun flag.
 class BitReader {
  public:
-  BitReader(const uint8_t *data, size_t length) : data_(data), bit_length_(length * 8) {}
+  BitReader(const uint8_t *data, size_t length) : data_(data), length_(length), bit_length_(length * 8) {}
 
   /// Returns the next 32 bits without consuming them
   uint32_t peek32() const {
-    size_t byte = this->position_ >> 3;
+    const size_t byte = this->position_ >> 3;
+    const uint32_t shift = this->position_ & 7;
+    if (byte + 5 <= this->length_) {
+      // 32-bit operations only: 64-bit shifts are slow on 32-bit microcontrollers
+      const uint8_t *p = this->data_ + byte;
+      const uint32_t word = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+                            (static_cast<uint32_t>(p[2]) << 8) | p[3];
+      return shift == 0 ? word : (word << shift) | (p[4] >> (8 - shift));
+    }
+    // Near the end: missing bytes read as zero
     uint64_t value = 0;
     for (size_t i = 0; i < 5; i++) {
       value <<= 8;
@@ -76,12 +94,13 @@ class BitReader {
 
  protected:
   const uint8_t *data_;
+  size_t length_;
   size_t bit_length_;
   size_t position_{0};
 };
 
 /// Reads one adaptive Golomb-Rice coded value (dyn_get and dyn_get_32bit in the reference decoder).
-uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t escape_bits) {
+inline uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t escape_bits) {
   const uint32_t prefix = clz32(~reader.peek32());
   if (prefix >= MAX_PREFIX) {
     reader.skip(MAX_PREFIX);
@@ -100,8 +119,8 @@ uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t escape_bi
 }
 
 /// Decodes the entropy coded prediction residuals of one channel (dyn_decomp in the reference decoder).
-bool decompress(BitReader &reader, int32_t *out, uint32_t num_samples, uint32_t max_size, uint32_t pb, uint32_t mb0,
-                uint32_t kb) {
+AIRPLAY_HOT bool decompress(BitReader &reader, int32_t *out, uint32_t num_samples, uint32_t max_size, uint32_t pb,
+                            uint32_t mb0, uint32_t kb) {
   const uint32_t wb = (1u << kb) - 1;
   uint32_t mb = mb0;
   uint32_t zmode = 0;
@@ -144,8 +163,8 @@ bool decompress(BitReader &reader, int32_t *out, uint32_t num_samples, uint32_t 
 }
 
 /// Runs the adaptive FIR predictor in reverse (unpc_block in the reference decoder). `in` and `out` may be equal.
-void unpredict(const int32_t *in, int32_t *out, uint32_t num, int16_t *coefs, uint32_t num_active, uint32_t chan_bits,
-               uint32_t den_shift) {
+AIRPLAY_HOT void unpredict(const int32_t *in, int32_t *out, uint32_t num, int16_t *coefs, uint32_t num_active,
+                           uint32_t chan_bits, uint32_t den_shift) {
   const uint32_t chan_shift = 32 - chan_bits;
   const int32_t den_half = den_shift > 0 ? (1 << (den_shift - 1)) : 0;
 
