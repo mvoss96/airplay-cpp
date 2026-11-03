@@ -36,7 +36,8 @@ class PtpClocks {
   /// @brief A message the receiver sends now, if one is due: a Delay_Req to the grandmaster about every second, and
   /// an Announce every two seconds. Send it right away: the time of a Delay_Req is taken here.
   /// @return its length, 0 if none is due
-  size_t next_message(uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general);
+  /// @param clock The clock the receiver follows (the session's timeline), 0 for the grandmaster
+  size_t next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general);
 
  private:
   static constexpr size_t WINDOW = 16;
@@ -68,6 +69,10 @@ class PtpClocks {
     int64_t delay_samples[WINDOW];
     uint32_t delay_count;
     uint32_t delay_responses;
+    // The grandmaster part of its last Announce (priorities, quality, identity, steps, time source), passed on in
+    // ours with one step more, as a clock that follows it does
+    uint8_t announce[17];
+    bool has_announce;
   };
   const Clock *active_(uint64_t id, int64_t now_us) const;
   void write_header_(uint8_t *buffer, uint8_t type, size_t length, uint8_t domain, uint16_t sequence, uint8_t control,
@@ -86,10 +91,6 @@ class PtpClocks {
   int64_t last_delay_request_us_{0};
   uint16_t announce_sequence_{0};
   int64_t last_announce_us_{0};
-  // The grandmaster's part of its last Announce (priorities, quality, identity, steps, time source), passed on in
-  // ours with one step more, as a clock that follows it does
-  uint8_t grandmaster_announce_[17]{};
-  bool have_grandmaster_announce_{false};
   // Messages seen per type (the low 4 bits of the first byte) since the last status line, and which were logged
   uint32_t type_counts_[16]{};
   uint32_t types_logged_{0};

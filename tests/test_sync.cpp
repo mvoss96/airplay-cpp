@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
@@ -371,6 +372,14 @@ int main(int argc, char **argv) {
                        .output_pipeline_frames = 2205,
                        .max_silence_percent = 2.0,
                        .max_late_packets = 0});
+  // Stalls longer than the output queue run the I2S speaker dry: what follows must still be lined up exactly
+  scenarios.push_back({.name = "I2S speaker runs dry",
+                       .jitter_ms = 2,
+                       .stall_every_s = 15,
+                       .stall_ms = 2600,
+                       .output_pipeline_frames = 2205,
+                       .max_silence_percent = 3.0,
+                       .max_discontinuities = 3});  // The audio missing in each stall
   scenarios.push_back({.name = "5% loss, stalls",
                        .loss = 0.05,
                        .jitter_ms = 4,
@@ -427,6 +436,9 @@ int main(int argc, char **argv) {
                          .max_discontinuities = 50});
   }
   for (const Scenario &scenario : scenarios) {
+    // SYNC_ONLY=<part of a name> runs only the scenarios whose name contains it
+    if (std::getenv("SYNC_ONLY") && std::strstr(scenario.name, std::getenv("SYNC_ONLY")) == nullptr)
+      continue;
     Sim sim(scenario);
     sim.run();
     sim.report_and_check();

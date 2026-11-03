@@ -83,18 +83,24 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
   const int64_t correction_ns = static_cast<int64_t>(read_be(data + 8, 8)) / 65536;
 
   if (type == TYPE_ANNOUNCE && general && length >= ANNOUNCE_SIZE) {
+    // Several senders may each be a grandmaster (an iPhone and a Mac that both had the receiver selected): each
+    // clock keeps what it announces, and the receiver follows the one its session uses
+    Clock *clock = this->find_(id, from_address, now_us);
+    if (clock == nullptr)
+      return;
     const uint64_t grandmaster = read_be(data + 53, 8);
-    if (grandmaster != this->grandmaster_) {
+    if (!clock->has_announce || grandmaster != read_be(clock->announce + 6, 8)) {
       char address[16];
       format_address(from_address, address, sizeof(address));
       AIRPLAY_LOGD("PTP grandmaster %016" PRIx64 " announced by %016" PRIx64 " (%s, domain %u, priority %u/%u, "
                    "class %u, %u steps)",
                    grandmaster, id, address, data[4], data[47], data[52], data[48],
                    static_cast<unsigned>(read_be(data + 61, 2)));
-      this->grandmaster_ = grandmaster;
     }
-    std::copy(data + 47, data + 64, this->grandmaster_announce_);
-    this->have_grandmaster_announce_ = true;
+    std::copy(data + 47, data + 64, clock->announce);
+    clock->has_announce = true;
+    clock->domain = data[4];
+    this->grandmaster_ = grandmaster;
     return;
   }
   if (length < TIMESTAMP_MESSAGE_SIZE)
@@ -281,8 +287,10 @@ void PtpClocks::write_header_(uint8_t *buffer, uint8_t type, size_t length, uint
   buffer[33] = static_cast<uint8_t>(log_interval);
 }
 
-size_t PtpClocks::next_message(uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general) {
-  const Clock *master = this->active_(0, now_us);
+size_t PtpClocks::next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general) {
+  const Clock *master = this->active_(clock, now_us);
+  if (master == nullptr && clock != 0)
+    master = this->active_(0, now_us);
   if (master == nullptr || this->identity_ == 0)
     return 0;
   *to_address = master->address;
@@ -292,9 +300,9 @@ size_t PtpClocks::next_message(uint8_t *buffer, int64_t now_us, uint32_t *to_add
     this->last_announce_us_ = now_us;
     write_header_(buffer, TYPE_ANNOUNCE, ANNOUNCE_SIZE, master->domain, this->announce_sequence_++, 5, 1);
     write_be(buffer + 44, 37, 2);  // UTC offset
-    if (this->have_grandmaster_announce_) {
+    if (master->has_announce) {
       // Follows the grandmaster: its details, one step further away, which never wins against it
-      std::copy(this->grandmaster_announce_, this->grandmaster_announce_ + 17, buffer + 47);
+      std::copy(master->announce, master->announce + 17, buffer + 47);
       write_be(buffer + 61, read_be(buffer + 61, 2) + 1, 2);
     } else {
       buffer[47] = 255;   // Priority 1

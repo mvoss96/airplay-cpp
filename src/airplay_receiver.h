@@ -611,8 +611,13 @@ class Receiver {
   bool audio_held_{false};  // hold_requested_, applied in poll()
   bool playback_started_{false};
   bool output_starting_{false};
-  bool start_aligned_{false};  // The first packet after the start of playback was lined up  // Silence started the
-                               // output; the audio is lined up once it plays
+  bool start_aligned_{false};  // The first packet after the start of playback was lined up
+  // Starting an empty output: silence still to write, then waiting for the output to report it
+  bool kick_output_{false};
+  bool waiting_for_output_{false};
+  uint32_t played_at_kick_{0};
+  uint32_t kick_ms_{0};  // Silence started the
+                         // output; the audio is lined up once it plays
   bool synced_{false};
   bool sync_logged_{false};
   bool played_reports_missing_{false};

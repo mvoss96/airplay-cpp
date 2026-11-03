@@ -192,7 +192,7 @@ static void test_ptp() {
   uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
   uint32_t to = 0;
   bool general = false;
-  CHECK(active.next_message(message, 1000000, &to, &general) == 0);  // No grandmaster yet
+  CHECK(active.next_message(0, message, 1000000, &to, &general) == 0);  // No grandmaster yet
   now_us = 3000000;
   for (uint16_t seq = 0; seq < 8; seq++) {
     clocks.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0, 0);  // Unrelated instance
@@ -201,13 +201,13 @@ static void test_ptp() {
                   now_us + 1100);
     now_us += 125000;
   }
-  CHECK(active.next_message(message, now_us, &to, &general) == 64 && general && to == 0x0200000a);
+  CHECK(active.next_message(0, message, now_us, &to, &general) == 64 && general && to == 0x0200000a);
   CHECK((message[0] & 0x0f) == 0xb && message[47] == 255 && message[48] == 255);
   CHECK(message[20] == 0x3c && message[23] == 0xff && message[24] == 0xfe && message[27] == 0x94);
   for (int round = 0; round < 3; round++) {
-    size_t length = active.next_message(message, now_us, &to, &general);
+    size_t length = active.next_message(0, message, now_us, &to, &general);
     if (length == 64)
-      length = active.next_message(message, now_us, &to, &general);  // An Announce first, every 2 s
+      length = active.next_message(0, message, now_us, &to, &general);  // An Announce first, every 2 s
     CHECK(length == 44 && !general && (message[0] & 0x0f) == 0x1);
     // The grandmaster received it 1 ms later on its clock
     std::vector<uint8_t> response = ptp_message(0x9, clock, static_cast<uint16_t>((message[30] << 8) | message[31]),
@@ -264,6 +264,28 @@ static void test_ptp() {
   for (int i = 0; i < 3; i++)
     outlier_sync(10000000);
   CHECK(outlier.offset_ns(clock, now_us, &found) && std::llabs(found - (offset + 9000000)) < 100000);
+
+  // Two grandmasters at once (an iPhone and a Mac): messages go to the clock the session follows, with its details
+  PtpClocks two;
+  two.set_identity(mac);
+  const uint64_t phone = 0x10da63d7b20a0008ULL;
+  const uint64_t laptop = 0x9e74f47cbea60008ULL;
+  now_us = 30000000;
+  for (uint16_t seq = 0; seq < 8; seq++) {
+    for (const auto &[id, address] : {std::pair{phone, 0x5302a8c0u}, std::pair{laptop, 0x9c02a8c0u}}) {
+      std::vector<uint8_t> announce = ptp_message(0xb, id, seq, false, 0, 64);
+      announce[47] = id == phone ? 250 : 251;
+      for (int i = 0; i < 8; i++)
+        announce[53 + i] = static_cast<uint8_t>(id >> (56 - 8 * i));
+      two.handle(true, announce.data(), announce.size(), address, now_us);
+      two.handle(false, ptp_message(0x0, id, seq, true, 0).data(), 44, address, now_us + 1000);
+      two.handle(true, ptp_message(0x8, id, seq, false, now_us * 1000 + offset).data(), 44, address, now_us + 1000);
+    }
+    now_us += 125000;
+  }
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 64 && to == 0x5302a8c0u);
+  CHECK(message[47] == 250 && message[53] == 0x10 && message[62] == 1);  // The phone's details, one step more
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 44 && to == 0x5302a8c0u);
 
   // One-step Sync carries its own time
   PtpClocks one_step;

@@ -41,6 +41,8 @@ static constexpr size_t RETRANSMIT_HEADER_SIZE = 4;
 static constexpr size_t TIMING_PACKET_SIZE = 32;
 static constexpr size_t SYNC_PACKET_SIZE = 20;
 static constexpr uint32_t MAX_CHUNKS_PER_STEP = 8;
+/// Packets handled per poll at most, also those that are only dropped
+static constexpr uint32_t MAX_STEPS_PER_POLL = 256;
 
 // RTP payload types (second header byte without the marker bit)
 static constexpr uint8_t PAYLOAD_TIMING_REQUEST = 0x52;
@@ -80,6 +82,8 @@ static constexpr int64_t START_WINDOW_US = 100000;
 /// and its main loop may be busy). It is started with a little silence this long before the first packet is due,
 /// and the audio is lined up once it reports what it played.
 static constexpr int64_t OUTPUT_START_LEAD_US = 500000;
+/// An output whose last report is this much older than its queued audio lasts has run dry
+static constexpr int64_t DRY_MARGIN_US = 20000;
 /// More than an output plays before it reports (its DMA buffers), and well within the lead
 static constexpr uint32_t OUTPUT_START_FRAMES = SAMPLE_RATE / 10;
 /// Packets later than this are dropped; packets earlier than this are lined up with silence
@@ -2083,7 +2087,7 @@ void Receiver::poll(int64_t now_us) {
     uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
     uint32_t to = 0;
     bool general = false;
-    if (const size_t length = this->ptp_clocks_.next_message(message, now_us, &to, &general)) {
+    if (const size_t length = this->ptp_clocks_.next_message(this->ptp_timeline_, message, now_us, &to, &general)) {
       this->transport_.send_ptp(general, Endpoint{to, general ? PTP_GENERAL_PORT : PTP_EVENT_PORT}, message, length);
     }
     this->update_ptp_clock_(now_us);
@@ -2146,10 +2150,21 @@ void Receiver::playback_step_(int64_t now_us) {
   this->stats_.synchronized = this->playback_started_ && this->synced_;
 
   // The output ran dry while playing: an underrun, unless the sender stopped sending
+  // Also when the last report is older than the audio still queued lasts: outputs that report in chunks leave the
+  // end of the audio unreported until more arrives
+  const int64_t queued_us = frames_to_us(this->speaker_queued_frames_());
+  const auto report_age_us = static_cast<int32_t>(static_cast<uint32_t>(now_us) - reported_at);
   const bool dry = this->playback_started_ && this->frames_written_ > 0 &&
-                   this->frames_played_.load(std::memory_order_relaxed) != 0 && this->speaker_queued_frames_() == 0;
-  if (dry && !this->output_dry_ && this->buffered_packets_() > 0)
-    this->stats_.underruns++;
+                   this->frames_played_.load(std::memory_order_relaxed) != 0 &&
+                   (queued_us == 0 || (reported_at != 0 && report_age_us > queued_us + DRY_MARGIN_US));
+  if (dry && !this->output_dry_) {
+    if (this->buffered_packets_() > 0)
+      this->stats_.underruns++;
+    // The output may fill the gap with silence of its own that is not counted: what follows is lined up anew
+    this->kick_output_ = true;
+    this->waiting_for_output_ = false;
+    this->start_aligned_ = false;
+  }
   this->output_dry_ = dry;
 
   if (this->playback_started_ && now_ms - this->last_stats_log_ms_ >= STATS_LOG_INTERVAL_MS) {
@@ -2177,9 +2192,12 @@ void Receiver::playback_step_(int64_t now_us) {
   if (!this->playback_started_ && !this->start_playback_())
     return;
 
-  for (uint32_t i = 0; i < MAX_CHUNKS_PER_STEP; i++) {
+  // Only steps that give the output audio count: packets that are dropped as late go quickly, which matters right
+  // after a start, when the output must not run dry while they go
+  for (uint32_t chunks = 0, steps = 0; chunks < MAX_CHUNKS_PER_STEP && steps < MAX_STEPS_PER_POLL; steps++) {
     if (!this->write_pending_output_(now_ms))
       return;
+    chunks++;
     if (this->silence_pending_frames_ > 0) {
       this->queue_silence_output_();
       continue;
@@ -2189,8 +2207,13 @@ void Receiver::playback_step_(int64_t now_us) {
         this->playback_started_ = false;  // Ran dry, so start again once there is enough audio
       return;
     }
+    const uint32_t written_before = static_cast<uint32_t>(this->frames_written_);
+    const bool queued_before = this->output_offset_ < this->output_length_;
     if (!(this->synced_ ? this->synced_step_(now_us) : this->unsynced_step_()))
       return;
+    if (!queued_before && this->output_offset_ >= this->output_length_ &&
+        static_cast<uint32_t>(this->frames_written_) == written_before)
+      chunks--;  // Nothing for the output
   }
 }
 
@@ -2240,6 +2263,8 @@ bool Receiver::start_playback_() {
   this->playback_started_ = true;
   this->output_starting_ = false;
   this->start_aligned_ = false;
+  this->kick_output_ = this->speaker_queued_frames_() == 0;
+  this->waiting_for_output_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -2291,16 +2316,28 @@ bool Receiver::synced_step_(int64_t now_us) {
     this->playback_started_ = false;
     return false;
   }
-  if (this->frames_played_.load(std::memory_order_relaxed) == 0) {
-    if (this->frames_written_ == 0 && error_us <= OUTPUT_START_LEAD_US) {
-      this->silence_pending_frames_ = OUTPUT_START_FRAMES;
-      this->output_starting_ = true;
-      return true;
-    }
-    return false;  // Until the output plays; one that never reports plays unsynchronized after a timeout
+  // An empty output (not started yet, or run dry) may play its own silence that nobody counts (ESPHome's I2S
+  // speaker keeps 50 ms of DMA buffers full), and may take a while to start. It is started with a little silence
+  // ahead of time, and the audio is lined up once it reports what it played.
+  const uint32_t played = this->frames_played_.load(std::memory_order_relaxed);
+  if (this->kick_output_) {
+    if (error_us > OUTPUT_START_LEAD_US)
+      return false;
+    this->kick_output_ = false;
+    this->waiting_for_output_ = true;
+    this->played_at_kick_ = played;
+    this->kick_ms_ = nonzero_ms(to_ms(now_us));
+    this->silence_pending_frames_ = OUTPUT_START_FRAMES;
+    return true;
   }
-  // Once the output started, the audio is lined up at once: an output that runs dry may fill its buffers with
-  // silence that nobody counts (ESPHome's I2S speaker keeps 50 ms of DMA buffers full), which delays what follows
+  if (this->waiting_for_output_) {
+    // An output that never reports plays unsynchronized after a timeout; one that stopped reporting goes on
+    if (played == this->played_at_kick_ && to_ms(now_us) - this->kick_ms_ < PLAYED_REPORT_TIMEOUT_MS)
+      return false;
+    this->waiting_for_output_ = false;
+    this->output_starting_ = true;
+  }
+  // Once the output plays, the audio is lined up at once, before the output runs dry again
   if (error_us > START_WINDOW_US && !this->output_starting_)
     return false;
   this->output_starting_ = false;
