@@ -586,6 +586,7 @@ class Receiver {
   uint16_t accept_from_seq_{0};
   uint16_t resend_seq_{0};
   bool have_seq_{false};
+  bool held_silence_logged_{false};
   bool packets_missing_{false};  // A packet was marked missing since the last scan that found none
   bool accept_any_seq_{false};
   uint32_t last_packet_ms_{0};

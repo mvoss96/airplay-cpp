@@ -123,6 +123,9 @@ static constexpr int32_t FILL_SMOOTHING_SHIFT = 8;
 static constexpr uint32_t OUTPUT_RESTART_SETTLE_MS = 20;
 /// The session shows as paused when a playing sender sends no audio for this long
 static constexpr uint32_t SENDER_IDLE_MS = 3000;
+/// Payload of an audio packet that holds only silence: compressed ALAC silence of a packet is 32 bytes, and even
+/// the quietest audio takes a few hundred
+static constexpr size_t SILENT_PACKET_MAX_BYTES = 64;
 /// The buffer for buffered audio holds at least this much, so that pausing the connection leaves room
 static constexpr size_t MIN_BUFFERED_AUDIO_BYTES = 32 * 1024;
 /// Statistics are logged at debug level this often during playback
@@ -1448,8 +1451,13 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     return;
   // Held: dropped as it arrives, unless the sender is paused and its audio may show that it plays again
   if (this->audio_held_ && this->session_state_ != SessionState::PAUSED) {
-    if (type == PAYLOAD_AUDIO)
+    // iOS keeps sending silence for several seconds after an AirPlay 1 pause: packets that small are not audio
+    if (type == PAYLOAD_AUDIO && length > RTP_HEADER_SIZE + SILENT_PACKET_MAX_BYTES) {
       this->last_packet_ms_ = to_ms(now_us);
+    } else if (type == PAYLOAD_AUDIO && !this->held_silence_logged_) {
+      this->held_silence_logged_ = true;
+      AIRPLAY_LOGD("The sender sends silence (packets of %u bytes)", static_cast<unsigned>(length - RTP_HEADER_SIZE));
+    }
     return;
   }
 
@@ -1962,6 +1970,7 @@ void Receiver::poll(int64_t now_us) {
   const bool hold = this->hold_requested_.load(std::memory_order_acquire);
   if (hold != this->audio_held_) {
     this->audio_held_ = hold;
+    this->held_silence_logged_ = false;
     if (hold) {
       AIRPLAY_LOGD("Holding the sender's audio");
     } else {

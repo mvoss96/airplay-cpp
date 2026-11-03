@@ -544,6 +544,15 @@ static void test_audio_hold() {
   send(100, true);
   CHECK(audible_frames(f.played, mark) == 0);
 
+  // Tiny packets, as the silence iOS keeps sending for a while after a pause, do not keep it playing
+  for (uint32_t i = 0; i < 500; i++, seq++) {
+    f.udp(UdpChannel::AUDIO, rtp_packet(0x60, seq, seq * FRAMES_PER_PACKET, std::vector<uint8_t>(32, 0)));
+    f.run(8000);
+  }
+  CHECK(f.listener.last_state() == SessionState::PAUSED);
+  send(5, true);
+  CHECK(f.listener.last_state() == SessionState::PLAYING);
+
   // Released: plays what arrives from then on, without asking for what was dropped
   f.receiver.set_audio_held(false);
   f.receiver.request_output_restart();
