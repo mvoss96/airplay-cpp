@@ -3,22 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-// The decoding loops run for every sample. On the ESP32 they go to internal RAM, so that they do not wait for the
-// flash cache while other tasks (display, network) push them out of it.
-// Not inlined into the caller, which stays in flash; called once per channel and packet
-#if defined(ESP_PLATFORM)
-#include <esp_attr.h>
-#define AIRPLAY_HOT IRAM_ATTR __attribute__((noinline))
-#elif defined(__GNUC__)
-#define AIRPLAY_HOT __attribute__((noinline))
-#else
-#define AIRPLAY_HOT
-#endif
-#if defined(__GNUC__)
-#define AIRPLAY_INLINE inline __attribute__((always_inline))
-#else
-#define AIRPLAY_INLINE inline
-#endif
+#include "airplay_hot.h"
 
 namespace airplay {
 

@@ -1,5 +1,7 @@
 #include "airplay_hap_crypto.h"
 
+#include "airplay_hot.h"
+
 #include <cstring>
 
 namespace airplay {
@@ -220,7 +222,7 @@ static inline void quarter_round(uint32_t &a, uint32_t &b, uint32_t &c, uint32_t
   b = rotl32(b ^ c, 7);
 }
 
-static void chacha20_block(const uint32_t *input, uint8_t *output) {
+AIRPLAY_HOT static void chacha20_block(const uint32_t *input, uint8_t *output) {
   uint32_t x[16];
   std::memcpy(x, input, sizeof(x));
   for (int i = 0; i < 10; i++) {
@@ -249,7 +251,7 @@ static void chacha20_init(uint32_t *state, const uint8_t *key, const uint8_t *no
     state[13 + i] = load_le32(nonce + 4 * i);
 }
 
-static void chacha20_xor(uint32_t *state, const uint8_t *input, uint8_t *output, size_t length) {
+AIRPLAY_HOT static void chacha20_xor(uint32_t *state, const uint8_t *input, uint8_t *output, size_t length) {
   uint8_t stream[64];
   while (length > 0) {
     chacha20_block(state, stream);
@@ -344,7 +346,7 @@ class Poly1305 {
   }
 
  private:
-  void block_(const uint8_t *m) {
+  AIRPLAY_HOT void block_(const uint8_t *m) {
     const uint32_t r0 = this->r_[0], r1 = this->r_[1], r2 = this->r_[2], r3 = this->r_[3], r4 = this->r_[4];
     const uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
     uint32_t h0 = this->h_[0] + (load_le32(m) & 0x3ffffff);
