@@ -246,8 +246,8 @@ Receiver::~Receiver() {
   this->free_(this->slots_);
   std::free(this->benchmark_input_);
   std::free(this->benchmark_output_);
-  this->free_(this->packet_buffer_);
-  this->free_(this->output_buffer_);
+  std::free(this->packet_buffer_);
+  std::free(this->output_buffer_);
   this->free_(this->rtsp_buffers_);
 }
 
@@ -284,10 +284,12 @@ bool Receiver::begin() {
   this->fill_target_frames_ = std::min(MAX_FILL_TARGET_FRAMES, buffer_frames * 3 / 4);
 
   this->slots_ = static_cast<PacketSlot *>(this->allocate_(this->slot_count_ * sizeof(PacketSlot)));
-  this->packet_buffer_ = static_cast<uint8_t *>(this->allocate_(PACKET_BUFFER_SIZE));
-  // One spare frame, used when a frame is repeated to correct clock drift
+  // Small and touched for every packet, so with malloc, which keeps them in internal RAM on the ESP32: under load,
+  // decrypting and copying took about twice as long in external RAM
+  this->packet_buffer_ = static_cast<uint8_t *>(std::malloc(PACKET_BUFFER_SIZE));
+  // Room to repeat frames that correct clock drift
   this->output_buffer_ =
-      static_cast<int16_t *>(this->allocate_((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
+      static_cast<int16_t *>(std::malloc((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
   // One extra byte per connection so that headers and body can be null terminated in place. The extra headers of a
   // response follow; kept off the stack, because pairing needs much of it.
   this->rtsp_buffers_ =
@@ -296,8 +298,8 @@ bool Receiver::begin() {
       this->rtsp_buffers_ == nullptr) {
     AIRPLAY_LOGE("Failed to allocate buffers");
     this->free_(this->slots_);
-    this->free_(this->packet_buffer_);
-    this->free_(this->output_buffer_);
+    std::free(this->packet_buffer_);
+    std::free(this->output_buffer_);
     this->free_(this->rtsp_buffers_);
     this->slots_ = nullptr;
     this->packet_buffer_ = nullptr;
