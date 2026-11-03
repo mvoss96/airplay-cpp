@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
 - PTP timing for AirPlay 2 (`ReceiverConfig::ptp`, `Transport::open_ptp()`), which macOS needs: the receiver
   follows the sender's PTP clock and takes part in PTP as a clock that never becomes master
