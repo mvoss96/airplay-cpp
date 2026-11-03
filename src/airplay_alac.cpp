@@ -295,6 +295,7 @@ int32_t ALACDecoder::decode(const uint8_t *data, size_t length, int16_t *output)
         uint32_t mix_bits = 0;
         int32_t mix_res = 0;
 
+        this->last_uncompressed_ = escape;
         if (!escape) {
           const uint32_t chan_bits = this->config_.bit_depth - (bytes_shifted * 8) + (element_channels - 1);
           mix_bits = reader.read(8);
@@ -315,6 +316,7 @@ int32_t ALACDecoder::decode(const uint8_t *data, size_t length, int16_t *output)
             for (uint32_t i = 0; i < num_coefs[ch]; i++)
               coefs[ch][i] = static_cast<int16_t>(reader.read(16));
           }
+          this->last_predictor_order_ = num_coefs[0];
 
           // Shifted-off low bits only exist for bit depths above 16; skip them like the reference decoder does
           if (bytes_shifted != 0)

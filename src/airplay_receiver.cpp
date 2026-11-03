@@ -1339,6 +1339,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->sync_logged_ = false;
   this->restarts_ = 0;
   this->late_logged_ = false;
+  this->alac_logged_ = false;
   this->timeline_mismatch_ = false;
   this->timeline_unusable_ = false;
   this->audio_active_ = true;
@@ -1539,6 +1540,16 @@ void Receiver::handle_audio_packet_timed_(const uint8_t *header, const uint8_t *
   int32_t frames;
   if (this->codec_ == Codec::ALAC) {
     frames = this->decoder_.decode(data, length, slot.samples);
+    if (!this->alac_logged_ && frames > 0) {
+      // Once per stream: some senders store the audio uncompressed in ALAC packets
+      this->alac_logged_ = true;
+      if (this->decoder_.last_uncompressed()) {
+        AIRPLAY_LOGD("ALAC packets of %u bytes, stored uncompressed", static_cast<unsigned>(length));
+      } else {
+        AIRPLAY_LOGD("ALAC packets of %u bytes, compressed, predictor order %" PRIu32, static_cast<unsigned>(length),
+                     this->decoder_.last_predictor_order());
+      }
+    }
     if (this->config_.clock_us != nullptr)
       this->decode_us_.fetch_add(static_cast<uint32_t>(this->config_.clock_us() - decode_start),
                                  std::memory_order_relaxed);

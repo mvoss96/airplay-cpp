@@ -585,8 +585,10 @@ class Receiver {
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
   uint32_t last_stats_log_ms_{0};
-  uint32_t last_report_us_{0};      // Timestamp of the latest report of played audio seen by poll()
-  bool late_detail_logged_{false};  // A late packet was explained in the log since the last statistics
+  uint32_t last_report_us_{0};  // Timestamp of the latest report of played audio seen by poll()
+  bool late_detail_logged_{false};
+  bool alac_logged_{false};  // The kind of ALAC packets was logged for this stream  // A late packet was explained in
+                             // the log since the last statistics
   uint32_t last_poll_ms_{0};
   bool output_dry_{false};
   ReceiverStats stats_{};
