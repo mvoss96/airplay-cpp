@@ -29,6 +29,8 @@ class PtpClocks {
   bool offset_ns(uint64_t clock, int64_t now_us, int64_t *offset) const;
   /// Clock identity of the grandmaster that announced itself last, or of the clock that last sent Sync; 0 if none
   uint64_t grandmaster() const { return this->grandmaster_; }
+  /// The receiver's own clock identity (set_identity())
+  uint64_t identity() const { return this->identity_; }
   /// Logs what the clocks look like, at most every few seconds
   void log_status(int64_t now_us);
   /// @brief A message the receiver sends now, if one is due: a Delay_Req to the grandmaster about every second, and
@@ -74,6 +76,13 @@ class PtpClocks {
   int64_t last_delay_request_us_{0};
   uint16_t announce_sequence_{0};
   int64_t last_announce_us_{0};
+  // The grandmaster's part of its last Announce (priorities, quality, identity, steps, time source), passed on in
+  // ours with one step more, as a clock that follows it does
+  uint8_t grandmaster_announce_[17]{};
+  bool have_grandmaster_announce_{false};
+  // Messages seen per type (the low 4 bits of the first byte) since the last status line, and which were logged
+  uint32_t type_counts_[16]{};
+  uint32_t types_logged_{0};
 };
 
 }  // namespace airplay

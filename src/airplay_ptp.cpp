@@ -56,6 +56,18 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
   const uint8_t type = data[0] & 0x0f;
   const uint64_t id = read_be(data + 20, 8);
   const auto sequence = static_cast<uint16_t>(read_be(data + 30, 2));
+  this->type_counts_[type]++;
+  // The first message of every type and port, to see what a sender expects
+  const uint32_t type_bit = 1u << (type + (general ? 16 : 0));
+  if ((this->types_logged_ & type_bit) == 0) {
+    this->types_logged_ |= type_bit;
+    char address[16];
+    format_address(from_address, address, sizeof(address));
+    AIRPLAY_LOGD("PTP message type %u on port %u from %s (clock %016" PRIx64 ", %u bytes, flags %02x%02x, "
+                 "interval %d)",
+                 type, general ? 320 : 319, address, id, static_cast<unsigned>(length), data[6], data[7],
+                 static_cast<int8_t>(data[33]));
+  }
   // Nanoseconds times 2^16
   const int64_t correction_ns = static_cast<int64_t>(read_be(data + 8, 8)) / 65536;
 
@@ -70,6 +82,8 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
                    static_cast<unsigned>(read_be(data + 61, 2)));
       this->grandmaster_ = grandmaster;
     }
+    std::copy(data + 47, data + 64, this->grandmaster_announce_);
+    this->have_grandmaster_announce_ = true;
     return;
   }
   if (length < TIMESTAMP_MESSAGE_SIZE)
@@ -211,13 +225,19 @@ size_t PtpClocks::next_message(uint8_t *buffer, int64_t now_us, uint32_t *to_add
     this->last_announce_us_ = now_us;
     write_header_(buffer, TYPE_ANNOUNCE, ANNOUNCE_SIZE, master->domain, this->announce_sequence_++, 5, 1);
     write_be(buffer + 44, 37, 2);  // UTC offset
-    buffer[47] = 255;              // Priority 1
-    buffer[48] = 255;              // Clock class
-    buffer[49] = 0xfe;             // Accuracy unknown
-    write_be(buffer + 50, 0xffff, 2);
-    buffer[52] = 255;  // Priority 2
-    write_be(buffer + 53, this->identity_, 8);
-    buffer[63] = 0xa0;  // Internal oscillator
+    if (this->have_grandmaster_announce_) {
+      // Follows the grandmaster: its details, one step further away, which never wins against it
+      std::copy(this->grandmaster_announce_, this->grandmaster_announce_ + 17, buffer + 47);
+      write_be(buffer + 61, read_be(buffer + 61, 2) + 1, 2);
+    } else {
+      buffer[47] = 255;   // Priority 1
+      buffer[48] = 255;   // Clock class: slave only
+      buffer[49] = 0xfe;  // Accuracy unknown
+      write_be(buffer + 50, 0xffff, 2);
+      buffer[52] = 255;  // Priority 2
+      write_be(buffer + 53, this->identity_, 8);
+      buffer[63] = 0xa0;  // Internal oscillator
+    }
     *general = true;
     return ANNOUNCE_SIZE;
   }
@@ -263,6 +283,18 @@ void PtpClocks::log_status(int64_t now_us) {
     clock.follow_ups = 0;
     clock.delay_responses = 0;
   }
+  // Every message type seen, e.g. "0:80 8:80 b:5"
+  char types[96];
+  size_t length = 0;
+  for (size_t type = 0; type < 16 && length + 16 < sizeof(types); type++) {
+    if (this->type_counts_[type] == 0)
+      continue;
+    length += static_cast<size_t>(std::snprintf(types + length, sizeof(types) - length, " %x:%" PRIu32,
+                                                static_cast<unsigned>(type), this->type_counts_[type]));
+    this->type_counts_[type] = 0;
+  }
+  if (length > 0)
+    AIRPLAY_LOGD("PTP messages by type:%s", types);
 }
 
 }  // namespace airplay

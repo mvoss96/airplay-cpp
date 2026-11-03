@@ -450,19 +450,21 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       const auto *ip = reinterpret_cast<const uint8_t *>(&c.local.address);
       std::snprintf(local_address, sizeof(local_address), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
     }
-    // With PTP the answer names the receiver as a timing peer instead of a port for clock requests
+    // With PTP the answer names the receiver as a timing peer with its clock, as the sender names itself, and no
+    // port for clock requests
     const auto write_timing = [&](PlistWriter &out) {
+      out.key("timingPort");
+      out.integer(ptp ? 0 : this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
       if (ptp) {
         out.key("timingPeerInfo");
-        out.begin_dict(2);
+        out.begin_dict(3);
         out.key("Addresses");
         out.begin_array(1);
         out.string(local_address);
         out.key("ID");
         out.string(local_address);
-      } else {
-        out.key("timingPort");
-        out.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+        out.key("ClockID");
+        out.integer(static_cast<int64_t>(this->ptp_clocks_.identity()));
       }
     };
     const char *name = nullptr;
@@ -482,7 +484,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
       c.pending_ptp = ptp;
-      writer.begin_dict(2);
+      writer.begin_dict(ptp ? 3 : 2);
       writer.key("eventPort");
       writer.integer(c.local.port);
       write_timing(writer);
@@ -511,7 +513,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     this->event_channel_address_ = c.peer.address;
     this->event_channel_source_ = connection;
     // The event connection uses the RTSP port; nothing is read from it
-    writer.begin_dict(2);
+    writer.begin_dict(ptp ? 3 : 2);
     writer.key("eventPort");
     writer.integer(c.local.port);
     write_timing(writer);
