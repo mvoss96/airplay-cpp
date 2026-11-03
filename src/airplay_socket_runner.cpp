@@ -336,6 +336,7 @@ SocketRunner::Timing SocketRunner::take_timing() {
   return Timing{this->loops_.exchange(0, std::memory_order_relaxed),
                 this->wait_us_.exchange(0, std::memory_order_relaxed) / 1000,
                 this->udp_us_.exchange(0, std::memory_order_relaxed) / 1000,
+                this->recv_us_.exchange(0, std::memory_order_relaxed) / 1000,
                 this->tcp_us_.exchange(0, std::memory_order_relaxed) / 1000,
                 this->poll_us_.exchange(0, std::memory_order_relaxed) / 1000};
 }
@@ -414,8 +415,10 @@ size_t SocketRunner::receive_udp_(UdpChannel channel) {
       return i;  // Closed by the receiver while handling a packet
     struct sockaddr_in source {};
     socklen_t source_length = sizeof(source);
+    const int64_t start = SocketRunner::now_us();
     const auto received = net::recvfrom(fd, this->udp_buffer_, sizeof(this->udp_buffer_), net::MSG_DONT_WAIT,
                                         reinterpret_cast<struct sockaddr *>(&source), &source_length);
+    this->recv_us_.fetch_add(static_cast<uint32_t>(SocketRunner::now_us() - start), std::memory_order_relaxed);
     if (received <= 0)
       return i;
     this->receiver_->udp_packet(channel, this->udp_buffer_, static_cast<size_t>(received),

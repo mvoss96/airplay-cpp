@@ -112,6 +112,9 @@ struct ReceiverConfig {
   bool airplay2{false};
   /// Fills a buffer with cryptographically secure random bytes; for AirPlay 2 pairing
   void (*random)(uint8_t *buffer, size_t length){nullptr};
+  /// Optional clock in microseconds. With it, the receiver measures how long decrypting and decoding take
+  /// (take_packet_timing()).
+  int64_t (*clock_us)(){nullptr};
   /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
   uint64_t airplay2_features{0};
   /// Decoder for AirPlay 2 buffered audio (AAC), which iOS uses for most apps; not offered without one. Must stay
@@ -199,6 +202,14 @@ class Receiver {
   /// @brief IPv4 address (network byte order) of the sender that owns the session, 0 if none; e.g. to tell a sender
   /// that comes back from another one.
   uint32_t sender_address() const { return this->sender_address_.load(std::memory_order_relaxed); }
+  /// Time spent on the audio packets since the last call (with config.clock_us). Thread-safe.
+  struct PacketTiming {
+    uint32_t packets;
+    uint32_t decrypt_us;
+    uint32_t decode_us;
+    uint32_t total_us;  // All of handling a packet, including the two above
+  };
+  PacketTiming take_packet_timing();
   /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_command(SenderCommand command);
@@ -400,6 +411,7 @@ class Receiver {
   void reset_playback_();
   /// @param header The packet's RTP header
   void handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
+  void handle_audio_packet_timed_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
   void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
@@ -505,6 +517,10 @@ class Receiver {
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
   std::atomic<bool> hold_requested_{false};
+  std::atomic<uint32_t> timed_packets_{0};
+  std::atomic<uint32_t> decrypt_us_{0};
+  std::atomic<uint32_t> decode_us_{0};
+  std::atomic<uint32_t> packet_us_{0};
   std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
   std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
   std::atomic<uint32_t> sender_address_{0};

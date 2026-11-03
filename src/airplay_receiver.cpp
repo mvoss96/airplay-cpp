@@ -1450,6 +1450,25 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
 }
 
 void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms) {
+  if (this->config_.clock_us == nullptr) {
+    this->handle_audio_packet_timed_(header, payload, length, now_ms);
+    return;
+  }
+  const int64_t start = this->config_.clock_us();
+  this->handle_audio_packet_timed_(header, payload, length, now_ms);
+  this->packet_us_.fetch_add(static_cast<uint32_t>(this->config_.clock_us() - start), std::memory_order_relaxed);
+  this->timed_packets_.fetch_add(1, std::memory_order_relaxed);
+}
+
+Receiver::PacketTiming Receiver::take_packet_timing() {
+  return PacketTiming{this->timed_packets_.exchange(0, std::memory_order_relaxed),
+                      this->decrypt_us_.exchange(0, std::memory_order_relaxed),
+                      this->decode_us_.exchange(0, std::memory_order_relaxed),
+                      this->packet_us_.exchange(0, std::memory_order_relaxed)};
+}
+
+void Receiver::handle_audio_packet_timed_(const uint8_t *header, const uint8_t *payload, size_t length,
+                                          uint32_t now_ms) {
   const uint16_t seq = read_be16(header + 2);
   const uint32_t rtp = read_be32(header + 4);
   this->last_packet_ms_ = now_ms;
@@ -1490,6 +1509,7 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
     return;  // Duplicate
 
   const uint8_t *data = payload;
+  const int64_t decrypt_start = this->config_.clock_us != nullptr ? this->config_.clock_us() : 0;
   if (this->airplay2_audio_) {
     length = this->decrypt_airplay2_audio_(header, payload, length, this->packet_buffer_);
     if (length == 0) {
@@ -1511,9 +1531,17 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
     data = plain;
   }
 
+  int64_t decode_start = 0;
+  if (this->config_.clock_us != nullptr) {
+    decode_start = this->config_.clock_us();
+    this->decrypt_us_.fetch_add(static_cast<uint32_t>(decode_start - decrypt_start), std::memory_order_relaxed);
+  }
   int32_t frames;
   if (this->codec_ == Codec::ALAC) {
     frames = this->decoder_.decode(data, length, slot.samples);
+    if (this->config_.clock_us != nullptr)
+      this->decode_us_.fetch_add(static_cast<uint32_t>(this->config_.clock_us() - decode_start),
+                                 std::memory_order_relaxed);
   } else {
     // Big endian 16-bit PCM
     frames = static_cast<int32_t>(std::min<size_t>(length / BYTES_PER_FRAME, FRAMES_PER_PACKET));

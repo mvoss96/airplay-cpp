@@ -52,6 +52,7 @@ class SocketRunner final : public Transport {
     uint32_t loops;    // Calls of run_once()
     uint32_t wait_ms;  // Waiting for the network
     uint32_t udp_ms;   // Receiving and handling UDP packets
+    uint32_t recv_ms;  // Of that, taking them from the network stack (recvfrom)
     uint32_t tcp_ms;   // Receiving and handling TCP data
     uint32_t poll_ms;  // Receiver::poll(): playback and timers
   };
@@ -81,6 +82,7 @@ class SocketRunner final : public Transport {
   std::atomic<uint32_t> loops_{0};
   std::atomic<uint32_t> wait_us_{0};
   std::atomic<uint32_t> udp_us_{0};
+  std::atomic<uint32_t> recv_us_{0};
   std::atomic<uint32_t> tcp_us_{0};
   std::atomic<uint32_t> poll_us_{0};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
