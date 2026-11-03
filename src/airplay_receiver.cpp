@@ -73,6 +73,12 @@ static constexpr uint32_t MAX_RESEND_RANGES = 4;
 static constexpr int64_t MAX_TIMELINE_ERROR_US = 10000000;
 /// Silence to line up the first packet is only written once it is due within this window
 static constexpr int64_t START_WINDOW_US = 100000;
+/// An output that has not played anything yet may take a while to start (an ESPHome speaker starts its task first,
+/// and its main loop may be busy). It is started with a little silence this long before the first packet is due,
+/// and the audio is lined up once it reports what it played.
+static constexpr int64_t OUTPUT_START_LEAD_US = 500000;
+/// More than an output plays before it reports (its DMA buffers), and well within the lead
+static constexpr uint32_t OUTPUT_START_FRAMES = SAMPLE_RATE / 10;
 /// Packets later than this are dropped; packets earlier than this are lined up with silence
 static constexpr int64_t EARLY_LATE_THRESHOLD_US = 50000;
 /// A missing packet is replaced by silence once it is due within this time
@@ -2184,6 +2190,13 @@ bool Receiver::synced_step_(int64_t now_us) {
     }
     this->playback_started_ = false;
     return false;
+  }
+  if (this->frames_played_.load(std::memory_order_relaxed) == 0) {
+    if (this->frames_written_ == 0 && error_us <= OUTPUT_START_LEAD_US) {
+      this->silence_pending_frames_ = OUTPUT_START_FRAMES;
+      return true;
+    }
+    return false;  // Until the output plays; one that never reports plays unsynchronized after a timeout
   }
   if (error_us > START_WINDOW_US)
     return false;

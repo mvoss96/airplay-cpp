@@ -341,6 +341,12 @@ int main(int argc, char **argv) {
                        .duration_s = 30,
                        .measure_from_s = 4,
                        .output_start_delay_ms = 20});
+  // An output that takes long to start, e.g. while the main loop of ESPHome is busy decoding cover art
+  scenarios.push_back({.name = "slow output start",
+                       .jitter_ms = 2,
+                       .duration_s = 30,
+                       .output_start_delay_ms = 250,
+                       .max_late_packets = 0});
   scenarios.push_back({.name = "5% loss, stalls",
                        .loss = 0.05,
                        .jitter_ms = 4,
