@@ -12,6 +12,7 @@
 
 #include "airplay_receiver.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -46,6 +47,16 @@ class SocketRunner final : public Transport {
   /// timestamps of Receiver::notify_played().
   static int64_t now_us();
 
+  /// Where run_once() spent its time since the last call, to find what keeps the thread busy. Thread-safe.
+  struct Timing {
+    uint32_t loops;    // Calls of run_once()
+    uint32_t wait_ms;  // Waiting for the network
+    uint32_t udp_ms;   // Receiving and handling UDP packets
+    uint32_t tcp_ms;   // Receiving and handling TCP data
+    uint32_t poll_ms;  // Receiver::poll(): playback and timers
+  };
+  Timing take_timing();
+
   // Transport
   bool send(uint8_t connection, const uint8_t *data, size_t length) override;
   void close(uint8_t connection) override;
@@ -67,6 +78,11 @@ class SocketRunner final : public Transport {
   int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1, -1, -1, -1};
   static_assert(Receiver::MAX_CONNECTIONS == 6, "Initialize every connection_fds_ entry to -1");
   bool receive_paused_[Receiver::MAX_CONNECTIONS]{};
+  std::atomic<uint32_t> loops_{0};
+  std::atomic<uint32_t> wait_us_{0};
+  std::atomic<uint32_t> udp_us_{0};
+  std::atomic<uint32_t> tcp_us_{0};
+  std::atomic<uint32_t> poll_us_{0};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
   uint8_t udp_buffer_[1600];
 };

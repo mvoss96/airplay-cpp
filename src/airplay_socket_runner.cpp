@@ -287,7 +287,10 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
   // Where the time goes when the thread falls behind: waiting longer than asked means it did not get to run
   const int64_t wait_start = SocketRunner::now_us();
   const bool any_ready = net::wait(fds, count, wait_ms, ready);
-  const int64_t waited_ms = (SocketRunner::now_us() - wait_start) / 1000;
+  const int64_t wait_end = SocketRunner::now_us();
+  this->loops_.fetch_add(1, std::memory_order_relaxed);
+  this->wait_us_.fetch_add(static_cast<uint32_t>(wait_end - wait_start), std::memory_order_relaxed);
+  const int64_t waited_ms = (wait_end - wait_start) / 1000;
   if (waited_ms >= wait_ms + SLOW_STEP_MS)
     AIRPLAY_LOGW("Waiting for the network took %u ms (up to %u ms asked)", static_cast<unsigned>(waited_ms),
                  static_cast<unsigned>(wait_ms));
@@ -299,7 +302,9 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
         packets += this->receive_udp_(static_cast<UdpChannel>(i));
     }
     // Many packets: catching up after the thread was held up; few: held up while handling them
-    const int64_t udp_ms = (SocketRunner::now_us() - udp_start) / 1000;
+    const int64_t udp_end = SocketRunner::now_us();
+    this->udp_us_.fetch_add(static_cast<uint32_t>(udp_end - udp_start), std::memory_order_relaxed);
+    const int64_t udp_ms = (udp_end - udp_start) / 1000;
     if (udp_ms >= SLOW_STEP_MS)
       AIRPLAY_LOGW("Receiving %u UDP packets took %u ms", static_cast<unsigned>(packets),
                    static_cast<unsigned>(udp_ms));
@@ -308,7 +313,9 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
           fds[NUM_UDP_CHANNELS + i] >= 0) {
         const int64_t start = SocketRunner::now_us();
         this->receive_tcp_(i);
-        const int64_t took_ms = (SocketRunner::now_us() - start) / 1000;
+        const int64_t end = SocketRunner::now_us();
+        this->tcp_us_.fetch_add(static_cast<uint32_t>(end - start), std::memory_order_relaxed);
+        const int64_t took_ms = (end - start) / 1000;
         if (took_ms >= SLOW_STEP_MS)
           AIRPLAY_LOGW("Handling data of connection %u took %u ms", i, static_cast<unsigned>(took_ms));
       }
@@ -318,9 +325,19 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
   }
   const int64_t start = SocketRunner::now_us();
   this->receiver_->poll(start);
-  const int64_t took_ms = (SocketRunner::now_us() - start) / 1000;
+  const int64_t end = SocketRunner::now_us();
+  this->poll_us_.fetch_add(static_cast<uint32_t>(end - start), std::memory_order_relaxed);
+  const int64_t took_ms = (end - start) / 1000;
   if (took_ms >= SLOW_STEP_MS)
     AIRPLAY_LOGW("Playback step took %u ms", static_cast<unsigned>(took_ms));
+}
+
+SocketRunner::Timing SocketRunner::take_timing() {
+  return Timing{this->loops_.exchange(0, std::memory_order_relaxed),
+                this->wait_us_.exchange(0, std::memory_order_relaxed) / 1000,
+                this->udp_us_.exchange(0, std::memory_order_relaxed) / 1000,
+                this->tcp_us_.exchange(0, std::memory_order_relaxed) / 1000,
+                this->poll_us_.exchange(0, std::memory_order_relaxed) / 1000};
 }
 
 void SocketRunner::accept_connection_() {
