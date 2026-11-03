@@ -203,11 +203,65 @@ AIRPLAY_HOT bool decompress(BitReader &reader, int32_t *out, uint32_t num_sample
   return !reader.overrun();
 }
 
+/// The prediction loop of unpredict(), from sample num_active + 1 on: for a fixed ORDER, or for num_active when ORDER
+/// is 0. A fixed order makes the inner loops' trip count known, so that they are unrolled.
+template<uint32_t ORDER>
+AIRPLAY_INLINE void predict(const int32_t *in, int32_t *out, uint32_t num, int16_t *coefs, uint32_t num_active,
+                            uint32_t chan_shift, uint32_t den_shift) {
+  const uint32_t order = ORDER != 0 ? ORDER : num_active;
+  const int32_t den_half = den_shift > 0 ? (1 << (den_shift - 1)) : 0;
+  const uint32_t lim = order + 1;
+  for (uint32_t j = lim; j < num; j++) {
+    const int32_t *pout = out + j - 1;
+    const int32_t top = out[j - lim];
+
+    // Unsigned, so that a damaged packet wraps around instead of overflowing
+    uint32_t sum = 0;
+    if constexpr (ORDER != 0) {
+#pragma GCC unroll 8
+      for (uint32_t k = 0; k < ORDER; k++)
+        sum += static_cast<uint32_t>(coefs[k]) *
+               (static_cast<uint32_t>(pout[-static_cast<int32_t>(k)]) - static_cast<uint32_t>(top));
+    } else {
+      for (uint32_t k = 0; k < order; k++)
+        sum += static_cast<uint32_t>(coefs[k]) *
+               (static_cast<uint32_t>(pout[-static_cast<int32_t>(k)]) - static_cast<uint32_t>(top));
+    }
+
+    int32_t del = in[j];
+    int32_t del0 = del;
+    const int32_t sg = sign_of(del);
+    del = static_cast<int32_t>(static_cast<uint32_t>(del) + static_cast<uint32_t>(top) +
+                               static_cast<uint32_t>(static_cast<int32_t>(sum + den_half) >> den_shift));
+    out[j] = sign_extend(del, chan_shift);
+
+    // Adapt the coefficients towards the sign of the residual
+    if (sg > 0) {
+      for (int32_t k = static_cast<int32_t>(order) - 1; k >= 0; k--) {
+        const int32_t dd = top - pout[-k];
+        const int32_t sgn = sign_of(dd);
+        coefs[k] -= sgn;
+        del0 -= (static_cast<int32_t>(order) - k) * ((sgn * dd) >> den_shift);
+        if (del0 <= 0)
+          break;
+      }
+    } else if (sg < 0) {
+      for (int32_t k = static_cast<int32_t>(order) - 1; k >= 0; k--) {
+        const int32_t dd = top - pout[-k];
+        const int32_t sgn = sign_of(dd);
+        coefs[k] += sgn;
+        del0 -= (static_cast<int32_t>(order) - k) * ((-sgn * dd) >> den_shift);
+        if (del0 >= 0)
+          break;
+      }
+    }
+  }
+}
+
 /// Runs the adaptive FIR predictor in reverse (unpc_block in the reference decoder). `in` and `out` may be equal.
 AIRPLAY_HOT void unpredict(const int32_t *in, int32_t *out, uint32_t num, int16_t *coefs, uint32_t num_active,
                            uint32_t chan_bits, uint32_t den_shift) {
   const uint32_t chan_shift = 32 - chan_bits;
-  const int32_t den_half = den_shift > 0 ? (1 << (den_shift - 1)) : 0;
 
   out[0] = in[0];
   if (num_active == 0) {
@@ -230,44 +284,14 @@ AIRPLAY_HOT void unpredict(const int32_t *in, int32_t *out, uint32_t num, int16_
   for (uint32_t j = 1; j < warmup; j++)
     out[j] = sign_extend(in[j] + out[j - 1], chan_shift);
 
-  const uint32_t lim = num_active + 1;
-  for (uint32_t j = lim; j < num; j++) {
-    const int32_t *pout = out + j - 1;
-    const int32_t top = out[j - lim];
-
-    // Unsigned, so that a damaged packet wraps around instead of overflowing
-    uint32_t sum = 0;
-    for (uint32_t k = 0; k < num_active; k++)
-      sum += static_cast<uint32_t>(coefs[k]) *
-             (static_cast<uint32_t>(pout[-static_cast<int32_t>(k)]) - static_cast<uint32_t>(top));
-
-    int32_t del = in[j];
-    int32_t del0 = del;
-    const int32_t sg = sign_of(del);
-    del = static_cast<int32_t>(static_cast<uint32_t>(del) + static_cast<uint32_t>(top) +
-                               static_cast<uint32_t>(static_cast<int32_t>(sum + den_half) >> den_shift));
-    out[j] = sign_extend(del, chan_shift);
-
-    // Adapt the coefficients towards the sign of the residual
-    if (sg > 0) {
-      for (int32_t k = static_cast<int32_t>(num_active) - 1; k >= 0; k--) {
-        const int32_t dd = top - pout[-k];
-        const int32_t sgn = sign_of(dd);
-        coefs[k] -= sgn;
-        del0 -= (static_cast<int32_t>(num_active) - k) * ((sgn * dd) >> den_shift);
-        if (del0 <= 0)
-          break;
-      }
-    } else if (sg < 0) {
-      for (int32_t k = static_cast<int32_t>(num_active) - 1; k >= 0; k--) {
-        const int32_t dd = top - pout[-k];
-        const int32_t sgn = sign_of(dd);
-        coefs[k] += sgn;
-        del0 -= (static_cast<int32_t>(num_active) - k) * ((-sgn * dd) >> den_shift);
-        if (del0 >= 0)
-          break;
-      }
-    }
+  // Senders mostly use order 4 or 8, which get loops of their own that the compiler unrolls, as the reference decoder
+  // has them
+  if (num_active == 8) {
+    predict<8>(in, out, num, coefs, num_active, chan_shift, den_shift);
+  } else if (num_active == 4) {
+    predict<4>(in, out, num, coefs, num_active, chan_shift, den_shift);
+  } else {
+    predict<0>(in, out, num, coefs, num_active, chan_shift, den_shift);
   }
 }
 

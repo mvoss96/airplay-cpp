@@ -1494,10 +1494,26 @@ void Receiver::benchmark_decoder_(const uint8_t *data, size_t length, int16_t *o
   };
   const Result internal = run(this->benchmark_input_, this->benchmark_output_);
   const Result actual = run(data, output);
+  // The same length through ChaCha20-Poly1305, as AirPlay 2 audio is encrypted
+  int64_t crypto_total = 0;
+  uint32_t crypto_fastest = UINT32_MAX;
+  const uint8_t key[CHACHA_KEY_SIZE] = {};
+  const uint8_t nonce[CHACHA_NONCE_SIZE] = {};
+  uint8_t tag[POLY1305_TAG_SIZE];
+  for (uint32_t i = 0; i < RUNS; i++) {
+    const int64_t start = this->config_.clock_us();
+    chacha20_poly1305_encrypt(key, nonce, data, 8, this->benchmark_input_, length,
+                              reinterpret_cast<uint8_t *>(this->benchmark_output_), tag);
+    const auto took = static_cast<uint32_t>(this->config_.clock_us() - start);
+    crypto_total += took;
+    crypto_fastest = std::min(crypto_fastest, took);
+  }
   AIRPLAY_LOGD("ALAC benchmark, %" PRIu32 " decodes of %u bytes: separate buffers %" PRIu32 " us (fastest %" PRIu32
                "), the receiver's %" PRIu32 " us (fastest %" PRIu32 ")",
                RUNS, static_cast<unsigned>(length), internal.average_us, internal.fastest_us, actual.average_us,
                actual.fastest_us);
+  AIRPLAY_LOGD("ChaCha20-Poly1305 benchmark, %" PRIu32 " runs over %u bytes: %" PRIu32 " us (fastest %" PRIu32 ")",
+               RUNS, static_cast<unsigned>(length), static_cast<uint32_t>(crypto_total / RUNS), crypto_fastest);
 #if defined(ESP_PLATFORM)
   AIRPLAY_LOGD("In PSRAM: separate input %d, output %d; the receiver's input %d, output %d; decoder %d",
                esp_ptr_external_ram(this->benchmark_input_), esp_ptr_external_ram(this->benchmark_output_),
