@@ -135,7 +135,8 @@ struct ReceiverStats {
   uint32_t underruns;        // Times the output ran out of audio during playback
   uint32_t longest_gap_ms;   // Longest time between two poll() calls in a session, e.g. while the thread was blocked
   uint32_t foreign_packets;  // UDP packets from another sender than the playing one, e.g. one that was set aside
-  bool synchronized;         // Playing on the sender's timeline
+  uint32_t longest_report_gap_ms;  // Longest time between two reports of played audio from the output
+  bool synchronized;               // Playing on the sender's timeline
 };
 
 /// AirPlay 1 (RAOP) and, optionally, AirPlay 2 audio receiver without any I/O of its own: feed it RTSP
@@ -568,6 +569,8 @@ class Receiver {
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
   uint32_t last_stats_log_ms_{0};
+  uint32_t last_report_us_{0};      // Timestamp of the latest report of played audio seen by poll()
+  bool late_detail_logged_{false};  // A late packet was explained in the log since the last statistics
   uint32_t last_poll_ms_{0};
   bool output_dry_{false};
   ReceiverStats stats_{};
