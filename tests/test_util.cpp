@@ -4,6 +4,7 @@
 #include "airplay_util.h"
 #include "test_common.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -170,7 +171,8 @@ static void test_ptp() {
     now_us += 125000;
   }
   CHECK(clocks.offset_ns(clock, now_us, &found));
-  CHECK(found == offset - 1000000);  // Less the shortest delay, which is not measured
+  // Less the shortest delay, which is not measured, and what the clocks may have drifted since that sample
+  CHECK(found <= offset - 1000000 && found > offset - 1100000);
   CHECK(clocks.grandmaster() == clock);
   CHECK(clocks.offset_ns(0, now_us, &found));  // 0 is the grandmaster
   // An Announce names another grandmaster
@@ -217,11 +219,32 @@ static void test_ptp() {
     active.handle(true, ptp_message(0x8, clock, 99, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
                   now_us + 1100);
   }
-  CHECK(active.offset_ns(clock, now_us, &found) && found == offset);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
   // A Delay_Resp for another receiver is ignored
   std::vector<uint8_t> other = ptp_message(0x9, clock, 1, false, 0, 54);
   active.handle(true, other.data(), other.size(), 0x0200000a, now_us);
-  CHECK(active.offset_ns(clock, now_us, &found) && found == offset);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
+
+  // Samples taken late for 3 s while the receiver is busy (50 to 300 ms) barely move the offset; a clock that was
+  // set back by a second is followed after 64 samples
+  PtpClocks busy;
+  now_us = 10000000;
+  uint16_t sequence = 0;
+  auto sync_at = [&](int64_t delay_us, int64_t clock_offset) {
+    busy.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + delay_us);
+    busy.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + clock_offset).data(), 44, 1,
+                now_us + delay_us);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    sync_at(1000, offset);
+  for (int i = 0; i < 24; i++)
+    sync_at(50000 + (i % 6) * 50000, offset);
+  CHECK(busy.offset_ns(clock, now_us, &found) && found <= offset - 1000000 && found > offset - 1400000);
+  for (int i = 0; i < 64; i++)
+    sync_at(1000, offset - 1000000000LL);
+  CHECK(busy.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000000LL + -1000000)) < 100000);
 
   // One-step Sync carries its own time
   PtpClocks one_step;

@@ -27,6 +27,11 @@ static constexpr int64_t DELAY_REQUEST_INTERVAL_US = 1000000;
 static constexpr int64_t ANNOUNCE_INTERVAL_US = 2000000;
 /// Delay measurements needed before they correct the offset
 static constexpr uint32_t MIN_DELAY_SAMPLES = 2;
+/// How fast two clocks may drift apart (quartz crystals stay within 50 ppm each)
+static constexpr int64_t MAX_DRIFT_PPM = 100;
+/// Samples this far below the estimate all the time mean the clock was set back
+static constexpr int64_t STEP_NS = 20000000;
+static constexpr uint32_t STEP_SAMPLES = 64;  // 8 s of Sync messages
 
 static uint64_t read_be(const uint8_t *data, size_t bytes) {
   uint64_t value = 0;
@@ -132,6 +137,12 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
     clock->sync_pending = false;
     // Sent at the precise origin time, received at sync_received_ns: the difference is the offset less the delay
     const int64_t sent_ns = read_timestamp_ns(data + 34) + correction_ns + clock->sync_correction_ns;
+    if (clock->count == 0) {
+      AIRPLAY_LOGD("PTP clock %016" PRIx64 ": sent at %" PRId64 ".%09" PRId64 " s (corrections %" PRId64 " and %" PRId64
+                   " ns), received at %" PRId64 ".%06" PRId64 " s here",
+                   clock->id, sent_ns / 1000000000, sent_ns % 1000000000, clock->sync_correction_ns, correction_ns,
+                   clock->sync_received_ns / 1000000000, (clock->sync_received_ns / 1000) % 1000000);
+    }
     this->add_sample_(*clock, sent_ns - clock->sync_received_ns, now_us);
   }
 }
@@ -161,6 +172,22 @@ PtpClocks::Clock *PtpClocks::find_(uint64_t id, uint32_t address, int64_t now_us
 
 void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
   clock.samples[clock.count % WINDOW] = sample;
+  if (clock.count == 0) {
+    clock.estimate = sample;
+  } else {
+    const int64_t drifted = clock.estimate - (now_us - clock.last_sample_us) * MAX_DRIFT_PPM / 1000;
+    clock.estimate = std::max(sample, drifted);
+    // A clock that was set back sends samples far below the estimate for longer than the receiver is ever busy:
+    // start over from them
+    if (sample < clock.estimate - STEP_NS) {
+      if (++clock.below >= STEP_SAMPLES) {
+        clock.estimate = *std::max_element(clock.samples, clock.samples + WINDOW);
+        clock.below = 0;
+      }
+    } else {
+      clock.below = 0;
+    }
+  }
   clock.count++;
   clock.last_sample_us = now_us;
 }
@@ -182,7 +209,7 @@ bool PtpClocks::offset_ns(uint64_t id, int64_t now_us, int64_t *offset) const {
   // Every Sync sample is the offset less the delay to us, every Delay_Resp sample the offset plus the delay back:
   // the largest of the first and the smallest of the second have the least delay, and with a symmetric path their
   // mean is the offset
-  const int64_t sync = *std::max_element(clock->samples, clock->samples + std::min<size_t>(clock->count, WINDOW));
+  const int64_t sync = clock->estimate;
   if (clock->delay_count < MIN_DELAY_SAMPLES) {
     *offset = sync;
     return true;
@@ -267,7 +294,7 @@ void PtpClocks::log_status(int64_t now_us) {
     if (used > 0) {
       const auto [low, high] = std::minmax_element(clock.samples, clock.samples + used);
       spread = *high - *low;
-      best = *high;
+      best = clock.estimate;
     }
     int64_t delay = 0;
     if (clock.delay_count > 0) {

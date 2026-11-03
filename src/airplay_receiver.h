@@ -379,7 +379,7 @@ class Receiver {
   void receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms);
   /// Decodes queued audio into the jitter buffer while it has room
   void decode_buffered_audio_(uint32_t now_ms);
-  void handle_rate_anchor_(const uint8_t *body, size_t length);
+  void handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
   void update_event_channel_ready_();
@@ -647,6 +647,10 @@ class Receiver {
   bool ptp_timing_{false};
   uint64_t ptp_timeline_{0};
   uint32_t ptp_sync_logged_{0};
+  // How long before it is due buffered audio arrives, logged every few seconds
+  int32_t lead_min_ms_{INT32_MAX};
+  int32_t lead_max_ms_{INT32_MIN};
+  uint32_t lead_log_ms_{0};
   bool anchor_valid_{false};
   uint32_t anchor_rtp_{0};
   int64_t anchor_remote_ns_{0};

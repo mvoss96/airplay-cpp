@@ -314,7 +314,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   }
   if (std::strcmp(method, "SETRATEANCHORTIME") == 0) {
     if (connection == this->session_owner_ && data != nullptr)
-      this->handle_rate_anchor_(data, body_length);
+      this->handle_rate_anchor_(data, body_length, now_us);
     return true;
   }
   if (std::strcmp(method, "FLUSHBUFFERED") == 0) {
@@ -965,6 +965,19 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     }
     if (audio_length == 0)
       continue;  // iOS sends one without audio after a flush
+    int64_t due_us = 0;
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && this->rtp_to_local_us_(rtp, &due_us)) {
+      const auto lead_ms = static_cast<int32_t>((due_us - static_cast<int64_t>(now_ms) * 1000) / 1000);
+      this->lead_min_ms_ = std::min(this->lead_min_ms_, lead_ms);
+      this->lead_max_ms_ = std::max(this->lead_max_ms_, lead_ms);
+      if (now_ms - this->lead_log_ms_ >= 5000) {
+        AIRPLAY_LOGD("Buffered audio arrives %" PRId32 " to %" PRId32 " ms before it is due", this->lead_min_ms_,
+                     this->lead_max_ms_);
+        this->lead_log_ms_ = now_ms;
+        this->lead_min_ms_ = INT32_MAX;
+        this->lead_max_ms_ = INT32_MIN;
+      }
+    }
     if (!this->buffered_queue_.push(rtp, seq, audio, static_cast<uint16_t>(audio_length))) {
       if (this->buffered_dropped_++ == 0)
         AIRPLAY_LOGW("Buffered audio dropped: the buffer is full");
@@ -1037,7 +1050,7 @@ void Receiver::decode_buffered_audio_(uint32_t now_ms) {
   this->update_receive_pause_();
 }
 
-void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
+void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us) {
   PlistReader reader;
   if (!reader.parse(body, length))
     return;
@@ -1068,6 +1081,13 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
     this->anchor_remote_ns_ = seconds * 1000000000LL + static_cast<int64_t>(fraction_ns);
     this->anchor_valid_ = true;
     this->sender_latency_frames_ = 0;
+    int64_t offset = 0;
+    if (this->ptp_timing_ && this->ptp_clocks_.offset_ns(this->ptp_timeline_, now_us, &offset)) {
+      // How far ahead of the sender's present the anchor is, on our estimate of its clock
+      AIRPLAY_LOGD("Anchor at %" PRId64 ".%09" PRId64 " s, %" PRId32 " ms from now on the PTP clock",
+                   this->anchor_remote_ns_ / 1000000000, this->anchor_remote_ns_ % 1000000000,
+                   static_cast<int32_t>((this->anchor_remote_ns_ - (now_us * 1000 + offset)) / 1000000));
+    }
   }
   int64_t rate = 0;
   double real_rate = 0;
