@@ -1925,14 +1925,15 @@ void Receiver::playback_step_(int64_t now_us) {
     const ReceiverStats &st = this->stats_;
     AIRPLAY_LOGD("%s: buffered %" PRIu32 " ms, output %" PRIu32 " ms, servo %" PRId32 " us; lost %" PRIu32
                  ", late %" PRIu32 ", resend requests %" PRIu32 ", trimmed frames %" PRIu32 ", silence %" PRIu32
-                 " ms, underruns %" PRIu32 ", longest poll gap %" PRIu32 " ms, longest output report gap %" PRIu32
-                 " ms, foreign packets %" PRIu32,
+                 " ms, underruns %" PRIu32,
                  this->synced_ ? "Synchronized" : "Unsynchronized",
                  static_cast<uint32_t>(frames_to_us(this->buffered_packets_() * FRAMES_PER_PACKET) / 1000),
                  static_cast<uint32_t>(frames_to_us(this->speaker_queued_frames_()) / 1000), this->servo_error_us_,
                  st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
-                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms,
-                 st.longest_report_gap_ms, st.foreign_packets);
+                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
+    AIRPLAY_LOGD("Timing: longest poll gap %" PRIu32 " ms, longest output report gap %" PRIu32
+                 " ms, foreign packets %" PRIu32,
+                 st.longest_gap_ms, st.longest_report_gap_ms, st.foreign_packets);
     this->late_detail_logged_ = false;
   }
 
@@ -2083,9 +2084,12 @@ bool Receiver::synced_step_(int64_t now_us) {
     if (!this->late_detail_logged_) {
       // At most once per statistics line: whether the output queue or an old report made the packet late
       this->late_detail_logged_ = true;
-      const uint32_t report_age_ms =
-          reported_at != 0 ? (static_cast<uint32_t>(now_us) - reported_at) / 1000 : UINT32_MAX;
-      AIRPLAY_LOGD("Late packet: %" PRId32 " ms late, output queue %" PRIu32 " ms, last output report %" PRIu32
+      // A report may have come in after now_us was taken
+      const int32_t report_age_ms =
+          reported_at != 0
+              ? std::max<int32_t>(static_cast<int32_t>(static_cast<uint32_t>(now_us) - reported_at), 0) / 1000
+              : -1;
+      AIRPLAY_LOGD("Late packet: %" PRId32 " ms late, output queue %" PRIu32 " ms, last output report %" PRId32
                    " ms ago, servo %" PRId32 " us",
                    static_cast<int32_t>(-error_us / 1000), static_cast<uint32_t>(queued_us / 1000), report_age_ms,
                    this->servo_error_us_);

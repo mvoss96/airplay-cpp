@@ -284,11 +284,22 @@ void SocketRunner::run_once(uint32_t max_wait_ms) {
   for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++)
     fds[count++] = this->receive_paused_[i] ? -1 : this->connection_fds_[i];
   fds[count++] = this->listen_fd_;
-  if (net::wait(fds, count, wait_ms, ready)) {
+  // Where the time goes when the thread falls behind: waiting longer than asked means it did not get to run
+  const int64_t wait_start = SocketRunner::now_us();
+  const bool any_ready = net::wait(fds, count, wait_ms, ready);
+  const int64_t waited_ms = (SocketRunner::now_us() - wait_start) / 1000;
+  if (waited_ms >= wait_ms + SLOW_STEP_MS)
+    AIRPLAY_LOGW("Waiting for the network took %u ms (up to %u ms asked)", static_cast<unsigned>(waited_ms),
+                 static_cast<unsigned>(wait_ms));
+  if (any_ready) {
+    const int64_t udp_start = SocketRunner::now_us();
     for (size_t i = 0; i < NUM_UDP_CHANNELS; i++) {
       if (ready[i] && this->udp_fds_[i] == fds[i])
         this->receive_udp_(static_cast<UdpChannel>(i));
     }
+    const int64_t udp_ms = (SocketRunner::now_us() - udp_start) / 1000;
+    if (udp_ms >= SLOW_STEP_MS)
+      AIRPLAY_LOGW("Receiving UDP packets took %u ms", static_cast<unsigned>(udp_ms));
     for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
       if (ready[NUM_UDP_CHANNELS + i] && this->connection_fds_[i] == fds[NUM_UDP_CHANNELS + i] &&
           fds[NUM_UDP_CHANNELS + i] >= 0) {
