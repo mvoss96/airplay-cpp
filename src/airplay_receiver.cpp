@@ -2151,6 +2151,7 @@ bool Receiver::start_playback_() {
     }
   }
   this->playback_started_ = true;
+  this->output_starting_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -2205,12 +2206,16 @@ bool Receiver::synced_step_(int64_t now_us) {
   if (this->frames_played_.load(std::memory_order_relaxed) == 0) {
     if (this->frames_written_ == 0 && error_us <= OUTPUT_START_LEAD_US) {
       this->silence_pending_frames_ = OUTPUT_START_FRAMES;
+      this->output_starting_ = true;
       return true;
     }
     return false;  // Until the output plays; one that never reports plays unsynchronized after a timeout
   }
-  if (error_us > START_WINDOW_US)
+  // Once the output started, the audio is lined up at once: an output that runs dry may fill its buffers with
+  // silence that nobody counts (ESPHome's I2S speaker keeps 50 ms of DMA buffers full), which delays what follows
+  if (error_us > START_WINDOW_US && !this->output_starting_)
     return false;
+  this->output_starting_ = false;
 
   if (!present) {
     if (error_us > CONCEAL_MARGIN_US)

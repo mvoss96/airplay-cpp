@@ -595,6 +595,7 @@ class Receiver {
   bool output_restart_pending_{false};
   bool audio_held_{false};  // hold_requested_, applied in poll()
   bool playback_started_{false};
+  bool output_starting_{false};  // Silence started the output; the audio is lined up once it plays
   bool synced_{false};
   bool sync_logged_{false};
   bool played_reports_missing_{false};
