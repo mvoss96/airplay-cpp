@@ -644,7 +644,8 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
   static constexpr uint32_t VOLUME_INTERVAL_MS = 100;
   if (now_ms - this->last_sender_volume_ms_ >= VOLUME_INTERVAL_MS) {
     const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
-    if (volume >= 0.0f) {
+    // A sender whose audio is held does not have the speaker, so its volume is left alone
+    if (volume >= 0.0f && !this->audio_held_) {
       this->last_sender_volume_ms_ = now_ms;
       if (this->send_media_remote_command_("dvlc", volume))
         AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
