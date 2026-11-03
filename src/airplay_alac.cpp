@@ -5,11 +5,19 @@
 
 // The decoding loops run for every sample. On the ESP32 they go to internal RAM, so that they do not wait for the
 // flash cache while other tasks (display, network) push them out of it.
+// Not inlined into the caller, which stays in flash; called once per channel and packet
 #if defined(ESP_PLATFORM)
 #include <esp_attr.h>
-#define AIRPLAY_HOT IRAM_ATTR
+#define AIRPLAY_HOT IRAM_ATTR __attribute__((noinline))
+#elif defined(__GNUC__)
+#define AIRPLAY_HOT __attribute__((noinline))
 #else
 #define AIRPLAY_HOT
+#endif
+#if defined(__GNUC__)
+#define AIRPLAY_INLINE inline __attribute__((always_inline))
+#else
+#define AIRPLAY_INLINE inline
 #endif
 
 namespace airplay {
@@ -42,66 +50,114 @@ enum ElementType : uint8_t {
 namespace {
 
 /// Count of leading zero bits, defined as 32 for zero
-inline uint32_t clz32(uint32_t value) { return value == 0 ? 32 : static_cast<uint32_t>(__builtin_clz(value)); }
+AIRPLAY_INLINE uint32_t clz32(uint32_t value) { return value == 0 ? 32 : static_cast<uint32_t>(__builtin_clz(value)); }
 
-inline int32_t sign_of(int32_t value) { return (value > 0) - (value < 0); }
+AIRPLAY_INLINE int32_t sign_of(int32_t value) { return (value > 0) - (value < 0); }
 
 /// Sign-extends the low (32 - shift) bits of a value
-inline int32_t sign_extend(int32_t value, uint32_t shift) {
+AIRPLAY_INLINE int32_t sign_extend(int32_t value, uint32_t shift) {
   if (shift >= 32)
     return 0;  // No bits left; only possible with invalid stream parameters
   return static_cast<int32_t>(static_cast<uint32_t>(value) << shift) >> shift;
 }
 
 /// MSB-first bit reader. Reads past the end return zero bits and set the overrun flag.
+///
+/// The next bits are kept in a 32-bit cache that is refilled a byte at a time, and everything is inlined: on the
+/// ESP32 a function call per sample, a 64-bit shift or the byte swap that a 4-byte load turns into each cost a
+/// library call, and the decoder spent hundreds of cycles per sample on them.
 class BitReader {
  public:
   BitReader(const uint8_t *data, size_t length) : data_(data), length_(length), bit_length_(length * 8) {}
 
-  /// Returns the next 32 bits without consuming them
-  uint32_t peek32() const {
-    const size_t byte = this->position_ >> 3;
-    const uint32_t shift = this->position_ & 7;
-    if (byte + 5 <= this->length_) {
-      // 32-bit operations only: 64-bit shifts are slow on 32-bit microcontrollers
-      const uint8_t *p = this->data_ + byte;
-      const uint32_t word = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
-                            (static_cast<uint32_t>(p[2]) << 8) | p[3];
-      return shift == 0 ? word : (word << shift) | (p[4] >> (8 - shift));
-    }
-    // Near the end: missing bytes read as zero
-    uint64_t value = 0;
-    for (size_t i = 0; i < 5; i++) {
-      value <<= 8;
-      if (byte + i < (this->bit_length_ >> 3))
-        value |= this->data_[byte + i];
-    }
-    return static_cast<uint32_t>(value >> (8 - (this->position_ & 7)));
+  /// Returns the next `bits` bits (1 to 32) without consuming them
+  AIRPLAY_INLINE uint32_t peek(uint32_t bits) {
+    if (bits > MIN_CACHED)
+      return this->peek_slow_(bits);
+    this->fill_();
+    return this->cache_ >> (32 - bits);
+  }
+
+  /// The next bits, first one in the most significant bit, at least MIN_CACHED of them valid and the rest zero
+  AIRPLAY_INLINE uint32_t peek_word() {
+    this->fill_();
+    return this->cache_;
   }
 
   /// Reads up to 32 bits
-  uint32_t read(uint32_t bits) {
+  AIRPLAY_INLINE uint32_t read(uint32_t bits) {
     if (bits == 0 || bits > 32)
       return 0;
-    uint32_t value = this->peek32() >> (32 - bits);
-    this->position_ += bits;
+    const uint32_t value = this->peek(bits);
+    this->skip(bits);
     return value;
   }
 
-  void skip(size_t bits) { this->position_ += bits; }
-  void byte_align() { this->position_ = (this->position_ + 7) & ~static_cast<size_t>(7); }
-  bool overrun() const { return this->position_ > this->bit_length_; }
+  AIRPLAY_INLINE void skip(size_t bits) {
+    if (bits < this->cached_) {
+      this->cache_ <<= bits;
+      this->cached_ -= static_cast<uint32_t>(bits);
+      return;
+    }
+    this->seek_(this->position_() + bits);
+  }
+
+  void byte_align() { this->seek_((this->position_() + 7) & ~static_cast<size_t>(7)); }
+  bool overrun() const { return this->position_() > this->bit_length_; }
 
  protected:
+  /// Bits a refill provides at least
+  static constexpr uint32_t MIN_CACHED = 25;
+
+  size_t position_() const { return this->next_byte_ * 8 - this->cached_; }
+
+  AIRPLAY_INLINE void fill_() {
+    while (this->cached_ < MIN_CACHED) {
+      const uint32_t byte = this->next_byte_ < this->length_ ? this->data_[this->next_byte_] : 0;
+      this->next_byte_++;
+      this->cache_ |= byte << (24 - this->cached_);
+      this->cached_ += 8;
+    }
+  }
+
+  void seek_(size_t position) {
+    this->next_byte_ = position >> 3;
+    this->cache_ = 0;
+    this->cached_ = 0;
+    const uint32_t drop = position & 7;
+    if (drop != 0) {
+      this->fill_();
+      this->cache_ <<= drop;
+      this->cached_ -= drop;
+    }
+  }
+
+  /// More bits than the cache guarantees; rare
+  uint32_t peek_slow_(uint32_t bits) const {
+    const size_t position = this->position_();
+    const size_t byte = position >> 3;
+    const uint32_t shift = position & 7;
+    uint32_t word = 0;
+    for (size_t i = 0; i < 4; i++)
+      word = (word << 8) | (byte + i < this->length_ ? this->data_[byte + i] : 0);
+    const uint32_t next = byte + 4 < this->length_ ? this->data_[byte + 4] : 0;
+    if (shift != 0)
+      word = (word << shift) | (next >> (8 - shift));
+    return word >> (32 - bits);
+  }
+
   const uint8_t *data_;
   size_t length_;
   size_t bit_length_;
-  size_t position_{0};
+  size_t next_byte_{0};  // Next byte to go into the cache
+  uint32_t cache_{0};    // Cached bits, first one in the most significant bit, the rest zero
+  uint32_t cached_{0};   // Number of cached bits
 };
 
 /// Reads one adaptive Golomb-Rice coded value (dyn_get and dyn_get_32bit in the reference decoder).
-inline uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t escape_bits) {
-  const uint32_t prefix = clz32(~reader.peek32());
+AIRPLAY_INLINE uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t escape_bits) {
+  // The invalid bits of the word are zero, so they end a run of ones
+  const uint32_t prefix = clz32(~reader.peek_word());
   if (prefix >= MAX_PREFIX) {
     reader.skip(MAX_PREFIX);
     return reader.read(escape_bits);
@@ -109,7 +165,7 @@ inline uint32_t read_rice(BitReader &reader, uint32_t m, uint32_t k, uint32_t es
   reader.skip(prefix + 1);
   if (k == 0)
     return prefix * m;
-  const uint32_t value = reader.peek32() >> (32 - k);
+  const uint32_t value = reader.peek(k);
   if (value < 2) {
     reader.skip(k - 1);
     return prefix * m;
@@ -194,14 +250,17 @@ AIRPLAY_HOT void unpredict(const int32_t *in, int32_t *out, uint32_t num, int16_
     const int32_t *pout = out + j - 1;
     const int32_t top = out[j - lim];
 
-    int32_t sum = 0;
+    // Unsigned, so that a damaged packet wraps around instead of overflowing
+    uint32_t sum = 0;
     for (uint32_t k = 0; k < num_active; k++)
-      sum += coefs[k] * (pout[-static_cast<int32_t>(k)] - top);
+      sum += static_cast<uint32_t>(coefs[k]) *
+             (static_cast<uint32_t>(pout[-static_cast<int32_t>(k)]) - static_cast<uint32_t>(top));
 
     int32_t del = in[j];
     int32_t del0 = del;
     const int32_t sg = sign_of(del);
-    del += top + ((sum + den_half) >> den_shift);
+    del = static_cast<int32_t>(static_cast<uint32_t>(del) + static_cast<uint32_t>(top) +
+                               static_cast<uint32_t>(static_cast<int32_t>(sum + den_half) >> den_shift));
     out[j] = sign_extend(del, chan_shift);
 
     // Adapt the coefficients towards the sign of the residual
@@ -300,6 +359,8 @@ int32_t ALACDecoder::decode(const uint8_t *data, size_t length, int16_t *output)
           const uint32_t chan_bits = this->config_.bit_depth - (bytes_shifted * 8) + (element_channels - 1);
           mix_bits = reader.read(8);
           mix_res = static_cast<int8_t>(reader.read(8));
+          if (mix_bits > 31)
+            return -1;  // Only in a damaged packet
 
           uint32_t mode[2];
           uint32_t den_shift[2];
