@@ -69,7 +69,6 @@ static constexpr uint32_t MAX_RESEND_RANGES = 4;
 // Synchronized playback
 /// Audio is handed to the sink at most this far ahead, so that a pause or seek takes effect quickly. Enough to ride
 /// out the driving thread being held up for a while, e.g. 200 ms on an ESP32 while its display redraws.
-static constexpr int64_t MAX_SPEAKER_QUEUE_US = 250000;
 /// A packet this far off its due time means that the sender's timeline does not fit its clock at all
 static constexpr int64_t MAX_TIMELINE_ERROR_US = 10000000;
 /// Silence to line up the first packet is only written once it is due within this window
@@ -139,6 +138,10 @@ static inline uint32_t to_ms(int64_t now_us) { return static_cast<uint32_t>(now_
 
 /// Some timestamps use 0 for "not set"
 static inline uint32_t nonzero_ms(uint32_t ms) { return ms == 0 ? 1 : ms; }
+/// Adds a measured duration; nothing is measured without ReceiverConfig::clock_us, then both ends are 0
+static inline void add_us(std::atomic<uint32_t> &total, int64_t took_us) {
+  total.fetch_add(static_cast<uint32_t>(took_us), std::memory_order_relaxed);
+}
 
 /// Local time on the NTP time scale, in nanoseconds. Only offsets matter, so the caller's clock is used.
 static inline int64_t local_ntp_ns(int64_t now_us) { return now_us * 1000LL + NTP_UNIX_OFFSET_NS; }
@@ -1522,6 +1525,12 @@ void Receiver::benchmark_decoder_(const uint8_t *data, size_t length, int16_t *o
 #endif
 }
 
+Receiver::PlaybackTiming Receiver::take_playback_timing() {
+  return PlaybackTiming{
+      this->timers_us_.exchange(0, std::memory_order_relaxed), this->resend_us_.exchange(0, std::memory_order_relaxed),
+      this->copy_us_.exchange(0, std::memory_order_relaxed), this->write_us_.exchange(0, std::memory_order_relaxed)};
+}
+
 Receiver::PacketTiming Receiver::take_packet_timing() {
   return PacketTiming{this->timed_packets_.exchange(0, std::memory_order_relaxed),
                       this->decrypt_us_.exchange(0, std::memory_order_relaxed),
@@ -1646,6 +1655,7 @@ void Receiver::handle_audio_packet_timed_(const uint8_t *header, const uint8_t *
       gap.valid = false;
       gap.missing_since_ms = nonzero_ms(now_ms);
       gap.last_request_ms = 0;
+      this->packets_missing_ = true;
     }
     this->highest_seq_ = seq;
   }
@@ -1755,7 +1765,8 @@ void Receiver::handle_timing_request_(UdpChannel channel, const uint8_t *packet,
 }
 
 void Receiver::retry_resends_(uint32_t now_ms) {
-  if (!this->have_seq_)
+  // Most of the time nothing is missing, and the scan reads a slot header in external RAM per buffered packet
+  if (!this->have_seq_ || !this->packets_missing_)
     return;
   const uint32_t buffered = this->buffered_packets_();
   const auto due = [now_ms](const PacketSlot &s) {
@@ -1766,11 +1777,15 @@ void Receiver::retry_resends_(uint32_t now_ms) {
   };
   uint32_t ranges = 0;
   uint32_t i = 0;
+  bool missing = false;
   while (i < buffered && ranges < MAX_RESEND_RANGES) {
-    if (!due(this->slots_[(this->head_slot_ + i) % this->slot_count_])) {
+    const PacketSlot &next = this->slots_[(this->head_slot_ + i) % this->slot_count_];
+    if (!due(next)) {
+      missing = missing || (!next.valid && next.missing_since_ms != 0);
       i++;
       continue;
     }
+    missing = true;
     // Ask for a run of consecutive missing packets at once
     const auto first = static_cast<uint16_t>(this->next_seq_ + i);
     uint16_t count = 0;
@@ -1785,6 +1800,7 @@ void Receiver::retry_resends_(uint32_t now_ms) {
     this->request_resend_(first, count);
     ranges++;
   }
+  this->packets_missing_ = missing;
 }
 
 void Receiver::request_resend_(uint16_t first, uint16_t count) {
@@ -1850,8 +1866,10 @@ bool Receiver::rtp_to_local_us_(uint32_t rtp, int64_t *local_us) const {
 bool Receiver::write_pending_output_(uint32_t now_ms) {
   if (this->output_offset_ >= this->output_length_)
     return true;
+  const int64_t write_start = this->clock_now_();
   const size_t written = this->sink_.write(this->output_buffer_ + this->output_offset_ * NUM_CHANNELS,
                                            this->output_length_ - this->output_offset_);
+  add_us(this->write_us_, this->clock_now_() - write_start);
   if (written > 0 && this->first_write_ms_ == 0)
     this->first_write_ms_ = nonzero_ms(now_ms);
   this->output_offset_ += written;
@@ -1861,6 +1879,7 @@ bool Receiver::write_pending_output_(uint32_t now_ms) {
 }
 
 void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
+  const int64_t copy_start = this->clock_now_();
   int16_t *samples = this->output_buffer_;
   uint32_t frames = slot.frames;
   std::memcpy(samples, slot.samples, frames * BYTES_PER_FRAME);
@@ -1891,6 +1910,7 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
   }
   this->output_offset_ = 0;
   this->output_length_ = frames;
+  add_us(this->copy_us_, this->clock_now_() - copy_start);
 }
 
 void Receiver::queue_silence_output_() {
@@ -1905,6 +1925,7 @@ void Receiver::queue_silence_output_() {
 void Receiver::poll(int64_t now_us) {
   if (this->slots_ == nullptr)
     return;
+  const int64_t poll_start = this->clock_now_();
   const uint32_t now_ms = to_ms(now_us);
   if (this->audio_active_) {
     if (this->last_poll_ms_ != 0)
@@ -1980,11 +2001,14 @@ void Receiver::poll(int64_t now_us) {
     return;
   }
 
+  const int64_t timers_end = this->clock_now_();
+  add_us(this->timers_us_, timers_end - poll_start);
   if (this->buffered_stream_) {
     this->decode_buffered_audio_(now_ms);
   } else if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
     this->last_resend_scan_ms_ = now_ms;
     this->retry_resends_(now_ms);
+    add_us(this->resend_us_, this->clock_now_() - timers_end);
   }
 
   // A sender that stops sending without a FLUSH (e.g. iOS after a long pause) is shown as paused.
@@ -2131,7 +2155,7 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
 
   const int64_t queued_us = frames_to_us(this->speaker_queued_frames_());
-  if (queued_us >= MAX_SPEAKER_QUEUE_US)
+  if (queued_us >= static_cast<int64_t>(this->config_.output_queue_ms) * 1000)
     return false;
   // The output reports played audio in chunks. The audio it reported last ended at the report's timestamp,
   // and the queued audio follows on from there, which is more precise than counting from now.

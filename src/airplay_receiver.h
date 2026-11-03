@@ -99,6 +99,9 @@ struct ReceiverConfig {
   /// Jitter buffer. Synchronized playback needs the sender's latency plus a margin, about 2250 ms;
   /// smaller buffers play unsynchronized with three quarters of the buffer (at most 500 ms) of delay.
   uint32_t buffer_ms{500};
+  /// How much audio synchronized playback keeps written ahead in the output. More rides out longer hold-ups of
+  /// the receiving thread; the output must have room for it.
+  uint32_t output_queue_ms{250};
   /// Advertise and accept track details (Listener::on_metadata)
   bool metadata{false};
   /// Advertise and accept cover art (Listener::on_artwork_begin)
@@ -112,8 +115,8 @@ struct ReceiverConfig {
   bool airplay2{false};
   /// Fills a buffer with cryptographically secure random bytes; for AirPlay 2 pairing
   void (*random)(uint8_t *buffer, size_t length){nullptr};
-  /// Optional clock in microseconds. With it, the receiver measures how long decrypting and decoding take
-  /// (take_packet_timing()).
+  /// Optional clock in microseconds. With it, the receiver measures how long decrypting, decoding and the parts of
+  /// poll() take (take_packet_timing(), take_playback_timing()).
   int64_t (*clock_us)(){nullptr};
   /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
   uint64_t airplay2_features{0};
@@ -210,6 +213,14 @@ class Receiver {
     uint32_t total_us;  // All of handling a packet, including the two above
   };
   PacketTiming take_packet_timing();
+  /// Where poll() spends its time; needs ReceiverConfig::clock_us. Thread-safe.
+  struct PlaybackTiming {
+    uint32_t timers_us;  // Timers, requests to the sender and state changes before playback
+    uint32_t resend_us;  // Looking for missing packets to ask for again
+    uint32_t copy_us;    // Copying packets for the output, with dropped or repeated frames
+    uint32_t write_us;   // AudioSink::write()
+  };
+  PlaybackTiming take_playback_timing();
   /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_command(SenderCommand command);
@@ -421,6 +432,8 @@ class Receiver {
                               int64_t now_us);
   void send_timing_request_(int64_t now_us);
   void retry_resends_(uint32_t now_ms);
+  /// ReceiverConfig::clock_us, or 0 without one
+  int64_t clock_now_() const { return this->config_.clock_us != nullptr ? this->config_.clock_us() : 0; }
   void request_resend_(uint16_t first, uint16_t count);
   void advance_head_();
   /// Converts an RTP timestamp to the local time at which it should be heard
@@ -524,6 +537,10 @@ class Receiver {
   std::atomic<uint32_t> decrypt_us_{0};
   std::atomic<uint32_t> decode_us_{0};
   std::atomic<uint32_t> packet_us_{0};
+  std::atomic<uint32_t> timers_us_{0};
+  std::atomic<uint32_t> resend_us_{0};
+  std::atomic<uint32_t> copy_us_{0};
+  std::atomic<uint32_t> write_us_{0};
   std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
   std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
   std::atomic<uint32_t> sender_address_{0};
@@ -568,6 +585,7 @@ class Receiver {
   uint16_t accept_from_seq_{0};
   uint16_t resend_seq_{0};
   bool have_seq_{false};
+  bool packets_missing_{false};  // A packet was marked missing since the last scan that found none
   bool accept_any_seq_{false};
   uint32_t last_packet_ms_{0};
   uint32_t last_resend_scan_ms_{0};
