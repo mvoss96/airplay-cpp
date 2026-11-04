@@ -938,12 +938,12 @@ static constexpr size_t BUFFERED_LENGTH_SIZE = 2;
 static constexpr size_t BUFFERED_RTP_HEADER_SIZE = 12;
 /// The connection is paused while less than this is free in the buffer, and resumed once twice as much is
 static constexpr size_t BUFFERED_PAUSE_BYTES = 8 * 1024;
-/// Packets decoded per poll, to spread the work: one packet is 23 ms of audio, a poll comes every few ms
-static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 1;
-/// While the jitter buffer holds less than this, more packets are decoded per poll, so that it fills up even when
-/// polls come late (a busy thread, or much logging)
+/// Audio decoded per poll, to spread the work: one AAC packet (23 ms; three ALAC packets), a poll comes every few ms
+static constexpr uint32_t BUFFERED_FRAMES_PER_POLL = AAC_FRAMES_PER_PACKET;
+/// While the jitter buffer holds less than this, more is decoded per poll, so that it fills up even when polls come
+/// late (a busy thread, or much logging)
 static constexpr uint32_t BUFFERED_LOW_FRAMES = SAMPLE_RATE / 4;
-static constexpr uint32_t BUFFERED_DECODES_PER_POLL_LOW = 4;
+static constexpr uint32_t BUFFERED_FRAMES_PER_POLL_LOW = 4 * AAC_FRAMES_PER_PACKET;
 /// Packets that are due already and dropped without decoding, at most per poll
 static constexpr uint32_t MAX_SKIPPED_PER_POLL = 64;
 static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
@@ -1038,9 +1038,10 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
     return;
   const auto now_ms = static_cast<uint32_t>(now_us / 1000);
   const uint32_t pieces = (this->buffered_frames_per_packet_ + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
-  const uint32_t decodes = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
-                               ? BUFFERED_DECODES_PER_POLL_LOW
-                               : BUFFERED_DECODES_PER_POLL;
+  const uint32_t decode_frames = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
+                                     ? BUFFERED_FRAMES_PER_POLL_LOW
+                                     : BUFFERED_FRAMES_PER_POLL;
+  const uint32_t decodes = std::max<uint32_t>(decode_frames / this->buffered_frames_per_packet_, 1);
   uint32_t skipped = 0;
   for (uint32_t i = 0; i < decodes;) {
     // Room in the jitter buffer for the pieces of one packet
@@ -1058,6 +1059,16 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
     int64_t due_us = 0;
     if (this->buffered_playing_ && skipped < MAX_SKIPPED_PER_POLL &&
         this->rtp_to_local_us_(rtp + this->buffered_frames_per_packet_, &due_us) && due_us < now_us) {
+      if (!this->late_logged_) {
+        // Once per stream: whether the sender sends too late or its clock is read wrong
+        this->late_logged_ = true;
+        AIRPLAY_LOGD("First late buffered packet: %" PRId32 " ms late, %" PRId32 " ms after the anchor, %" PRIu32
+                     " packets buffered",
+                     static_cast<int32_t>((now_us - due_us) / 1000),
+                     static_cast<int32_t>(static_cast<int64_t>(static_cast<int32_t>(rtp - this->anchor_rtp_)) * 1000 /
+                                          SAMPLE_RATE),
+                     this->buffered_packets_());
+      }
       this->buffered_queue_.pop();
       this->buffered_next_seq_ += pieces;
       this->stats_.late_packets += pieces;
@@ -1078,6 +1089,11 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
       if (this->stats_.decode_errors++ == 0)
         AIRPLAY_LOGW("Failed to decode buffered audio (packet %" PRIu32 ", %u bytes)", seq, length);
       continue;
+    }
+    if (this->codec_ == Codec::ALAC && !this->alac_logged_) {
+      this->alac_logged_ = true;
+      AIRPLAY_LOGD("ALAC packets of %u bytes, %s", static_cast<unsigned>(length),
+                   this->decoder_.last_uncompressed() ? "stored uncompressed" : "compressed");
     }
     // Into the jitter buffer in pieces of at most FRAMES_PER_PACKET
     for (size_t offset = 0; offset < frames; offset += FRAMES_PER_PACKET) {

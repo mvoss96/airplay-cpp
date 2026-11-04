@@ -19,7 +19,7 @@
 #   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
-#   ALAC=1 sends ALAC instead, as Music Assistant does when the receiver offers PTP.
+#   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -68,6 +68,7 @@ sleep 2
 if [ "$SENDER" = buffered ]; then
   if [ "$ALAC" = 1 ]; then
     INPUT="reference.pcm --alac"  # Sent as ALAC, which must arrive exactly
+    [ "$PAUSE" = 1 ] || INPUT="$INPUT --paced"  # And timed as Music Assistant does
   else
     INPUT=signal.aac
   fi

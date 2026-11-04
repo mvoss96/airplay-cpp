@@ -5,10 +5,11 @@ cannot send, is done here.
 
 Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-control] [--second-session] [--handover]
                         [--takeover-and-back]
-       send_buffered.py <host> <port> <file.pcm (16-bit stereo)> --alac
+       send_buffered.py <host> <port> <file.pcm (16-bit stereo)> --alac [--paced]
 
 --alac sends the PCM file as ALAC (uncompressed ALAC packets of 352 frames), as Music Assistant does when the receiver
-offers PTP timing.
+offers PTP timing. --paced also times it as Music Assistant does: playback starts 0.4 s after the anchor is sent,
+the audio follows it and runs at most 1.75 s ahead of playback.
 
 --remote-control opens a second session during playback, only to control it, as iOS does; playback goes on.
 --second-session sets up a second audio session during playback without a stream, as iOS sometimes does; playback
@@ -101,6 +102,7 @@ async def main():
     global FRAMES_PER_PACKET
     host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     alac = "--alac" in sys.argv
+    paced = "--paced" in sys.argv
     if alac:
         FRAMES_PER_PACKET = 352
     pause = "--pause" in sys.argv
@@ -199,14 +201,18 @@ async def main():
         return new_stream, new_start, i + 120
 
     # Some audio ahead, then playback starts half a second from now while the rest follows as the buffer drains
-    for i in range(min(20, len(frames))):
+    ahead = 0 if paced else min(20, len(frames))
+    for i in range(ahead):
         await send(i)
-    seconds, fraction = network_time(0.5)
+    lead = 0.4 if paced else 0.5
+    seconds, fraction = network_time(lead)
     await exchange(rtsp, "SETRATEANCHORTIME", {"rate": 1, "rtpTime": first_rtp, "networkTimeSecs": seconds,
                                                 "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
-    start = time.time() + 0.5
-    i = 20
+    start = time.time() + lead
+    i = ahead
     while i < len(frames):
+        if paced:
+            await asyncio.sleep(max(0.001, start + i * FRAMES_PER_PACKET / SAMPLE_RATE - 1.75 - time.time()))
         if i == 140 and takeover:
             (cipher, data), start, i = await take_over_and_back(i)
             continue
