@@ -1763,7 +1763,7 @@ void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
   const uint64_t clock = (static_cast<uint64_t>(read_be32(packet + 20)) << 32) | read_be32(packet + 24);
   if (this->ptp_sync_logged_ < 3) {
     this->ptp_sync_logged_++;
-    AIRPLAY_LOGD("PTP sync packet: frame %" PRIu32 " at %" PRId64 ".%09" PRId64 " s on clock %016" PRIx64
+    AIRPLAY_LOGV("PTP sync packet: frame %" PRIu32 " at %" PRId64 ".%09" PRId64 " s on clock %016" PRIx64
                  ", frame %" PRIu32 " now (%" PRId32 " frames ahead), flags %02x%02x",
                  rtp, remote_ns / 1000000000, remote_ns % 1000000000, clock, rtp_now,
                  static_cast<int32_t>(rtp_now - rtp), packet[2], packet[3]);
@@ -2157,7 +2157,8 @@ void Receiver::playback_step_(int64_t now_us) {
   const bool dry = this->playback_started_ && this->frames_written_ > 0 &&
                    this->frames_played_.load(std::memory_order_relaxed) != 0 &&
                    (queued_us == 0 || (reported_at != 0 && report_age_us > queued_us + DRY_MARGIN_US));
-  if (dry && !this->output_dry_) {
+  // Before the first packet of a playback is lined up, the output is empty on purpose and the start handles it
+  if (dry && !this->output_dry_ && this->start_aligned_) {
     if (this->buffered_packets_() > 0)
       this->stats_.underruns++;
     // The output may fill the gap with silence of its own that is not counted: what follows is lined up anew

@@ -972,13 +972,13 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     if (audio_length == 0)
       continue;  // iOS sends one without audio after a flush
     int64_t due_us = 0;
-    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && this->buffered_playing_ &&
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE && this->buffered_playing_ &&
         this->rtp_to_local_us_(rtp, &due_us)) {
       const auto lead_ms = static_cast<int32_t>((due_us - static_cast<int64_t>(now_ms) * 1000) / 1000);
       this->lead_min_ms_ = std::min(this->lead_min_ms_, lead_ms);
       this->lead_max_ms_ = std::max(this->lead_max_ms_, lead_ms);
       if (now_ms - this->lead_log_ms_ >= 5000) {
-        AIRPLAY_LOGD("Buffered audio arrives %" PRId32 " to %" PRId32 " ms before it is due", this->lead_min_ms_,
+        AIRPLAY_LOGV("Buffered audio arrives %" PRId32 " to %" PRId32 " ms before it is due", this->lead_min_ms_,
                      this->lead_max_ms_);
         this->lead_log_ms_ = now_ms;
         this->lead_min_ms_ = INT32_MAX;

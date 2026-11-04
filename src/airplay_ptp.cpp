@@ -74,7 +74,7 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
     this->types_logged_ |= type_bit;
     char address[16];
     format_address(from_address, address, sizeof(address));
-    AIRPLAY_LOGD("PTP message type %u on port %u from %s (clock %016" PRIx64 ", %u bytes, flags %02x%02x, "
+    AIRPLAY_LOGV("PTP message type %u on port %u from %s (clock %016" PRIx64 ", %u bytes, flags %02x%02x, "
                  "interval %d)",
                  type, general ? 320 : 319, address, id, static_cast<unsigned>(length), data[6], data[7],
                  static_cast<int8_t>(data[33]));
@@ -119,7 +119,7 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
         used += static_cast<size_t>(std::snprintf(text + used, sizeof(text) - used, "%02x", data[at + 4 + i]));
       at += 4 + tlv_length;
     }
-    AIRPLAY_LOGD("PTP Signaling from %016" PRIx64 " to %016" PRIx64 ", TLVs (type/length:data)%s", id,
+    AIRPLAY_LOGV("PTP Signaling from %016" PRIx64 " to %016" PRIx64 ", TLVs (type/length:data)%s", id,
                  read_be(data + 34, 8), used > 0 ? text : " none");
     return;
   }
@@ -168,7 +168,7 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
     // Sent at the precise origin time, received at sync_received_ns: the difference is the offset less the delay
     const int64_t sent_ns = read_timestamp_ns(data + 34) + correction_ns + clock->sync_correction_ns;
     if (clock->count == 0) {
-      AIRPLAY_LOGD("PTP clock %016" PRIx64 ": sent at %" PRId64 ".%09" PRId64 " s (corrections %" PRId64 " and %" PRId64
+      AIRPLAY_LOGV("PTP clock %016" PRIx64 ": sent at %" PRId64 ".%09" PRId64 " s (corrections %" PRId64 " and %" PRId64
                    " ns), received at %" PRId64 ".%06" PRId64 " s here",
                    clock->id, sent_ns / 1000000000, sent_ns % 1000000000, clock->sync_correction_ns, correction_ns,
                    clock->sync_received_ns / 1000000000, (clock->sync_received_ns / 1000) % 1000000);
@@ -330,7 +330,7 @@ size_t PtpClocks::next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, 
 }
 
 void PtpClocks::log_status(int64_t now_us) {
-  if (now_us - this->last_log_us_ < LOG_INTERVAL_US)
+  if (detail::g_log_level < LogLevel::LOG_LEVEL_VERBOSE || now_us - this->last_log_us_ < LOG_INTERVAL_US)
     return;
   this->last_log_us_ = now_us;
   for (Clock &clock : this->clocks_) {
@@ -355,7 +355,7 @@ void PtpClocks::log_status(int64_t now_us) {
       const auto [low, high] = std::minmax_element(clock.raw_samples, clock.raw_samples + used);
       raw_spread = *high - *low;
     }
-    AIRPLAY_LOGD("PTP clock %016" PRIx64 ": %" PRIu32 " Sync, %" PRIu32 " Follow_Up, %" PRIu32
+    AIRPLAY_LOGV("PTP clock %016" PRIx64 ": %" PRIu32 " Sync, %" PRIu32 " Follow_Up, %" PRIu32
                  " Delay_Resp, offset %" PRId64 " ms, spread %" PRId64 " us (%" PRId64
                  " us without corrections, which range from %" PRId64 " to %" PRId64 " us), delay %" PRId64 " us",
                  clock.id, clock.syncs, clock.follow_ups, clock.delay_responses, best / 1000000, spread / 1000,
@@ -375,7 +375,7 @@ void PtpClocks::log_status(int64_t now_us) {
     this->type_counts_[type] = 0;
   }
   if (length > 0)
-    AIRPLAY_LOGD("PTP messages by type:%s", types);
+    AIRPLAY_LOGV("PTP messages by type:%s", types);
 }
 
 }  // namespace airplay
