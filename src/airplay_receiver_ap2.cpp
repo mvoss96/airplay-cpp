@@ -1472,6 +1472,7 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t n
       if (reader.get_integer(reader.get(root, "networkTimeTimelineID"), &timeline) &&
           static_cast<uint64_t>(timeline) != this->ptp_timeline_) {
         this->ptp_timeline_ = static_cast<uint64_t>(timeline);
+        this->ptp_clock_ = 0;
         this->clock_locked_ = false;
         AIRPLAY_LOGD("Timeline on PTP clock %016" PRIx64, this->ptp_timeline_);
       }
@@ -1483,8 +1484,10 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t n
     this->anchor_remote_ns_ = seconds * 1000000000LL + static_cast<int64_t>(fraction_ns);
     this->anchor_valid_ = true;
     this->sender_latency_frames_ = 0;
+    this->choose_ptp_clock_(now_us, true);
     int64_t offset = 0;
-    if (this->ptp_timing_ && this->ptp_clocks_.offset_ns(this->ptp_timeline_, now_us, &offset)) {
+    if (this->ptp_timing_ &&
+        this->ptp_clocks_.offset_ns(this->ptp_clock_ != 0 ? this->ptp_clock_ : this->ptp_timeline_, now_us, &offset)) {
       // How far ahead of the sender's present the anchor is, on our estimate of its clock
       AIRPLAY_LOGD("Anchor at %" PRId64 ".%09" PRId64 " s, %" PRId32 " ms from now on the PTP clock",
                    this->anchor_remote_ns_ / 1000000000, this->anchor_remote_ns_ % 1000000000,
