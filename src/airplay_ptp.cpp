@@ -246,6 +246,15 @@ const PtpClocks::Clock *PtpClocks::active_(uint64_t id, int64_t now_us) const {
   return nullptr;
 }
 
+size_t PtpClocks::active_clocks(uint64_t *ids, size_t max, int64_t now_us) const {
+  size_t count = 0;
+  for (const Clock &clock : this->clocks_) {
+    if (count < max && clock.count >= MIN_SAMPLES && now_us - clock.last_sample_us <= CLOCK_TIMEOUT_US)
+      ids[count++] = clock.id;
+  }
+  return count;
+}
+
 bool PtpClocks::offset_ns(uint64_t id, int64_t now_us, int64_t *offset) const {
   const Clock *clock = this->active_(id, now_us);
   if (clock == nullptr)

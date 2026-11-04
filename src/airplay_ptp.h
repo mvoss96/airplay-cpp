@@ -30,6 +30,8 @@ class PtpClocks {
   /// @param clock Clock identity as AirPlay names timelines (networkTimeTimelineID); 0 for the grandmaster
   /// @return false while the clock has too few samples or none recently
   bool offset_ns(uint64_t clock, int64_t now_us, int64_t *offset) const;
+  /// Writes the identities of the clocks that have an offset now (offset_ns() succeeds) to ids, at most max
+  size_t active_clocks(uint64_t *ids, size_t max, int64_t now_us) const;
   /// Clock identity of the grandmaster that announced itself last, or of the clock that last sent Sync; 0 if none
   uint64_t grandmaster() const { return this->grandmaster_; }
   /// The receiver's own clock identity (set_identity())

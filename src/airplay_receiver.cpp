@@ -1776,6 +1776,8 @@ void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
   const uint32_t latency = rtp_now - rtp;
   if (latency > MAX_SENDER_LATENCY_FRAMES)
     return;
+  if (clock != this->ptp_timeline_)
+    this->ptp_clock_ = 0;
   this->ptp_timeline_ = clock;
   this->anchor_rtp_ = rtp;
   this->anchor_remote_ns_ = remote_ns;
@@ -1785,7 +1787,7 @@ void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
 
 void Receiver::update_ptp_clock_(int64_t now_us) {
   int64_t offset = 0;
-  uint64_t clock = this->ptp_timeline_;
+  uint64_t clock = this->ptp_clock_ != 0 ? this->ptp_clock_ : this->ptp_timeline_;
   if (!this->ptp_clocks_.offset_ns(clock, now_us, &offset)) {
     // The timeline may be named after a clock that is not the one that sends Sync messages
     clock = 0;
@@ -1807,11 +1809,53 @@ void Receiver::update_ptp_clock_(int64_t now_us) {
   }
 }
 
+bool Receiver::choose_ptp_clock_(int64_t now_us, bool new_anchor) {
+  if (!this->ptp_timing_ || !this->anchor_valid_)
+    return false;
+  uint32_t rtp = this->anchor_rtp_;
+  const PacketSlot &slot = this->slots_[this->head_slot_];
+  if (!new_anchor && this->have_seq_ && slot.valid && slot.seq == this->next_seq_) {
+    rtp = slot.rtp;
+  } else if (!new_anchor && this->have_seq_ && this->have_next_rtp_) {
+    rtp = this->next_rtp_;
+  }
+  const int64_t remote_ns =
+      this->anchor_remote_ns_ + static_cast<int64_t>(static_cast<int32_t>(rtp - this->anchor_rtp_)) * 1000000000LL /
+                                    static_cast<int64_t>(SAMPLE_RATE);
+  // The timeline's clock first, then the others
+  uint64_t candidates[1 + PtpClocks::MAX_CLOCKS];
+  candidates[0] = this->ptp_timeline_;
+  const size_t count = 1 + this->ptp_clocks_.active_clocks(candidates + 1, PtpClocks::MAX_CLOCKS, now_us);
+  uint64_t chosen = 0;
+  for (size_t i = 0; i < count && chosen == 0; i++) {
+    int64_t offset = 0;
+    if (candidates[i] == 0 || !this->ptp_clocks_.offset_ns(candidates[i], now_us, &offset))
+      continue;
+    const int64_t ahead_ns = remote_ns - (now_us * 1000 + offset);
+    if (ahead_ns > -MAX_TIMELINE_ERROR_US * 1000 && ahead_ns < MAX_TIMELINE_ERROR_US * 1000)
+      chosen = candidates[i];
+  }
+  // None fits (a clock that jumped and has not settled yet): the timeline's, and wait for it
+  if (chosen == this->ptp_timeline_)
+    chosen = 0;
+  if (chosen == this->ptp_clock_)
+    return false;
+  this->ptp_clock_ = chosen;
+  if (chosen != 0)
+    AIRPLAY_LOGI("The timeline of PTP clock %016" PRIx64 " is in the time of PTP clock %016" PRIx64
+                 " (the sender follows it), following that",
+                 this->ptp_timeline_, chosen);
+  this->clock_locked_ = false;
+  this->update_ptp_clock_(now_us);
+  return true;
+}
+
 void Receiver::set_ptp_timing_(bool ptp) {
   if (ptp)
     AIRPLAY_LOGD("Timing with PTP");
   this->ptp_timing_ = ptp;
   this->ptp_timeline_ = 0;
+  this->ptp_clock_ = 0;
   this->ptp_error_logged_ = false;
   this->anchor_fits_clock_ = false;
   this->ptp_sync_logged_ = 0;
@@ -2099,7 +2143,8 @@ void Receiver::poll(int64_t now_us) {
     uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
     uint32_t to = 0;
     bool general = false;
-    if (const size_t length = this->ptp_clocks_.next_message(this->ptp_timeline_, message, now_us, &to, &general)) {
+    const uint64_t followed = this->ptp_clock_ != 0 ? this->ptp_clock_ : this->ptp_timeline_;
+    if (const size_t length = this->ptp_clocks_.next_message(followed, message, now_us, &to, &general)) {
       this->transport_.send_ptp(general, Endpoint{to, general ? PTP_GENERAL_PORT : PTP_EVENT_PORT}, message, length);
     }
     this->update_ptp_clock_(now_us);
@@ -2322,6 +2367,9 @@ bool Receiver::synced_step_(int64_t now_us) {
     return true;
   }
   if ((error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) && this->ptp_timing_) {
+    // The sender joined a group and its time is now another speaker's clock's: follow that clock
+    if (this->choose_ptp_clock_(now_us, false))
+      return false;
     // A PTP clock that jumped (its sender slept) gives a wrong time until its next samples: wait for them
     if (!this->ptp_error_logged_) {
       this->ptp_error_logged_ = true;

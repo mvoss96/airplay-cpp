@@ -447,6 +447,9 @@ class Receiver {
   void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_ptp_sync_packet_(const uint8_t *packet, size_t length);
   void update_ptp_clock_(int64_t now_us);
+  /// Follows the clock that the anchor fits: near now for the audio due next, or for the anchor itself when it has
+  /// just come (the audio held may be from before it). @return true if that changed.
+  bool choose_ptp_clock_(int64_t now_us, bool new_anchor);
   void set_ptp_timing_(bool ptp);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
@@ -663,6 +666,9 @@ class Receiver {
   bool ptp_open_{false};
   bool ptp_timing_{false};
   uint64_t ptp_timeline_{0};
+  // The clock whose time the anchor is in, when that is not the timeline's: a sender that joins a group with
+  // another AirPlay 2 speaker follows that speaker's clock and sends its time, under its own clock's name
+  uint64_t ptp_clock_{0};
   uint32_t ptp_sync_logged_{0};
   bool ptp_error_logged_{false};   // Once per session: an anchor far off the PTP clock
   bool anchor_fits_clock_{false};  // The last buffered anchor is near now on the PTP clock
