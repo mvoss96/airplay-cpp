@@ -1802,6 +1802,10 @@ void Receiver::update_ptp_clock_(int64_t now_us) {
   }
   // rtp_to_local_us_() takes offsets to the local time on the NTP time scale
   this->clock_offset_ns_ = offset - NTP_UNIX_OFFSET_NS;
+  const uint64_t used = clock != 0 ? clock : this->ptp_clocks_.grandmaster();
+  if (this->clock_locked_ && used != this->ptp_clock_used_)
+    AIRPLAY_LOGD("Now on PTP clock %016" PRIx64 " (was %016" PRIx64 ")", used, this->ptp_clock_used_);
+  this->ptp_clock_used_ = used;
   if (!this->clock_locked_) {
     this->clock_locked_ = true;
     AIRPLAY_LOGD("Clock locked to PTP clock %016" PRIx64 "%s", clock != 0 ? clock : this->ptp_clocks_.grandmaster(),
@@ -2180,8 +2184,12 @@ void Receiver::poll(int64_t now_us) {
 
   // A sender that stops sending without a FLUSH (e.g. iOS after a long pause) is shown as paused.
   // Dead senders are detected by TCP keepalive on the RTSP connection.
-  if (this->session_state_ == SessionState::PLAYING && now_ms - this->last_packet_ms_ > SENDER_IDLE_MS)
+  if (this->session_state_ == SessionState::PLAYING && now_ms - this->last_packet_ms_ > SENDER_IDLE_MS) {
+    AIRPLAY_LOGD("No audio from the sender for %" PRIu32 " ms (%" PRIu32 " packets buffered%s)",
+                 now_ms - this->last_packet_ms_, this->buffered_packets_(),
+                 this->receive_paused_ ? ", not reading its connection" : "");
     this->set_session_state_(SessionState::PAUSED);
+  }
 
   this->playback_step_(now_us);
 }
@@ -2225,6 +2233,15 @@ void Receiver::playback_step_(int64_t now_us) {
   }
   this->output_dry_ = dry;
 
+  if (!this->playback_started_ && this->session_state_ == SessionState::PLAYING &&
+      now_ms - this->last_stats_log_ms_ >= STATS_LOG_INTERVAL_MS) {
+    // Why a session that plays gives no audio
+    this->last_stats_log_ms_ = now_ms;
+    AIRPLAY_LOGD("Not playing: %" PRIu32 " packets buffered, last audio %" PRIu32 " ms ago, clock %s, anchor %s%s",
+                 this->buffered_packets_(), now_ms - this->last_packet_ms_,
+                 this->clock_locked_ ? "locked" : "not locked", this->anchor_valid_ ? "valid" : "missing",
+                 this->buffered_stream_ && !this->buffered_playing_ ? ", rate 0" : "");
+  }
   if (this->playback_started_ && now_ms - this->last_stats_log_ms_ >= STATS_LOG_INTERVAL_MS) {
     this->last_stats_log_ms_ = now_ms;
     const ReceiverStats &st = this->stats_;
