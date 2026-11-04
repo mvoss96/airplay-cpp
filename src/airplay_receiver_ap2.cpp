@@ -25,6 +25,8 @@ namespace airplay {
 // FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
 // of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
 static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405C4A00ULL;
+/// PTP timing (41), with ReceiverConfig::ptp. macOS only streams to receivers with it, and then only with PTP.
+static constexpr uint64_t FEATURE_PTP = 1ULL << 41;
 /// Status flags: an audio receiver
 static constexpr int64_t STATUS_FLAGS = 0x4;
 
@@ -64,6 +66,11 @@ static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Ke
 static constexpr char DATA_STREAM_SALT[] = "DataStream-Salt";
 static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encryption-Key";
 
+/// Unanswered requests after which nothing more is sent on an event connection. Music Assistant never reads it, and
+/// the requests that pile up there made the receiver lose audio packets.
+static constexpr uint16_t MAX_UNANSWERED_REQUESTS = 3;
+/// Apple's senders answer requests on the event connection at once; one that has not answered this long never does
+static constexpr uint32_t EVENT_ANSWER_TIMEOUT_MS = 2000;
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
 static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
@@ -73,6 +80,7 @@ static constexpr int64_t COMPRESSION_ALAC = 2;
 static constexpr int64_t COMPRESSION_AAC = 4;
 /// "audioFormat" of AAC-LC, 44.1 kHz, stereo
 static constexpr int64_t AUDIO_FORMAT_AAC_44100 = 0x400000;
+static constexpr int64_t AUDIO_FORMAT_ALAC_44100 = 0x40000;  // 16-bit stereo
 
 /// Encrypted audio ends with the tag and the last 8 bytes of the nonce
 static constexpr size_t AUDIO_NONCE_SIZE = 8;
@@ -103,7 +111,9 @@ void Receiver::init_airplay2_() {
   const uint8_t *mac = this->config_.mac;
   std::snprintf(this->device_id_, sizeof(this->device_id_), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2],
                 mac[3], mac[4], mac[5]);
-  this->airplay2_features_ = this->config_.airplay2_features != 0 ? this->config_.airplay2_features : DEFAULT_FEATURES;
+  this->airplay2_features_ = this->config_.airplay2_features != 0
+                                 ? this->config_.airplay2_features
+                                 : DEFAULT_FEATURES | (this->config_.ptp ? FEATURE_PTP : 0);
   // Lower 32 bits first
   std::snprintf(this->features_, sizeof(this->features_), "0x%" PRIX32 ",0x%" PRIX32,
                 static_cast<uint32_t>(this->airplay2_features_), static_cast<uint32_t>(this->airplay2_features_ >> 32));
@@ -347,7 +357,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   }
   if (std::strcmp(method, "SETRATEANCHORTIME") == 0) {
     if (connection == this->session_owner_ && data != nullptr)
-      this->handle_rate_anchor_(data, body_length);
+      this->handle_rate_anchor_(data, body_length, now_us);
     return true;
   }
   if (std::strcmp(method, "FLUSHBUFFERED") == 0) {
@@ -355,8 +365,18 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       this->handle_flush_buffered_(data, body_length);
     return true;
   }
-  // Timing peers for PTP, which is not used
-  return std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0;
+  if (std::strcmp(method, "SETPEERS") == 0 || std::strcmp(method, "SETPEERSX") == 0) {
+    // The devices of a PTP group (macOS sends it as "/peer-list-changed", a property list all the same)
+    if (data != nullptr && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+      PlistReader reader;
+      auto *text = reinterpret_cast<char *>(this->body_buffer_);
+      const size_t length = reader.parse(data, body_length) ? reader.describe(reader.root(), text, 1024) : 0;
+      for (size_t offset = 0; offset < length; offset += 150)
+        AIRPLAY_LOGD("%s: %.*s", method, static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
+    }
+    return true;
+  }
+  return false;
 }
 
 void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_t length, Response &response) {
@@ -735,10 +755,34 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       }
       return;
     }
-    if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP")) {
-      AIRPLAY_LOGW("Only NTP timing is supported");
+    const bool ptp = reader.string_equals(timing_protocol, "PTP");
+    if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP") &&
+        !(ptp && this->ptp_open_)) {
+      AIRPLAY_LOGW(ptp ? "PTP timing is not enabled (ReceiverConfig::ptp)" : "Only NTP and PTP timing are supported");
       return;
     }
+    char local_address[16];
+    {
+      const auto *ip = reinterpret_cast<const uint8_t *>(&c.local.address);
+      std::snprintf(local_address, sizeof(local_address), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    }
+    // With PTP the answer names the receiver as a timing peer with its clock, as the sender names itself, and no
+    // port for clock requests
+    const auto write_timing = [&](PlistWriter &out) {
+      out.key("timingPort");
+      out.integer(ptp ? 0 : this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+      if (ptp) {
+        out.key("timingPeerInfo");
+        out.begin_dict(3);
+        out.key("Addresses");
+        out.begin_array(1);
+        out.string(local_address);
+        out.key("ID");
+        out.string(local_address);
+        out.key("ClockID");
+        out.integer(static_cast<int64_t>(this->ptp_clocks_.identity()));
+      }
+    };
     const char *name = nullptr;
     size_t name_length = 0;
     if (reader.get_string(reader.get(root, "name"), &name, &name_length))
@@ -755,11 +799,11 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
-      writer.begin_dict(2);
+      c.pending_ptp = ptp;
+      writer.begin_dict(ptp ? 3 : 2);
       writer.key("eventPort");
       writer.integer(c.local.port);
-      writer.key("timingPort");
-      writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+      write_timing(writer);
       response.body_length = writer.finish();
       if (response.body_length > 0) {
         response.status = 200;
@@ -770,6 +814,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       return;
     }
     c.pending_timing_port = static_cast<uint16_t>(timing_port);  // Kept, should it be set aside and come back
+    c.pending_ptp = ptp;
     this->take_session_(connection, request, header_length);
     this->stop_buffered_audio_();
     this->airplay2_recording_ = false;
@@ -779,15 +824,15 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     this->airplay2_audio_ = false;
     if (!this->open_udp_(connection, 0, static_cast<uint32_t>(timing_port), this->udp_ports_))
       return;
+    this->set_ptp_timing_(ptp);
     this->event_channel_pending_ = true;
     this->event_channel_address_ = c.peer.address;
     this->event_channel_source_ = connection;
     // The event connection uses the RTSP port; nothing is read from it
-    writer.begin_dict(2);
+    writer.begin_dict(ptp ? 3 : 2);
     writer.key("eventPort");
     writer.integer(c.local.port);
-    writer.key("timingPort");
-    writer.integer(this->udp_ports_[static_cast<size_t>(UdpChannel::TIMING)]);
+    write_timing(writer);
   } else {
     // An audio stream
     if (c.session_pending && this->udp_open_)
@@ -819,31 +864,43 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     if (type == STREAM_TYPE_BUFFERED) {
       int64_t audio_format = 0;
       reader.get_integer(reader.get(stream, "audioFormat"), &audio_format);
-      if (this->buffered_storage_ == nullptr) {
-        AIRPLAY_LOGW("Buffered audio needs an AAC decoder");
-        return;
-      }
-      if (compression != COMPRESSION_AAC || audio_format != AUDIO_FORMAT_AAC_44100 ||
-          frames_per_packet != AAC_FRAMES_PER_PACKET || (key == nullptr && !this->have_session_stream_key_)) {
-        AIRPLAY_LOGW("Unsupported buffered stream (ct %" PRId64 ", format 0x%" PRIx64 ")", compression, audio_format);
+      // iOS sends AAC, Music Assistant ALAC (when PTP is offered)
+      const bool aac = compression == COMPRESSION_AAC && audio_format == AUDIO_FORMAT_AAC_44100 &&
+                       frames_per_packet == AAC_FRAMES_PER_PACKET && this->config_.aac_decoder != nullptr;
+      const bool alac = compression == COMPRESSION_ALAC && audio_format == AUDIO_FORMAT_ALAC_44100 &&
+                        frames_per_packet > 0 && frames_per_packet <= FRAMES_PER_PACKET;
+      if (this->buffered_storage_ == nullptr || (!aac && !alac) ||
+          (key == nullptr && !this->have_session_stream_key_)) {
+        AIRPLAY_LOGW("Unsupported buffered stream (ct %" PRId64 ", format 0x%" PRIx64 "%s)", compression, audio_format,
+                     compression == COMPRESSION_AAC && this->config_.aac_decoder == nullptr ? ", no AAC decoder" : "");
         return;
       }
       this->stop_audio_();
       this->stop_buffered_audio_();
       this->forget_timeline_();
-      if (!this->config_.aac_decoder->begin()) {
+      if (aac && !this->config_.aac_decoder->begin()) {
         AIRPLAY_LOGW("Failed to start the AAC decoder");
         return;
       }
+      if (alac) {
+        ALACConfig alac_config;
+        alac_config.frame_length = static_cast<uint32_t>(frames_per_packet);
+        if (!this->decoder_.configure(alac_config)) {
+          AIRPLAY_LOGW("Unsupported ALAC stream");
+          return;
+        }
+      }
       std::memcpy(this->audio_key_, key != nullptr ? key : this->session_stream_key_, sizeof(this->audio_key_));
-      this->codec_ = Codec::AAC;
+      this->codec_ = aac ? Codec::AAC : Codec::ALAC;
+      this->buffered_frames_per_packet_ = static_cast<uint32_t>(frames_per_packet);
+      this->buffered_aac_ = aac;
       this->buffered_stream_ = true;
       this->airplay2_audio_ = false;
       this->encrypted_ = false;
       this->buffered_next_seq_ = 0;
       // The sender connects to the RTSP port for the audio, as for its events
       this->data_channel_pending_ = true;
-      AIRPLAY_LOGD("Stream: AAC, AirPlay 2 buffered");
+      AIRPLAY_LOGD("Stream: %s, AirPlay 2 buffered", aac ? "AAC" : "ALAC");
       if (this->airplay2_recording_ && this->start_audio_(now_us))
         AIRPLAY_LOGI("Playback started");
 
@@ -931,12 +988,23 @@ bool Receiver::request_sender_volume(float volume) {
   return true;
 }
 
-void Receiver::update_event_channel_ready_() {
+void Receiver::update_event_channel_ready_(uint32_t now_ms) {
   bool ready = false;
   if (this->session_owner_ != NO_CONNECTION) {
     const uint32_t address = this->connections_[this->session_owner_].peer.address;
-    for (const Connection &c : this->connections_)
-      ready |= c.open && c.event_channel && c.encrypted && c.peer.address == address;
+    for (Connection &c : this->connections_) {
+      if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
+        continue;
+      if (!c.event_silent && c.event_answers == 0 && c.event_requests > 0 &&
+          (c.event_requests >= MAX_UNANSWERED_REQUESTS ||
+           now_ms - c.event_first_request_ms >= EVENT_ANSWER_TIMEOUT_MS)) {
+        c.event_silent = true;
+        AIRPLAY_LOGI("The sender does not answer on its event connection; nothing more is sent on it");
+        if (this->listener_ != nullptr)
+          this->listener_->on_event_channel_silent();
+      }
+      ready |= !c.event_silent;
+    }
   }
   this->event_channel_ready_.store(ready, std::memory_order_release);
 }
@@ -954,10 +1022,11 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
   static constexpr uint32_t VOLUME_INTERVAL_MS = 100;
   if (now_ms - this->last_sender_volume_ms_ >= VOLUME_INTERVAL_MS) {
     const float volume = this->sender_volume_request_.exchange(-1.0f, std::memory_order_acq_rel);
-    if (volume >= 0.0f) {
+    // A sender whose audio is held does not have the speaker, so its volume is left alone
+    if (volume >= 0.0f && !this->audio_held_) {
       this->last_sender_volume_ms_ = now_ms;
-      AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
-      this->send_media_remote_command_("dvlc", volume);
+      if (this->send_media_remote_command_("dvlc", volume))
+        AIRPLAY_LOGD("Volume %.2f sent to the sender", static_cast<double>(volume));
     }
   }
   const uint8_t commands = this->sender_command_requests_.exchange(0, std::memory_order_acq_rel);
@@ -965,20 +1034,22 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
   static constexpr const char *CODES[] = {"play", "paus", "plps", "nitm", "pitm"};
   for (uint8_t i = 0; i < sizeof(CODES) / sizeof(CODES[0]); i++) {
     if ((commands & (1u << i)) != 0) {
-      AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
-      this->send_media_remote_command_(CODES[i], -1.0f);
+      if (this->send_media_remote_command_(CODES[i], -1.0f))
+        AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
     }
   }
 }
 
-void Receiver::send_media_remote_command_(const char *value, float volume) {
+bool Receiver::send_media_remote_command_(const char *value, float volume) {
   if (this->session_owner_ == NO_CONNECTION)
-    return;
+    return false;
   const uint32_t address = this->connections_[this->session_owner_].peer.address;
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
-    const Connection &c = this->connections_[i];
+    Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
+    if (c.event_silent)
+      return false;
     // A volume is given at the top level and in the parameters; senders read either
     uint8_t body[192];
     PlistWriter writer(body, sizeof(body));
@@ -998,18 +1069,22 @@ void Receiver::send_media_remote_command_(const char *value, float volume) {
     }
     const size_t body_length = writer.finish();
     if (body_length == 0)
-      return;
+      return false;
     char message[512];
     const int header_length =
         std::snprintf(message, sizeof(message),
                       "POST /command RTSP/1.0\r\nCSeq: %" PRIu32 "\r\nContent-Type: %s\r\nContent-Length: %u\r\n\r\n",
                       ++this->event_cseq_, CONTENT_TYPE_PLIST, static_cast<unsigned>(body_length));
     if (header_length <= 0 || static_cast<size_t>(header_length) + body_length > sizeof(message))
-      return;
+      return false;
     std::memcpy(message + header_length, body, body_length);
     this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
-    return;
+    c.event_requests++;
+    if (c.event_answers == 0 && c.event_first_request_ms == 0)
+      c.event_first_request_ms = this->poll_ms_ != 0 ? this->poll_ms_ : 1;
+    return true;
   }
+  return false;
 }
 
 void Receiver::build_info_(Response &response) {
@@ -1176,12 +1251,26 @@ static constexpr size_t BUFFERED_LENGTH_SIZE = 2;
 static constexpr size_t BUFFERED_RTP_HEADER_SIZE = 12;
 /// The connection is paused while less than this is free in the buffer, and resumed once twice as much is
 static constexpr size_t BUFFERED_PAUSE_BYTES = 8 * 1024;
-/// Packets decoded per poll, to spread the work: one packet is 23 ms of audio, a poll comes every few ms
-static constexpr uint32_t BUFFERED_DECODES_PER_POLL = 1;
+/// Audio decoded per poll, to spread the work: one AAC packet (23 ms; three ALAC packets), a poll comes every few ms
+static constexpr uint32_t BUFFERED_FRAMES_PER_POLL = AAC_FRAMES_PER_PACKET;
+/// While the jitter buffer holds less than this, more is decoded per poll, so that it fills up even when polls come
+/// late (a busy thread, or much logging)
+static constexpr uint32_t BUFFERED_LOW_FRAMES = SAMPLE_RATE / 4;
+static constexpr uint32_t BUFFERED_FRAMES_PER_POLL_LOW = 4 * AAC_FRAMES_PER_PACKET;
+/// Packets that are due already and dropped without decoding, at most per poll
+static constexpr uint32_t MAX_SKIPPED_PER_POLL = 64;
 static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
 
 /// Whether 24-bit sequence number a comes before b
 static bool seq24_before(uint32_t a, uint32_t b) { return ((a - b) & 0xffffff) > 0x800000; }
+/// Whether buffered packet sequence number seq comes before flush point `point`. iOS counts in 24 bits; Music
+/// Assistant counts in 16 and puts the payload type in the byte above, so a point that fits in 16 bits is compared
+/// in 16 (which gives the same for iOS).
+static bool seq_before_flush(uint32_t seq, uint32_t point) {
+  if (point <= 0xffff)
+    return static_cast<int16_t>(static_cast<uint16_t>(seq - point)) < 0;
+  return seq24_before(seq, point);
+}
 
 void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms) {
   Connection &c = this->connections_[connection];
@@ -1214,7 +1303,7 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     const uint32_t rtp = (static_cast<uint32_t>(rtp_packet[4]) << 24) | (static_cast<uint32_t>(rtp_packet[5]) << 16) |
                          (static_cast<uint32_t>(rtp_packet[6]) << 8) | rtp_packet[7];
     if (this->flush_active_) {
-      if (seq24_before(seq, this->flush_until_seq_))
+      if (seq_before_flush(seq, this->flush_until_seq_))
         continue;  // Flushed
       this->flush_active_ = false;
     }
@@ -1230,6 +1319,20 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     }
     if (audio_length == 0)
       continue;  // iOS sends one without audio after a flush
+    int64_t due_us = 0;
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE && this->buffered_playing_ &&
+        this->rtp_to_local_us_(rtp, &due_us)) {
+      const auto lead_ms = static_cast<int32_t>((due_us - static_cast<int64_t>(now_ms) * 1000) / 1000);
+      this->lead_min_ms_ = std::min(this->lead_min_ms_, lead_ms);
+      this->lead_max_ms_ = std::max(this->lead_max_ms_, lead_ms);
+      if (now_ms - this->lead_log_ms_ >= 5000) {
+        AIRPLAY_LOGV("Buffered audio arrives %" PRId32 " to %" PRId32 " ms before it is due", this->lead_min_ms_,
+                     this->lead_max_ms_);
+        this->lead_log_ms_ = now_ms;
+        this->lead_min_ms_ = INT32_MAX;
+        this->lead_max_ms_ = INT32_MIN;
+      }
+    }
     if (!this->buffered_queue_.push(rtp, seq, audio, static_cast<uint16_t>(audio_length))) {
       if (this->buffered_dropped_++ == 0)
         AIRPLAY_LOGW("Buffered audio dropped: the buffer is full");
@@ -1251,11 +1354,21 @@ void Receiver::update_receive_pause_() {
   }
 }
 
-void Receiver::decode_buffered_audio_(uint32_t now_ms) {
+void Receiver::decode_buffered_audio_(int64_t now_us) {
   if (!this->audio_active_)
     return;
-  const uint32_t pieces = (AAC_FRAMES_PER_PACKET + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
-  for (uint32_t i = 0; i < BUFFERED_DECODES_PER_POLL; i++) {
+  const auto now_ms = static_cast<uint32_t>(now_us / 1000);
+  const uint32_t pieces = (this->buffered_frames_per_packet_ + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
+  const uint32_t decode_frames = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
+                                     ? BUFFERED_FRAMES_PER_POLL_LOW
+                                     : BUFFERED_FRAMES_PER_POLL;
+  const uint32_t decodes = std::max<uint32_t>(decode_frames / this->buffered_frames_per_packet_, 1);
+  uint32_t skipped = 0;
+  for (uint32_t i = 0; i < decodes;) {
+    // Playback filled in for audio that was not decoded in time (it goes to the output ahead of its time): what
+    // follows goes on from there, rather than behind playback for the rest of the stream
+    if (this->have_seq_ && static_cast<int16_t>(this->buffered_next_seq_ - this->next_seq_) < 0)
+      this->buffered_next_seq_ = this->next_seq_;
     // Room in the jitter buffer for the pieces of one packet
     if (this->have_seq_ &&
         static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)
@@ -1266,13 +1379,46 @@ void Receiver::decode_buffered_audio_(uint32_t now_ms) {
     uint16_t length;
     if (!this->buffered_queue_.front(&rtp, &seq, &data, &length))
       break;
-    const size_t frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
+    // Audio that is due already is dropped without decoding it: macOS starts each stream with seconds of audio
+    // from before its anchor, and decoding that held up the audio that can still be played
+    int64_t due_us = 0;
+    if (this->buffered_playing_ && skipped < MAX_SKIPPED_PER_POLL &&
+        this->rtp_to_local_us_(rtp + this->buffered_frames_per_packet_, &due_us) && due_us < now_us) {
+      if (!this->late_logged_) {
+        // Once per stream: whether the sender sends too late or its clock is read wrong
+        this->late_logged_ = true;
+        AIRPLAY_LOGD("First late buffered packet: %" PRId32 " ms late, %" PRId32 " ms after the anchor, %" PRIu32
+                     " packets buffered",
+                     static_cast<int32_t>((now_us - due_us) / 1000),
+                     static_cast<int32_t>(static_cast<int64_t>(static_cast<int32_t>(rtp - this->anchor_rtp_)) * 1000 /
+                                          SAMPLE_RATE),
+                     this->buffered_packets_());
+      }
+      this->buffered_queue_.pop();
+      this->buffered_next_seq_ += pieces;
+      this->stats_.late_packets += pieces;
+      skipped++;
+      continue;
+    }
+    i++;
+    size_t frames = 0;
+    if (this->codec_ == Codec::ALAC) {
+      const int32_t decoded = this->decoder_.decode(data, length, this->aac_samples_);
+      frames = decoded > 0 ? static_cast<size_t>(decoded) : 0;
+    } else {
+      frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
+    }
     this->buffered_queue_.pop();
     this->last_packet_ms_ = now_ms;
-    if (frames == 0 || frames > AAC_FRAMES_PER_PACKET) {
+    if (frames == 0 || frames > this->buffered_frames_per_packet_) {
       if (this->stats_.decode_errors++ == 0)
         AIRPLAY_LOGW("Failed to decode buffered audio (packet %" PRIu32 ", %u bytes)", seq, length);
       continue;
+    }
+    if (this->codec_ == Codec::ALAC && !this->alac_logged_) {
+      this->alac_logged_ = true;
+      AIRPLAY_LOGD("ALAC packets of %u bytes, %s", static_cast<unsigned>(length),
+                   this->decoder_.last_uncompressed() ? "stored uncompressed" : "compressed");
     }
     // Into the jitter buffer in pieces of at most FRAMES_PER_PACKET
     for (size_t offset = 0; offset < frames; offset += FRAMES_PER_PACKET) {
@@ -1302,7 +1448,10 @@ void Receiver::decode_buffered_audio_(uint32_t now_ms) {
   this->update_receive_pause_();
 }
 
-void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
+/// An anchor further from now on the sender's clock than this means our estimate of the clock is wrong (it jumped)
+static constexpr int64_t MAX_ANCHOR_DISTANCE_US = 10000000;
+
+void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us) {
   PlistReader reader;
   if (!reader.parse(body, length))
     return;
@@ -1316,13 +1465,36 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length) {
     reader.get_integer(reader.get(root, "networkTimeFrac"), &fraction);
     // The fraction is of a second in 64 bits
     const uint64_t fraction_ns = ((static_cast<uint64_t>(fraction) >> 32) * 1000000000ULL) >> 32;
-    // The NTP timeline counts from 1900; a time from 1970 is moved onto it
-    if (seconds < NTP_UNIX_OFFSET_S)
+    if (this->ptp_timing_) {
+      // On the PTP clock that names the timeline
+      int64_t timeline = 0;
+      if (reader.get_integer(reader.get(root, "networkTimeTimelineID"), &timeline) &&
+          static_cast<uint64_t>(timeline) != this->ptp_timeline_) {
+        this->ptp_timeline_ = static_cast<uint64_t>(timeline);
+        this->clock_locked_ = false;
+        AIRPLAY_LOGD("Timeline on PTP clock %016" PRIx64, this->ptp_timeline_);
+      }
+    } else if (seconds < NTP_UNIX_OFFSET_S) {
+      // The NTP timeline counts from 1900; a time from 1970 is moved onto it
       seconds += NTP_UNIX_OFFSET_S;
+    }
     this->anchor_rtp_ = static_cast<uint32_t>(rtp);
     this->anchor_remote_ns_ = seconds * 1000000000LL + static_cast<int64_t>(fraction_ns);
     this->anchor_valid_ = true;
     this->sender_latency_frames_ = 0;
+    int64_t offset = 0;
+    if (this->ptp_timing_ && this->ptp_clocks_.offset_ns(this->ptp_timeline_, now_us, &offset)) {
+      // How far ahead of the sender's present the anchor is, on our estimate of its clock
+      AIRPLAY_LOGD("Anchor at %" PRId64 ".%09" PRId64 " s, %" PRId32 " ms from now on the PTP clock",
+                   this->anchor_remote_ns_ / 1000000000, this->anchor_remote_ns_ % 1000000000,
+                   static_cast<int32_t>((this->anchor_remote_ns_ - (now_us * 1000 + offset)) / 1000000));
+    }
+    // Near now on the clock that times the stream: audio far off it is from before the anchor, not a clock that
+    // jumped
+    int64_t anchor_us = 0;
+    this->anchor_fits_clock_ = this->rtp_to_local_us_(this->anchor_rtp_, &anchor_us) &&
+                               anchor_us - now_us > -MAX_ANCHOR_DISTANCE_US &&
+                               anchor_us - now_us < MAX_ANCHOR_DISTANCE_US;
   }
   int64_t rate = 0;
   double real_rate = 0;
@@ -1354,8 +1526,8 @@ void Receiver::handle_flush_buffered_(const uint8_t *body, size_t length) {
   uint32_t seq;
   const uint8_t *data;
   uint16_t queued;
-  while (this->buffered_queue_.front(&rtp, &seq, &data, &queued) && seq24_before(seq, until_seq) &&
-         (!has_from || !seq24_before(seq, static_cast<uint32_t>(from) & 0xffffff))) {
+  while (this->buffered_queue_.front(&rtp, &seq, &data, &queued) && seq_before_flush(seq, until_seq) &&
+         (!has_from || !seq_before_flush(seq, static_cast<uint32_t>(from) & 0xffffff))) {
     this->buffered_queue_.pop();
   }
   if (!has_from) {
@@ -1368,7 +1540,7 @@ void Receiver::handle_flush_buffered_(const uint8_t *body, size_t length) {
 }
 
 void Receiver::stop_buffered_audio_() {
-  if (this->buffered_stream_)
+  if (this->buffered_stream_ && this->buffered_aac_)
     this->config_.aac_decoder->end();
   this->buffered_stream_ = false;
   this->buffered_playing_ = false;

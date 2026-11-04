@@ -12,6 +12,7 @@
 
 #include "airplay_receiver.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -39,12 +40,24 @@ class SocketRunner final : public Transport {
   void set_udp_base_port(uint16_t base) { this->udp_base_port_ = base; }
 
   /// @brief Waits up to max_wait_ms for network traffic, hands it to the receiver and calls Receiver::poll().
-  /// The wait is shortened to 5 ms while a session plays.
+  /// While a session plays, Receiver::poll() runs every 10 ms and the wait ends in time for it.
   void run_once(uint32_t max_wait_ms = 100);
 
   /// @brief Monotonic time in microseconds, the clock the runner passes to the receiver. Use it for the
   /// timestamps of Receiver::notify_played().
   static int64_t now_us();
+
+  /// Where run_once() spent its time since the last call, to find what keeps the thread busy. Thread-safe.
+  struct Timing {
+    uint32_t loops;    // Calls of run_once()
+    uint32_t wait_ms;  // Waiting for the network
+    uint32_t udp_ms;   // Receiving and handling UDP packets
+    uint32_t recv_ms;  // Of that, taking them from the network stack (recvfrom)
+    uint32_t tcp_ms;   // Receiving and handling TCP data
+    uint32_t poll_ms;  // Receiver::poll(): playback and timers
+    uint32_t polls;    // Calls of Receiver::poll()
+  };
+  Timing take_timing();
 
   // Transport
   bool send(uint8_t connection, const uint8_t *data, size_t length) override;
@@ -53,11 +66,15 @@ class SocketRunner final : public Transport {
   bool open_udp(uint16_t *ports) override;
   void close_udp() override;
   void send_udp(UdpChannel channel, const Endpoint &to, const uint8_t *data, size_t length) override;
+  bool open_ptp() override;
+  void send_ptp(bool general, const Endpoint &to, const uint8_t *data, size_t length) override;
 
  protected:
   void accept_connection_();
   void receive_tcp_(uint8_t connection);
-  void receive_udp_(UdpChannel channel);
+  /// @return the number of packets read
+  size_t receive_udp_(UdpChannel channel);
+  void receive_ptp_(size_t index);
 
   Receiver *receiver_{nullptr};
   int listen_fd_{-1};
@@ -66,7 +83,16 @@ class SocketRunner final : public Transport {
   int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1, -1, -1, -1};
   static_assert(Receiver::MAX_CONNECTIONS == 6, "Initialize every connection_fds_ entry to -1");
   bool receive_paused_[Receiver::MAX_CONNECTIONS]{};
+  std::atomic<uint32_t> loops_{0};
+  std::atomic<uint32_t> wait_us_{0};
+  std::atomic<uint32_t> udp_us_{0};
+  std::atomic<uint32_t> recv_us_{0};
+  std::atomic<uint32_t> tcp_us_{0};
+  std::atomic<uint32_t> poll_us_{0};
+  std::atomic<uint32_t> polls_{0};
+  int64_t last_poll_us_{0};
   int udp_fds_[NUM_UDP_CHANNELS]{-1, -1, -1};
+  int ptp_fds_[2]{-1, -1};  // Event and general port
   uint8_t udp_buffer_[1600];
 };
 

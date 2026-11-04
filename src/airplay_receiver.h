@@ -6,6 +6,7 @@
 #include "airplay_curve25519.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
+#include "airplay_ptp.h"
 #include "airplay_types.h"
 
 #include <atomic>
@@ -34,6 +35,11 @@ class Transport {
   /// Stops or resumes reading a connection, so that a sender that sends audio ahead waits while the receiver's
   /// buffer is full. Without it the receiver drops what does not fit.
   virtual void pause_receiving(uint8_t /*connection*/, bool /*paused*/) {}
+  /// Opens UDP ports 319 and 320 for PTP and joins its multicast group 224.0.1.129, and hands what arrives to
+  /// Receiver::ptp_packet(). Only for ReceiverConfig::ptp; without it senders that need PTP (macOS) are turned down.
+  virtual bool open_ptp() { return false; }
+  /// Sends from PTP port 320 (`general`) or 319
+  virtual void send_ptp(bool /*general*/, const Endpoint & /*to*/, const uint8_t * /*data*/, size_t /*length*/) {}
 };
 
 /// Audio output. Must not block.
@@ -85,8 +91,13 @@ class Listener {
   /// Position and length of the current track (config.progress), sent at the start of a track and after seeking.
   /// The position then advances in real time while the session plays.
   virtual void on_progress(const Progress & /*progress*/) {}
-  /// The sender's remote control details, see dacp.h
+  /// The sender's remote control details, see dacp.h. Reported in every session that has them, and again when
+  /// they change.
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
+  /// The AirPlay 2 sender does not answer on its event connection (Music Assistant): request_sender_volume() and
+  /// request_sender_command() fail from now on, and what was sent there last went nowhere. Remote control (DACP)
+  /// reaches such senders.
+  virtual void on_event_channel_silent() {}
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
   virtual void on_sender_name(const char * /*name*/) {}
@@ -102,6 +113,9 @@ struct ReceiverConfig {
   /// Jitter buffer. Synchronized playback needs the sender's latency plus a margin, about 2250 ms;
   /// smaller buffers play unsynchronized with three quarters of the buffer (at most 500 ms) of delay.
   uint32_t buffer_ms{500};
+  /// How much audio synchronized playback keeps written ahead in the output. More rides out longer hold-ups of
+  /// the receiving thread; the output must have room for it.
+  uint32_t output_queue_ms{250};
   /// Advertise and accept track details (Listener::on_metadata)
   bool metadata{false};
   /// Advertise and accept cover art (Listener::on_artwork_begin)
@@ -115,13 +129,18 @@ struct ReceiverConfig {
   bool airplay2{false};
   /// Fills a buffer with cryptographically secure random bytes; for AirPlay 2 pairing
   void (*random)(uint8_t *buffer, size_t length){nullptr};
+  /// Optional clock in microseconds. With it, the receiver measures how long decrypting, decoding and the parts of
+  /// poll() take (take_packet_timing(), take_playback_timing()).
+  int64_t (*clock_us)(){nullptr};
   /// Feature bits announced for AirPlay 2, to try what senders do with other combinations; 0 for the default
   uint64_t airplay2_features{0};
-  /// Decoder for AirPlay 2 buffered audio (AAC), which iOS uses for most apps; not offered without one. Must stay
-  /// valid while the receiver exists.
+  /// Also offer AirPlay 2 timing with PTP, which macOS needs (iOS then uses it too). Needs Transport::open_ptp().
+  bool ptp{false};
+  /// Decoder for AirPlay 2 buffered audio in AAC, which iOS uses for most apps; not offered without one. Must stay
+  /// valid while the receiver exists. Buffered ALAC (Music Assistant with PTP) needs none.
   AacDecoder *aac_decoder{nullptr};
-  /// Buffer for the compressed audio that buffered streams send ahead (at 256 kbit/s, 32 KB per second). The audio
-  /// is decoded into the jitter buffer (buffer_ms) as that has room.
+  /// Buffer for the compressed audio that buffered streams send ahead (AAC at 256 kbit/s: 32 KB per second, ALAC
+  /// about three times that). The audio is decoded into the jitter buffer (buffer_ms) as that has room.
   uint32_t buffered_audio_bytes{128 * 1024};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
@@ -138,7 +157,8 @@ struct ReceiverStats {
   uint32_t underruns;        // Times the output ran out of audio during playback
   uint32_t longest_gap_ms;   // Longest time between two poll() calls in a session, e.g. while the thread was blocked
   uint32_t foreign_packets;  // UDP packets from another sender than the playing one, e.g. one that was set aside
-  bool synchronized;         // Playing on the sender's timeline
+  uint32_t longest_report_gap_ms;  // Longest time between two reports of played audio from the output
+  bool synchronized;               // Playing on the sender's timeline
 };
 
 /// AirPlay 1 (RAOP) and, optionally, AirPlay 2 audio receiver without any I/O of its own: feed it RTSP
@@ -166,7 +186,9 @@ class Receiver {
   void connection_closed(uint8_t connection);
   void connection_data(uint8_t connection, const uint8_t *data, size_t length, int64_t now_us);
   void udp_packet(UdpChannel channel, const uint8_t *data, size_t length, const Endpoint &from, int64_t now_us);
-  /// Drives timing, retransmission and playback. Call at least every 5 ms during a session
+  /// A message on PTP port 320 (`general`) or 319, see Transport::open_ptp()
+  void ptp_packet(bool general, const uint8_t *data, size_t length, uint32_t from_address, int64_t now_us);
+  /// Drives timing, retransmission and playback. Call about every 10 ms during a session
   /// (needs_fast_polling()), otherwise every 100 ms or so.
   void poll(int64_t now_us);
 
@@ -201,6 +223,22 @@ class Receiver {
   /// @brief IPv4 address (network byte order) of the sender that owns the session, 0 if none; e.g. to tell a sender
   /// that comes back from another one.
   uint32_t sender_address() const { return this->sender_address_.load(std::memory_order_relaxed); }
+  /// Time spent on the audio packets since the last call (with config.clock_us). Thread-safe.
+  struct PacketTiming {
+    uint32_t packets;
+    uint32_t decrypt_us;
+    uint32_t decode_us;
+    uint32_t total_us;  // All of handling a packet, including the two above
+  };
+  PacketTiming take_packet_timing();
+  /// Where poll() spends its time; needs ReceiverConfig::clock_us. Thread-safe.
+  struct PlaybackTiming {
+    uint32_t timers_us;  // Timers, requests to the sender and state changes before playback
+    uint32_t resend_us;  // Looking for missing packets to ask for again
+    uint32_t copy_us;    // Copying packets for the output, with dropped or repeated frames
+    uint32_t write_us;   // AudioSink::write()
+  };
+  PlaybackTiming take_playback_timing();
   /// @brief Sends a playback command to the AirPlay 2 sender, as a HomePod does for its buttons.
   /// @return false if the sender cannot take it this way; AirPlay 1 senders take DACP commands instead (dacp.h).
   bool request_sender_command(SenderCommand command);
@@ -237,12 +275,18 @@ class Receiver {
     bool encrypted{false};
     bool encrypt_after_response{false};
     bool event_channel{false};  // A sender's event connection; nothing to read on it
-    bool audio_data{false};     // A sender's buffered audio connection
+    // Requests sent on an event connection and pieces of data that came back. Music Assistant does not answer.
+    uint16_t event_requests{0};
+    uint16_t event_answers{0};
+    uint32_t event_first_request_ms{0};  // Of the first request while none was answered
+    bool event_silent{false};
+    bool audio_data{false};  // A sender's buffered audio connection
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};
     char sender_name[SENDER_NAME_SIZE]{};  // The device name the sender sent, empty if none
     uint16_t pending_timing_port{0};
+    bool pending_ptp{false};
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint8_t event_key[CHACHA_KEY_SIZE];       // From pair-setup, for writing on the event connection that follows
@@ -362,11 +406,11 @@ class Receiver {
   // Buffered audio (airplay_receiver_ap2.cpp)
   void receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms);
   /// Decodes queued audio into the jitter buffer while it has room
-  void decode_buffered_audio_(uint32_t now_ms);
-  void handle_rate_anchor_(const uint8_t *body, size_t length);
+  void decode_buffered_audio_(int64_t now_us);
+  void handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
-  void update_event_channel_ready_();
+  void update_event_channel_ready_(uint32_t now_ms);
   void update_sender_address_();
   /// Reports the name of the session owner's device when it changed
   void update_sender_name_();
@@ -375,7 +419,8 @@ class Receiver {
   /// @param stream_id The stream's connection ID from its setup, nullptr if it has none
   void prepare_key_candidates_(const Connection &c, const int64_t *stream_id);
   /// Sends a media remote command on the playing sender's event connection; the volume only if not below 0
-  void send_media_remote_command_(const char *value, float volume);
+  /// @return false if nothing was sent, e.g. because the sender does not answer on its event connection
+  bool send_media_remote_command_(const char *value, float volume);
   /// A new stream has a timeline of its own: the previous stream's anchor and latency do not apply to it
   void forget_timeline_() {
     this->anchor_valid_ = false;
@@ -417,19 +462,29 @@ class Receiver {
   void reset_playback_();
   /// @param header The packet's RTP header
   void handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
+  void handle_audio_packet_timed_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms);
+  /// Diagnostics (with config.clock_us): decodes a packet many times, from internal memory and from the receiver's
+  /// buffers, and logs how long it takes
+  void benchmark_decoder_(const uint8_t *data, size_t length, int16_t *output);
   void handle_sync_packet_(const uint8_t *packet, size_t length, int64_t now_us);
+  void handle_ptp_sync_packet_(const uint8_t *packet, size_t length);
+  void update_ptp_clock_(int64_t now_us);
+  void set_ptp_timing_(bool ptp);
   void handle_timing_reply_(const uint8_t *packet, size_t length, int64_t now_us);
   void handle_timing_request_(UdpChannel channel, const uint8_t *packet, size_t length, const Endpoint &from,
                               int64_t now_us);
   void send_timing_request_(int64_t now_us);
   void retry_resends_(uint32_t now_ms);
+  /// ReceiverConfig::clock_us, or 0 without one
+  int64_t clock_now_() const { return this->config_.clock_us != nullptr ? this->config_.clock_us() : 0; }
   void request_resend_(uint16_t first, uint16_t count);
   void advance_head_();
   /// Converts an RTP timestamp to the local time at which it should be heard
   bool rtp_to_local_us_(uint32_t rtp, int64_t *local_us) const;
   bool write_pending_output_(uint32_t now_ms);
   /// @param trim 0, or +1/-1 to repeat/drop one frame for clock correction
-  void queue_packet_output_(const PacketSlot &slot, int32_t trim);
+  /// @param skip Frames left out at the start of the packet
+  void queue_packet_output_(const PacketSlot &slot, int32_t trim, uint32_t skip = 0);
   void queue_silence_output_();
   void playback_step_(int64_t now_us);
   bool start_playback_();
@@ -508,8 +563,10 @@ class Receiver {
   PacketQueue buffered_queue_;
   uint8_t *buffered_storage_{nullptr};
   int16_t *aac_samples_{nullptr};  // One decoded AAC frame
-  bool buffered_stream_{false};    // The session's audio stream is buffered (AAC over TCP)
-  bool buffered_playing_{false};   // Rate 1 from SETRATEANCHORTIME
+  bool buffered_stream_{false};    // The session's audio stream is buffered (AAC or ALAC over TCP)
+  uint32_t buffered_frames_per_packet_{AAC_FRAMES_PER_PACKET};
+  bool buffered_aac_{false};      // The buffered stream is AAC, decoded by ReceiverConfig::aac_decoder
+  bool buffered_playing_{false};  // Rate 1 from SETRATEANCHORTIME
   bool data_channel_pending_{false};
   bool receive_paused_{false};
   uint8_t data_connection_{0xff};
@@ -533,6 +590,14 @@ class Receiver {
   std::atomic<bool> output_restart_requested_{false};
   std::atomic<bool> disconnect_requested_{false};
   std::atomic<bool> hold_requested_{false};
+  std::atomic<uint32_t> timed_packets_{0};
+  std::atomic<uint32_t> decrypt_us_{0};
+  std::atomic<uint32_t> decode_us_{0};
+  std::atomic<uint32_t> packet_us_{0};
+  std::atomic<uint32_t> timers_us_{0};
+  std::atomic<uint32_t> resend_us_{0};
+  std::atomic<uint32_t> copy_us_{0};
+  std::atomic<uint32_t> write_us_{0};
   std::atomic<bool> event_channel_ready_{false};  // The playing sender has an event connection
   std::atomic<float> device_volume_{-1.0f};       // Below 0 when unknown
   std::atomic<uint32_t> sender_address_{0};
@@ -577,6 +642,8 @@ class Receiver {
   uint16_t accept_from_seq_{0};
   uint16_t resend_seq_{0};
   bool have_seq_{false};
+  bool held_silence_logged_{false};
+  bool packets_missing_{false};  // A packet was marked missing since the last scan that found none
   bool accept_any_seq_{false};
   uint32_t last_packet_ms_{0};
   uint32_t last_resend_scan_ms_{0};
@@ -584,6 +651,14 @@ class Receiver {
   bool output_restart_pending_{false};
   bool audio_held_{false};  // hold_requested_, applied in poll()
   bool playback_started_{false};
+  bool output_starting_{false};
+  bool start_aligned_{false};  // The first packet after the start of playback was lined up
+  // Starting an empty output: silence still to write, then waiting for the output to report it
+  bool kick_output_{false};
+  bool waiting_for_output_{false};
+  uint32_t played_at_kick_{0};
+  uint32_t kick_ms_{0};  // Silence started the
+                         // output; the audio is lined up once it plays
   bool synced_{false};
   bool sync_logged_{false};
   bool played_reports_missing_{false};
@@ -597,7 +672,14 @@ class Receiver {
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
   uint32_t last_stats_log_ms_{0};
+  uint32_t last_report_us_{0};  // Timestamp of the latest report of played audio seen by poll()
+  bool late_detail_logged_{false};
+  bool alac_logged_{false};
+  uint8_t *benchmark_input_{nullptr};   // With config.clock_us: plain heap memory, internal on the ESP32
+  int16_t *benchmark_output_{nullptr};  // The kind of ALAC packets was logged for this stream  // A late packet was
+                                        // explained in the log since the last statistics
   uint32_t last_poll_ms_{0};
+  uint32_t poll_ms_{0};  // Time of the current poll(), for what is sent from it
   bool output_dry_{false};
   ReceiverStats stats_{};
 
@@ -609,6 +691,18 @@ class Receiver {
   uint32_t last_timing_request_ms_{0};
   int64_t clock_offset_ns_{0};
   bool clock_locked_{false};
+  // PTP: the clocks seen, whether the session is timed with PTP, and the clock its timeline follows (0: grandmaster)
+  PtpClocks ptp_clocks_;
+  bool ptp_open_{false};
+  bool ptp_timing_{false};
+  uint64_t ptp_timeline_{0};
+  uint32_t ptp_sync_logged_{0};
+  bool ptp_error_logged_{false};   // Once per session: an anchor far off the PTP clock
+  bool anchor_fits_clock_{false};  // The last buffered anchor is near now on the PTP clock
+  // How long before it is due buffered audio arrives, logged every few seconds
+  int32_t lead_min_ms_{INT32_MAX};
+  int32_t lead_max_ms_{INT32_MIN};
+  uint32_t lead_log_ms_{0};
   bool anchor_valid_{false};
   uint32_t anchor_rtp_{0};
   int64_t anchor_remote_ns_{0};

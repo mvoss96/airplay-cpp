@@ -21,7 +21,7 @@ jobs:
       - name: Build tests
         run: |
           mkdir -p build
-          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_curve25519.cpp src/airplay_dacp.cpp src/airplay_fairplay.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_monocypher.cpp src/airplay_monocypher_ed25519.cpp src/airplay_packet_queue.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
+          SRC="src/airplay_alac.cpp src/airplay_crypto_mbedtls.cpp src/airplay_curve25519.cpp src/airplay_dacp.cpp src/airplay_fairplay.cpp src/airplay_ptp.cpp src/airplay_hap_crypto.cpp src/airplay_key.cpp src/airplay_log.cpp src/airplay_monocypher.cpp src/airplay_monocypher_ed25519.cpp src/airplay_packet_queue.cpp src/airplay_plist.cpp src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_socket_runner.cpp src/airplay_srp.cpp src/airplay_tlv8.cpp src/airplay_util.cpp"
           for t in test_util test_alac test_sync test_hap test_session; do
             ${{ matrix.compiler }} $CXXFLAGS_STRICT -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
               -I src tests/$t.cpp $SRC -lmbedcrypto -o build/$t
@@ -81,7 +81,7 @@ jobs:
           done
           g++ $CXXFLAGS_STRICT -DAIRPLAY_NO_MBEDTLS -DAIRPLAY_NO_SOCKETS -I src tests/test_sync.cpp \
             src/airplay_receiver.cpp src/airplay_receiver_ap2.cpp src/airplay_alac.cpp src/airplay_util.cpp \
-            src/airplay_log.cpp src/airplay_hap_crypto.cpp src/airplay_srp.cpp src/airplay_fairplay.cpp src/airplay_packet_queue.cpp src/airplay_tlv8.cpp \
+            src/airplay_log.cpp src/airplay_hap_crypto.cpp src/airplay_srp.cpp src/airplay_fairplay.cpp src/airplay_packet_queue.cpp src/airplay_tlv8.cpp src/airplay_ptp.cpp \
             src/airplay_plist.cpp src/airplay_curve25519.cpp src/airplay_monocypher.cpp src/airplay_monocypher_ed25519.cpp -o test_sync
           ./test_sync
 
@@ -118,7 +118,10 @@ jobs:
           JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
           IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
           HEADER=$(sed -n 's/^#define AIRPLAY_CPP_VERSION "\(.*\)"$/\1/p' src/airplay_version.h)
-          echo "library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER"
+          PARTS=$(for part in MAJOR MINOR PATCH; do
+            sed -n "s/^#define AIRPLAY_CPP_VERSION_$part \([0-9]*\)$/\1/p" src/airplay_version.h; done | paste -sd.)
+          echo "library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER ($PARTS)"
           test "$PROPS" = "$JSON"
           test "$PROPS" = "$IDF"
           test "$PROPS" = "$HEADER"
+          test "$PROPS" = "$PARTS"

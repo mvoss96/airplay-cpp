@@ -7,6 +7,7 @@ if(CONFIG_AIRPLAY_CPP)
     ${AIRPLAY_DIR}/src/airplay_crypto_mbedtls.cpp
     ${AIRPLAY_DIR}/src/airplay_curve25519.cpp
     ${AIRPLAY_DIR}/src/airplay_dacp.cpp
+    ${AIRPLAY_DIR}/src/airplay_ptp.cpp
     ${AIRPLAY_DIR}/src/airplay_fairplay.cpp
     ${AIRPLAY_DIR}/src/airplay_hap_crypto.cpp
     ${AIRPLAY_DIR}/src/airplay_key.cpp

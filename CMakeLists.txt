@@ -11,6 +11,7 @@ set(AIRPLAY_SOURCES
     src/airplay_crypto_mbedtls.cpp
     src/airplay_curve25519.cpp
     src/airplay_dacp.cpp
+    src/airplay_ptp.cpp
     src/airplay_fairplay.cpp
     src/airplay_hap_crypto.cpp
     src/airplay_key.cpp

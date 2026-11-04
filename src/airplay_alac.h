@@ -42,6 +42,12 @@ class ALACDecoder {
   /// @param output Buffer for the decoded samples, room for frame_length * num_channels samples.
   /// @return Number of frames decoded, or a negative value if the packet is invalid.
   int32_t decode(const uint8_t *data, size_t length, int16_t *output);
+  /// Whether the last packet was stored uncompressed (escape), as some senders do
+  bool last_uncompressed() const { return this->last_uncompressed_; }
+  /// Predictor order of the first channel of the last compressed packet
+  uint32_t last_predictor_order() const { return this->last_predictor_order_; }
+  /// The decoder's work buffer, e.g. to check which memory it is in
+  const void *work_buffer() const { return this->predictor_.get(); }
 
  protected:
   std::unique_ptr<int32_t[]> predictor_;
@@ -50,6 +56,8 @@ class ALACDecoder {
   uint32_t max_frame_length_{0};
   ALACConfig config_;
   bool configured_{false};
+  bool last_uncompressed_{false};
+  uint32_t last_predictor_order_{0};
 };
 
 }  // namespace airplay

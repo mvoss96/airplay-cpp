@@ -20,6 +20,9 @@
 #   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
+#   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
+#   MA_RESUME=1 (with ALAC=1) also pauses and resumes halfway as Music Assistant does (with a flush); MA_PAUSE=1
+#   pauses for 11 s and resumes further on the timeline, without a flush.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -66,7 +69,15 @@ RECEIVER_PID=$!
 sleep 2
 
 if [ "$SENDER" = buffered ]; then
-  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) \
+  if [ "$ALAC" = 1 ]; then
+    INPUT="reference.pcm --alac"  # Sent as ALAC, which must arrive exactly
+    [ "$PAUSE" = 1 ] || INPUT="$INPUT --paced"  # And timed as Music Assistant does
+    [ "$MA_RESUME" = 1 ] && INPUT="$INPUT --ma-resume"
+    [ "$MA_PAUSE" = 1 ] && INPUT="$INPUT --ma-pause"
+  else
+    INPUT=signal.aac
+  fi
+  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 $INPUT $([ "$PAUSE" = 1 ] && echo --pause) \
     $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
     $([ "$HANDOVER" = 1 ] && echo --handover) $([ "$TAKEOVER" = 1 ] && echo --takeover-and-back) ||
     echo "The sender failed"
@@ -105,8 +116,18 @@ cat receiver.log
 
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
-  grep -q "Stream: AAC, AirPlay 2 buffered" receiver.log
-  python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] || [ "$TAKEOVER" = 1 ] && echo --pause)
+  grep -q "Stream: $([ "$ALAC" = 1 ] && echo ALAC || echo AAC), AirPlay 2 buffered" receiver.log
+  if [ "$TAKEOVER" = 1 ]; then
+    # The test sender reads its event connection but never answers, as Music Assistant
+    grep -q "The sender does not answer on its event connection" receiver.log
+  fi
+  if [ "$MA_RESUME" = 1 ]; then
+    # The audio sent before the flush must not play after the resume: before the resume it is dropped, not late
+    grep "Session ended" receiver.log | awk '{ for (i = 1; i < NF; i++) if ($(i + 1) == "late,") exit !($i < 20) }'
+  fi
+  python3 "$HERE/check_lossy.py" out.pcm reference.pcm \
+    $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] || [ "$TAKEOVER" = 1 ] || [ "$MA_RESUME" = 1 ] || [ "$MA_PAUSE" = 1 ] \
+      && echo --pause)
   exit 0
 fi
 if [ "$SENDER" = pyatv ]; then
@@ -145,9 +166,10 @@ fi
 if [ "$MODE" = posix ]; then
   python3 "$HERE/check.py" out.pcm $FRAMES $CHECK_OPTIONS
 else
-  # The null output counts what it played: the whole stream minus what the sender cut off at the end
+  # The null output counts what it played: the whole stream minus what the sender cut off at the end, plus the
+  # silence that starts the output and lines up the first packet (up to 0.5 s)
   PLAYED=$(sed -n 's/^Session: stopped (\([0-9]*\) frames played)$/\1/p' receiver.log | tail -1)
   echo "played=$PLAYED"
-  test -n "$PLAYED" && test "$PLAYED" -gt $((FRAMES - 8820)) && test "$PLAYED" -lt $((FRAMES + 4410))
+  test -n "$PLAYED" && test "$PLAYED" -gt $((FRAMES - 8820)) && test "$PLAYED" -lt $((FRAMES + 22050))
   echo "INTEROP OK"
 fi

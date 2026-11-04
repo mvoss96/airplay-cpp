@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <random>
@@ -33,6 +35,9 @@ struct Scenario {
   double measure_from_s = 8;         // Errors are measured from this time on, once playback has settled
   double output_start_delay_ms = 0;  // The output plays its first audio this long after it got it (DMA buffers)
   uint32_t report_chunk_frames = 441;
+  // Frames always queued in the output, as ESPHome's I2S speaker keeps its DMA buffers full: with silence when it
+  // runs dry, which nobody counts as written. Reported when they leave it.
+  uint32_t output_pipeline_frames = 0;
   // Limits
   bool expect_synced = true;
   double max_mean_error_ms = 5.0;  // Mean timing error (synchronized only); the servo dead band is 5 ms
@@ -168,8 +173,17 @@ struct Sim : Transport {
     this->output_phase += static_cast<double>(step_us) * 44100e-6 * (1 + this->sc.output_ppm * 1e-6);
     while (this->output_phase >= 1) {
       this->output_phase -= 1;
-      std::pair<int16_t, int16_t> frame;
-      if (!this->sink.play(&frame)) {
+      std::pair<int16_t, int16_t> frame{0, 0};
+      bool real = this->sink.play(&frame);
+      if (this->sc.output_pipeline_frames > 0) {
+        this->pipeline.emplace_back(real ? frame : std::pair<int16_t, int16_t>{0, 0}, real);
+        if (this->pipeline.size() <= this->sc.output_pipeline_frames)
+          continue;
+        frame = this->pipeline.front().first;
+        real = this->pipeline.front().second;
+        this->pipeline.pop_front();
+      }
+      if (!real) {
         if (this->last_heard_rtp != 0 && this->now_us >= this->measure_from_us)
           this->underrun_frames++;
         continue;
@@ -265,7 +279,7 @@ struct Sim : Transport {
         this->measure_from_us = this->now_us + 4000000;
       }
       if (this->now_us >= next_poll) {
-        next_poll = this->now_us + 5000;
+        next_poll = this->now_us + 10000;
         this->receiver.poll(this->now_us);
       }
     }
@@ -314,6 +328,7 @@ struct Sim : Transport {
   double output_phase{0};
   int64_t output_start_us{0};
   uint32_t unreported{0};
+  std::deque<std::pair<std::pair<int16_t, int16_t>, bool>> pipeline;
   int64_t measure_from_us{0};
   uint32_t last_heard_rtp{0};
   uint64_t frames_heard{0};
@@ -341,6 +356,30 @@ int main(int argc, char **argv) {
                        .duration_s = 30,
                        .measure_from_s = 4,
                        .output_start_delay_ms = 20});
+  // An output that takes long to start, e.g. while the main loop of ESPHome is busy decoding cover art
+  scenarios.push_back({.name = "slow output start",
+                       .jitter_ms = 2,
+                       .duration_s = 30,
+                       .output_start_delay_ms = 250,
+                       .max_late_packets = 0});
+  // ESPHome's I2S speaker, which pads its 50 ms of DMA buffers with silence while it runs dry. Measured from the
+  // start, so the silence that lines up the first packet counts.
+  scenarios.push_back({.name = "I2S speaker start",
+                       .jitter_ms = 2,
+                       .duration_s = 30,
+                       .measure_from_s = 0,
+                       .output_start_delay_ms = 50,
+                       .output_pipeline_frames = 2205,
+                       .max_silence_percent = 2.0,
+                       .max_late_packets = 0});
+  // Stalls longer than the output queue run the I2S speaker dry: what follows must still be lined up exactly
+  scenarios.push_back({.name = "I2S speaker runs dry",
+                       .jitter_ms = 2,
+                       .stall_every_s = 15,
+                       .stall_ms = 2600,
+                       .output_pipeline_frames = 2205,
+                       .max_silence_percent = 3.0,
+                       .max_discontinuities = 3});  // The audio missing in each stall
   scenarios.push_back({.name = "5% loss, stalls",
                        .loss = 0.05,
                        .jitter_ms = 4,
@@ -397,6 +436,9 @@ int main(int argc, char **argv) {
                          .max_discontinuities = 50});
   }
   for (const Scenario &scenario : scenarios) {
+    // SYNC_ONLY=<part of a name> runs only the scenarios whose name contains it
+    if (std::getenv("SYNC_ONLY") && std::strstr(scenario.name, std::getenv("SYNC_ONLY")) == nullptr)
+      continue;
     Sim sim(scenario);
     sim.run();
     sim.report_and_check();

@@ -175,6 +175,9 @@ int main(int argc, char **argv) {
   // AIRPLAY2=1 also offers AirPlay 2
   const char *airplay2 = std::getenv("AIRPLAY2");
   config.airplay2 = airplay2 != nullptr && airplay2[0] == '1';
+  // AIRPLAY_PTP=1 also offers PTP timing, which macOS needs; ports 319 and 320 need root on Linux
+  const char *ptp = std::getenv("AIRPLAY_PTP");
+  config.ptp = ptp != nullptr && ptp[0] == '1';
   config.random = [](uint8_t *buffer, size_t length) {
     FILE *random = std::fopen("/dev/urandom", "rb");
     if (random == nullptr || std::fread(buffer, 1, length, random) != length) {

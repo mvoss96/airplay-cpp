@@ -1,10 +1,13 @@
 // base64, DMAP metadata and DACP helpers
 #include "airplay_dacp.h"
+#include "airplay_ptp.h"
 #include "airplay_util.h"
 #include "test_common.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 using namespace airplay;
 
@@ -125,10 +128,197 @@ static void test_md5() {
   }
 }
 
+/// A PTP message: header with type, clock, sequence and flags, then a timestamp
+static std::vector<uint8_t> ptp_message(uint8_t type, uint64_t clock, uint16_t sequence, bool two_step,
+                                        int64_t timestamp_ns, size_t length = 44) {
+  std::vector<uint8_t> m(length, 0);
+  m[0] = type;
+  m[1] = 2;
+  m[2] = static_cast<uint8_t>(length >> 8);
+  m[3] = static_cast<uint8_t>(length);
+  m[6] = two_step ? 0x02 : 0x00;
+  for (int i = 0; i < 8; i++)
+    m[20 + i] = static_cast<uint8_t>(clock >> (56 - 8 * i));
+  m[30] = static_cast<uint8_t>(sequence >> 8);
+  m[31] = static_cast<uint8_t>(sequence);
+  const auto seconds = static_cast<uint64_t>(timestamp_ns / 1000000000);
+  const auto nanoseconds = static_cast<uint32_t>(timestamp_ns % 1000000000);
+  for (int i = 0; i < 6; i++)
+    m[34 + i] = static_cast<uint8_t>(seconds >> (40 - 8 * i));
+  for (int i = 0; i < 4; i++)
+    m[40 + i] = static_cast<uint8_t>(nanoseconds >> (24 - 8 * i));
+  return m;
+}
+
+static void test_ptp() {
+  using airplay::PtpClocks;
+  PtpClocks clocks;
+  const uint64_t clock = 0x1122334455667788ULL;
+  const int64_t offset = 5000LL * 1000000000LL + 123456789;  // The master's time minus local time
+  int64_t found = 0;
+  CHECK(!clocks.offset_ns(clock, 1000000, &found));
+  // Two-step Sync messages every 125 ms; the delay varies from 1 to 4 ms, the least is 1 ms
+  int64_t now_us = 1000000;
+  for (uint16_t seq = 0; seq < 20; seq++) {
+    const int64_t sent_ns = now_us * 1000 + offset;
+    const int64_t delay_us = 1000 + (seq % 4) * 1000;
+    const int64_t arrival_us = now_us + delay_us;
+    clocks.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0100000a, arrival_us);
+    clocks.handle(true, ptp_message(0x8, clock, seq, false, sent_ns).data(), 44, 0x0100000a, arrival_us + 200);
+    // A Follow_Up for another Sync is ignored
+    clocks.handle(true, ptp_message(0x8, clock, static_cast<uint16_t>(seq + 100), false, 0).data(), 44, 0x0100000a,
+                  arrival_us + 300);
+    now_us += 125000;
+  }
+  CHECK(clocks.offset_ns(clock, now_us, &found));
+  // Less the shortest delay, which is not measured, and what the clocks may have drifted since that sample
+  CHECK(found <= offset - 1000000 && found > offset - 1100000);
+  CHECK(clocks.grandmaster() == clock);
+  CHECK(clocks.offset_ns(0, now_us, &found));  // 0 is the grandmaster
+  // An Announce names another grandmaster
+  std::vector<uint8_t> announce = ptp_message(0xb, clock, 1, false, 0, 64);
+  for (int i = 0; i < 8; i++)
+    announce[53 + i] = static_cast<uint8_t>(0xaabbccddeeff0011ULL >> (56 - 8 * i));
+  clocks.handle(true, announce.data(), announce.size(), 0x0100000a, now_us);
+  CHECK(clocks.grandmaster() == 0xaabbccddeeff0011ULL);
+  // Unknown or silent clocks have no offset
+  CHECK(!clocks.offset_ns(0x99, now_us, &found));
+  CHECK(!clocks.offset_ns(clock, now_us + 10000000, &found));
+  // Taking part: an Announce to the grandmaster's address every 2 s, passing on its details one step further
+  PtpClocks active;
+  const uint8_t mac[6] = {0x3c, 0x84, 0x27, 0x14, 0x86, 0x94};
+  active.set_identity(mac);
+  uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
+  uint32_t to = 0;
+  bool general = false;
+  CHECK(active.next_message(0, message, 1000000, &to, &general) == 0);  // No grandmaster yet
+  now_us = 3000000;
+  for (uint16_t seq = 0; seq < 8; seq++) {
+    active.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0200000a, now_us + 1000);
+    active.handle(true, ptp_message(0x8, clock, seq, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
+                  now_us + 1100);
+    now_us += 125000;
+  }
+  CHECK(active.next_message(0, message, now_us, &to, &general) == 64 && general && to == 0x0200000a);
+  CHECK((message[0] & 0x0f) == 0xb && message[47] == 255 && message[48] == 255);
+  CHECK(message[20] == 0x3c && message[23] == 0xff && message[24] == 0xfe && message[27] == 0x94);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000)) < 100000);
+  // Then a Delay_Req; the master's answer gives the delay (1 ms each way), which the offset then includes
+  CHECK(active.next_message(0, message, now_us, &to, &general) == 44 && !general && to == 0x0200000a);
+  CHECK((message[0] & 0x0f) == 0x1);
+  std::vector<uint8_t> answer = ptp_message(0x9, clock, static_cast<uint16_t>(message[30] << 8 | message[31]), false,
+                                            now_us * 1000 + offset + 1000000, 54);
+  std::copy(message + 20, message + 30, answer.begin() + 44);  // To the port that asked
+  active.handle(true, answer.data(), answer.size(), 0x0200000a, now_us + 2000);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
+  CHECK(active.next_message(0, message, now_us + 500000, &to, &general) == 0);  // Not due yet
+  CHECK(active.next_message(0, message, now_us + 1000000, &to, &general) == 44);
+  CHECK(active.next_message(0, message, now_us + 2000000, &to, &general) == 64);
+  // A master that answers none (macOS) gets no more after five
+  PtpClocks silent;
+  silent.set_identity(mac);
+  int requests = 0;
+  for (uint16_t seq = 0; seq < 160; seq++) {  // 20 s
+    now_us += 125000;
+    silent.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0200000a, now_us + 1000);
+    silent.handle(true, ptp_message(0x8, clock, seq, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
+                  now_us + 1100);
+    if (silent.next_message(0, message, now_us, &to, &general) == 44)
+      requests++;
+  }
+  CHECK(requests == 5);
+
+  // Samples taken late for 3 s while the receiver is busy (50 to 300 ms) barely move the offset; a clock that was
+  // set back by a second is followed after 64 samples
+  PtpClocks busy;
+  now_us = 10000000;
+  uint16_t sequence = 0;
+  auto sync_at = [&](int64_t delay_us, int64_t clock_offset) {
+    busy.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + delay_us);
+    busy.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + clock_offset).data(), 44, 1,
+                now_us + delay_us);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    sync_at(1000, offset);
+  for (int i = 0; i < 24; i++)
+    sync_at(50000 + (i % 6) * 50000, offset);
+  CHECK(busy.offset_ns(clock, now_us, &found) && found <= offset - 1000000 && found > offset - 1400000);
+  for (int i = 0; i < 64; i++)
+    sync_at(1000, offset - 1000000000LL);
+  CHECK(busy.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000000LL + -1000000)) < 100000);
+
+  // A single sample 100 ms too high (a wrong correction) is ignored; three in a row raise the estimate
+  PtpClocks outlier;
+  now_us = 20000000;
+  auto outlier_sync = [&](int64_t error_ns) {
+    outlier.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + 1000);
+    outlier.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + offset + error_ns).data(), 44, 1,
+                   now_us + 1000);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    outlier_sync(0);
+  outlier_sync(100000000);
+  outlier_sync(0);
+  CHECK(outlier.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000)) < 100000);
+  for (int i = 0; i < 3; i++)
+    outlier_sync(10000000);
+  CHECK(outlier.offset_ns(clock, now_us, &found) && std::llabs(found - (offset + 9000000)) < 100000);
+
+  // Two grandmasters at once (an iPhone and a Mac): messages go to the clock the session follows, with its details
+  PtpClocks two;
+  two.set_identity(mac);
+  const uint64_t phone = 0x10da63d7b20a0008ULL;
+  const uint64_t laptop = 0x9e74f47cbea60008ULL;
+  now_us = 30000000;
+  for (uint16_t seq = 0; seq < 8; seq++) {
+    for (const auto &[id, address] : {std::pair{phone, 0x5302a8c0u}, std::pair{laptop, 0x9c02a8c0u}}) {
+      std::vector<uint8_t> announce = ptp_message(0xb, id, seq, false, 0, 64);
+      announce[47] = id == phone ? 250 : 251;
+      for (int i = 0; i < 8; i++)
+        announce[53 + i] = static_cast<uint8_t>(id >> (56 - 8 * i));
+      two.handle(true, announce.data(), announce.size(), address, now_us);
+      two.handle(false, ptp_message(0x0, id, seq, true, 0).data(), 44, address, now_us + 1000);
+      two.handle(true, ptp_message(0x8, id, seq, false, now_us * 1000 + offset).data(), 44, address, now_us + 1000);
+    }
+    now_us += 125000;
+  }
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 64 && to == 0x5302a8c0u);
+  CHECK(message[47] == 250 && message[53] == 0x10 && message[62] == 1);  // The phone's details, one step more
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 44 && to == 0x5302a8c0u);  // Its Delay_Req
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 0);                        // Nothing else to send
+
+  // A sender that slept comes back with its clock 332 s behind: three samples confirm the jump
+  PtpClocks sleeper;
+  now_us = 40000000;
+  auto sleeper_sync = [&](int64_t clock_offset) {
+    sleeper.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + 1000);
+    sleeper.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + clock_offset).data(), 44, 1,
+                   now_us + 1000);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    sleeper_sync(offset);
+  for (int i = 0; i < 3; i++)
+    sleeper_sync(offset - 332000000000LL);
+  CHECK(sleeper.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 332000000000LL - 1000000)) < 100000);
+
+  // One-step Sync carries its own time
+  PtpClocks one_step;
+  for (uint16_t seq = 0; seq < 4; seq++)
+    one_step.handle(false, ptp_message(0x0, clock, seq, false, 2000000000LL + offset).data(), 44, 1, 2000000 + 500);
+  CHECK(one_step.offset_ns(clock, 2000000, &found) && found == offset - 500000);
+}
+
 int main() {
   test_base64();
   test_md5();
   test_dmap();
   test_dacp();
+  test_ptp();
   return finish("test_util");
 }

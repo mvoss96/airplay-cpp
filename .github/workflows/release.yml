@@ -1,10 +1,16 @@
 name: Release
 
-# On every version tag: verify the tag matches the manifests and has a CHANGELOG.md section, then publish a
-# GitHub release with that section as its notes.
+# On a version tag, or started by hand with a version (which then creates the tag on the current main): verify the
+# version matches the manifests and has a CHANGELOG.md section, then publish a GitHub release with that section as
+# its notes.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag, e.g. v0.2.0
+        required: true
 
 permissions:
   contents: write
@@ -12,11 +18,14 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
-      - name: Verify tag matches manifest versions
+      - name: Verify the version matches the manifests
         run: |
-          TAG=${GITHUB_REF_NAME#v}
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Not a version: $VERSION"; exit 1; }
+          TAG=${VERSION#v}
           PROPS=$(grep '^version=' library.properties | cut -d= -f2)
           JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
           IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
@@ -26,13 +35,13 @@ jobs:
           test "$TAG" = "$IDF"
       - name: Extract release notes from CHANGELOG.md
         run: |
-          awk -v tag="$GITHUB_REF_NAME" '
+          awk -v tag="$VERSION" '
             !found && $0 ~ "^## "tag"( |$)" { found=1; next }
             found && /^## / { exit }
             found { print }
             END { if (!found) exit 1 }
           ' CHANGELOG.md > release-notes.md || {
-            echo "::error::CHANGELOG.md has no section '## $GITHUB_REF_NAME'"
+            echo "::error::CHANGELOG.md has no section '## $VERSION'"
             exit 1
           }
           cat release-notes.md
@@ -40,8 +49,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --title "$VERSION" --notes-file release-notes.md
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes-file release-notes.md
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file release-notes.md
           fi

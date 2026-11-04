@@ -1,5 +1,7 @@
 #include "airplay_hap_crypto.h"
 
+#include "airplay_hot.h"
+
 #include <cstring>
 
 namespace airplay {
@@ -195,47 +197,76 @@ void hkdf_sha512_key(const char *salt, const char *info, const uint8_t *secret, 
 
 // ===== ChaCha20 =====
 
-static inline uint32_t load_le32(const uint8_t *p) {
+AIRPLAY_INLINE uint32_t load_le32(const uint8_t *p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
-static inline void store_le32(uint8_t *p, uint32_t value) {
+AIRPLAY_INLINE void store_le32(uint8_t *p, uint32_t value) {
   p[0] = static_cast<uint8_t>(value);
   p[1] = static_cast<uint8_t>(value >> 8);
   p[2] = static_cast<uint8_t>(value >> 16);
   p[3] = static_cast<uint8_t>(value >> 24);
 }
 
-static inline uint32_t rotl32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+static constexpr bool LITTLE_ENDIAN_CPU = true;
+#else
+static constexpr bool LITTLE_ENDIAN_CPU = false;
+#endif
 
-static inline void quarter_round(uint32_t &a, uint32_t &b, uint32_t &c, uint32_t &d) {
-  a += b;
-  d = rotl32(d ^ a, 16);
-  c += d;
-  b = rotl32(b ^ c, 12);
-  a += b;
-  d = rotl32(d ^ a, 8);
-  c += d;
-  b = rotl32(b ^ c, 7);
-}
+AIRPLAY_INLINE bool aligned32(const void *p) { return (reinterpret_cast<uintptr_t>(p) & 3) == 0; }
 
-static void chacha20_block(const uint32_t *input, uint8_t *output) {
-  uint32_t x[16];
-  std::memcpy(x, input, sizeof(x));
-  for (int i = 0; i < 10; i++) {
-    quarter_round(x[0], x[4], x[8], x[12]);
-    quarter_round(x[1], x[5], x[9], x[13]);
-    quarter_round(x[2], x[6], x[10], x[14]);
-    quarter_round(x[3], x[7], x[11], x[15]);
-    quarter_round(x[0], x[5], x[10], x[15]);
-    quarter_round(x[1], x[6], x[11], x[12]);
-    quarter_round(x[2], x[7], x[8], x[13]);
-    quarter_round(x[3], x[4], x[9], x[14]);
+/// A little-endian word, loaded whole when the CPU and the address allow it
+AIRPLAY_INLINE uint32_t load_le32_fast(const uint8_t *p) {
+  if (LITTLE_ENDIAN_CPU && aligned32(p)) {
+    uint32_t value;
+    std::memcpy(&value, __builtin_assume_aligned(p, 4), sizeof(value));
+    return value;
   }
-  for (int i = 0; i < 16; i++)
-    store_le32(output + 4 * i, x[i] + input[i]);
+  return load_le32(p);
 }
+
+AIRPLAY_INLINE uint32_t rotl32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+
+#define CHACHA_QUARTER_ROUND(a, b, c, d) \
+  a += b; \
+  d = rotl32(d ^ a, 16); \
+  c += d; \
+  b = rotl32(b ^ c, 12); \
+  a += b; \
+  d = rotl32(d ^ a, 8); \
+  c += d; \
+  b = rotl32(b ^ c, 7);
+
+/// One block of key stream as 16 words; as bytes in memory they are little endian on a little-endian CPU
+AIRPLAY_HOT static void chacha20_block(const uint32_t *input, uint32_t *output) {
+  // Locals rather than an array, so that the compiler can keep them in registers
+  uint32_t x0 = input[0], x1 = input[1], x2 = input[2], x3 = input[3], x4 = input[4], x5 = input[5], x6 = input[6],
+           x7 = input[7], x8 = input[8], x9 = input[9], x10 = input[10], x11 = input[11], x12 = input[12],
+           x13 = input[13], x14 = input[14], x15 = input[15];
+  for (int i = 0; i < 10; i++) {
+    CHACHA_QUARTER_ROUND(x0, x4, x8, x12)
+    CHACHA_QUARTER_ROUND(x1, x5, x9, x13)
+    CHACHA_QUARTER_ROUND(x2, x6, x10, x14)
+    CHACHA_QUARTER_ROUND(x3, x7, x11, x15)
+    CHACHA_QUARTER_ROUND(x0, x5, x10, x15)
+    CHACHA_QUARTER_ROUND(x1, x6, x11, x12)
+    CHACHA_QUARTER_ROUND(x2, x7, x8, x13)
+    CHACHA_QUARTER_ROUND(x3, x4, x9, x14)
+  }
+  const uint32_t x[16] = {x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15};
+  for (int i = 0; i < 16; i++) {
+    const uint32_t word = x[i] + input[i];
+    if (LITTLE_ENDIAN_CPU) {
+      output[i] = word;
+    } else {
+      store_le32(reinterpret_cast<uint8_t *>(output + i), word);
+    }
+  }
+}
+
+#undef CHACHA_QUARTER_ROUND
 
 static void chacha20_init(uint32_t *state, const uint8_t *key, const uint8_t *nonce, uint32_t counter) {
   state[0] = 0x61707865;  // "expand 32-byte k"
@@ -249,14 +280,28 @@ static void chacha20_init(uint32_t *state, const uint8_t *key, const uint8_t *no
     state[13 + i] = load_le32(nonce + 4 * i);
 }
 
-static void chacha20_xor(uint32_t *state, const uint8_t *input, uint8_t *output, size_t length) {
-  uint8_t stream[64];
+AIRPLAY_HOT static void chacha20_xor(uint32_t *state, const uint8_t *input, uint8_t *output, size_t length) {
+  uint32_t stream[16];
+  const auto *stream_bytes = reinterpret_cast<const uint8_t *>(stream);
+  // Whole words on a little-endian CPU when both buffers are aligned, as the audio of a packet is
+  const bool by_word = LITTLE_ENDIAN_CPU && aligned32(input) && aligned32(output);
   while (length > 0) {
     chacha20_block(state, stream);
     state[12]++;
     const size_t take = length < sizeof(stream) ? length : sizeof(stream);
-    for (size_t i = 0; i < take; i++)
-      output[i] = input[i] ^ stream[i];
+    size_t i = 0;
+    if (by_word) {
+      const auto *in = static_cast<const uint8_t *>(__builtin_assume_aligned(input, 4));
+      auto *out = static_cast<uint8_t *>(__builtin_assume_aligned(output, 4));
+      for (; i + 4 <= take; i += 4) {
+        uint32_t word;
+        std::memcpy(&word, in + i, sizeof(word));
+        word ^= stream[i / 4];
+        std::memcpy(out + i, &word, sizeof(word));
+      }
+    }
+    for (; i < take; i++)
+      output[i] = input[i] ^ stream_bytes[i];
     input += take;
     output += take;
     length -= take;
@@ -344,62 +389,69 @@ class Poly1305 {
   }
 
  private:
-  void block_(const uint8_t *m) {
-    const uint32_t r0 = this->r_[0], r1 = this->r_[1], r2 = this->r_[2], r3 = this->r_[3], r4 = this->r_[4];
-    const uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
-    uint32_t h0 = this->h_[0] + (load_le32(m) & 0x3ffffff);
-    uint32_t h1 = this->h_[1] + ((load_le32(m + 3) >> 2) & 0x3ffffff);
-    uint32_t h2 = this->h_[2] + ((load_le32(m + 6) >> 4) & 0x3ffffff);
-    uint32_t h3 = this->h_[3] + ((load_le32(m + 9) >> 6) & 0x3ffffff);
-    uint32_t h4 = this->h_[4] + ((load_le32(m + 12) >> 8) | (1UL << 24));
-
-    using u64 = uint64_t;
-    const u64 d0 = (u64) h0 * r0 + (u64) h1 * s4 + (u64) h2 * s3 + (u64) h3 * s2 + (u64) h4 * s1;
-    u64 d1 = (u64) h0 * r1 + (u64) h1 * r0 + (u64) h2 * s4 + (u64) h3 * s3 + (u64) h4 * s2;
-    u64 d2 = (u64) h0 * r2 + (u64) h1 * r1 + (u64) h2 * r0 + (u64) h3 * s4 + (u64) h4 * s3;
-    u64 d3 = (u64) h0 * r3 + (u64) h1 * r2 + (u64) h2 * r1 + (u64) h3 * r0 + (u64) h4 * s4;
-    u64 d4 = (u64) h0 * r4 + (u64) h1 * r3 + (u64) h2 * r2 + (u64) h3 * r1 + (u64) h4 * r0;
-
-    uint32_t c = static_cast<uint32_t>(d0 >> 26);
-    h0 = static_cast<uint32_t>(d0) & 0x3ffffff;
-    d1 += c;
-    c = static_cast<uint32_t>(d1 >> 26);
-    h1 = static_cast<uint32_t>(d1) & 0x3ffffff;
-    d2 += c;
-    c = static_cast<uint32_t>(d2 >> 26);
-    h2 = static_cast<uint32_t>(d2) & 0x3ffffff;
-    d3 += c;
-    c = static_cast<uint32_t>(d3 >> 26);
-    h3 = static_cast<uint32_t>(d3) & 0x3ffffff;
-    d4 += c;
-    c = static_cast<uint32_t>(d4 >> 26);
-    h4 = static_cast<uint32_t>(d4) & 0x3ffffff;
-    h0 += c * 5;
-    c = h0 >> 26;
-    h0 &= 0x3ffffff;
-    h1 += c;
-
-    this->h_[0] = h0;
-    this->h_[1] = h1;
-    this->h_[2] = h2;
-    this->h_[3] = h3;
-    this->h_[4] = h4;
-  }
+  // Defined outside the class: a function defined in it is inline, and IRAM_ATTR on it would leave its literals in
+  // flash, out of reach
+  void block_(const uint8_t *m);
 
   uint32_t r_[5];
   uint32_t h_[5]{};
   uint32_t pad_[4];
 };
 
+AIRPLAY_HOT void Poly1305::block_(const uint8_t *m) {
+  const uint32_t r0 = this->r_[0], r1 = this->r_[1], r2 = this->r_[2], r3 = this->r_[3], r4 = this->r_[4];
+  const uint32_t s1 = r1 * 5, s2 = r2 * 5, s3 = r3 * 5, s4 = r4 * 5;
+  // The 26-bit limbs of the block, from its four words
+  const uint32_t t0 = load_le32_fast(m), t1 = load_le32_fast(m + 4), t2 = load_le32_fast(m + 8),
+                 t3 = load_le32_fast(m + 12);
+  uint32_t h0 = this->h_[0] + (t0 & 0x3ffffff);
+  uint32_t h1 = this->h_[1] + (((t0 >> 26) | (t1 << 6)) & 0x3ffffff);
+  uint32_t h2 = this->h_[2] + (((t1 >> 20) | (t2 << 12)) & 0x3ffffff);
+  uint32_t h3 = this->h_[3] + (((t2 >> 14) | (t3 << 18)) & 0x3ffffff);
+  uint32_t h4 = this->h_[4] + ((t3 >> 8) | (1UL << 24));
+
+  using u64 = uint64_t;
+  const u64 d0 = (u64) h0 * r0 + (u64) h1 * s4 + (u64) h2 * s3 + (u64) h3 * s2 + (u64) h4 * s1;
+  u64 d1 = (u64) h0 * r1 + (u64) h1 * r0 + (u64) h2 * s4 + (u64) h3 * s3 + (u64) h4 * s2;
+  u64 d2 = (u64) h0 * r2 + (u64) h1 * r1 + (u64) h2 * r0 + (u64) h3 * s4 + (u64) h4 * s3;
+  u64 d3 = (u64) h0 * r3 + (u64) h1 * r2 + (u64) h2 * r1 + (u64) h3 * r0 + (u64) h4 * s4;
+  u64 d4 = (u64) h0 * r4 + (u64) h1 * r3 + (u64) h2 * r2 + (u64) h3 * r1 + (u64) h4 * r0;
+
+  uint32_t c = static_cast<uint32_t>(d0 >> 26);
+  h0 = static_cast<uint32_t>(d0) & 0x3ffffff;
+  d1 += c;
+  c = static_cast<uint32_t>(d1 >> 26);
+  h1 = static_cast<uint32_t>(d1) & 0x3ffffff;
+  d2 += c;
+  c = static_cast<uint32_t>(d2 >> 26);
+  h2 = static_cast<uint32_t>(d2) & 0x3ffffff;
+  d3 += c;
+  c = static_cast<uint32_t>(d3 >> 26);
+  h3 = static_cast<uint32_t>(d3) & 0x3ffffff;
+  d4 += c;
+  c = static_cast<uint32_t>(d4 >> 26);
+  h4 = static_cast<uint32_t>(d4) & 0x3ffffff;
+  h0 += c * 5;
+  c = h0 >> 26;
+  h0 &= 0x3ffffff;
+  h1 += c;
+
+  this->h_[0] = h0;
+  this->h_[1] = h1;
+  this->h_[2] = h2;
+  this->h_[3] = h3;
+  this->h_[4] = h4;
+}
+
 // ===== ChaCha20-Poly1305 =====
 
 static void aead_tag(uint32_t *state, const uint8_t *aad, size_t aad_length, const uint8_t *ciphertext, size_t length,
                      uint8_t *tag) {
   // The Poly1305 key is the first half of block 0
-  uint8_t block[64];
+  uint32_t block[16];
   state[12] = 0;
   chacha20_block(state, block);
-  Poly1305 mac(block);
+  Poly1305 mac(reinterpret_cast<const uint8_t *>(block));
   mac.update_padded(aad, aad_length);
   mac.update_padded(ciphertext, length);
   uint8_t lengths[16];

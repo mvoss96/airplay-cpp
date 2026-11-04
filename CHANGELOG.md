@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.2.2
+
+- Music Assistant: pause and resume play again (the audio held from before the pause no longer stops playback), and
+  a flush (start, seek) drops the audio sent before it (Music Assistant counts packets in 16 bits)
+- PTP: Delay_Req again, for masters that answer them (Music Assistant): the network delay is measured and added to
+  the clock offset; masters that answer none (macOS) get no more after five
+- The servo corrects timing errors from 2 ms on (was 5 ms), down to 0.5 ms
+
+## v0.2.1
+
+- Buffered ALAC, which Music Assistant sends when the receiver offers PTP: with v0.2.0 it could not play at all
+- Buffered audio goes on decoding after playback filled in for audio that came late; before, decoding could stop
+- Buffered audio is decoded by the amount of audio per poll, not by the number of packets
+- A sender that does not answer on its event connection gets nothing more there after 2 s
+- PTP: waits for a clock that went silent or jumped (a sender that slept) instead of playing on a wrong offset
+
+## v0.2.0
+
+- PTP timing for AirPlay 2 (`ReceiverConfig::ptp`, `Transport::open_ptp()`), which macOS needs: the receiver
+  follows the sender's PTP clock and takes part in PTP as a clock that never becomes master
+- Buffered audio: overdue audio is dropped without decoding, and decoding speeds up while the jitter buffer is low
+- The first packets after a start are lined up exactly when they are late
+- Synchronized start waits until the output plays, so that an output that starts slowly does not play late
+- `ReceiverConfig::output_queue_ms`; `Receiver::take_playback_timing()`
+- Remote control details are reported in every session; silence does not keep a held sender playing
+- Faster ALAC decoding and ChaCha20-Poly1305 on the ESP32 (internal RAM, no calls in the inner loops)
+
 ## v0.1.0
 
 First release.

@@ -4,6 +4,10 @@
 #include "airplay_srp.h"
 #include "airplay_util.h"
 
+#if defined(ESP_PLATFORM)
+#include <esp_memory_utils.h>
+#endif
+
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -37,11 +41,16 @@ static constexpr size_t RETRANSMIT_HEADER_SIZE = 4;
 static constexpr size_t TIMING_PACKET_SIZE = 32;
 static constexpr size_t SYNC_PACKET_SIZE = 20;
 static constexpr uint32_t MAX_CHUNKS_PER_STEP = 8;
+/// Packets handled per poll at most, also those that are only dropped
+static constexpr uint32_t MAX_STEPS_PER_POLL = 256;
 
 // RTP payload types (second header byte without the marker bit)
 static constexpr uint8_t PAYLOAD_TIMING_REQUEST = 0x52;
 static constexpr uint8_t PAYLOAD_TIMING_REPLY = 0x53;
 static constexpr uint8_t PAYLOAD_SYNC = 0x54;
+/// Sync packet of a sender that times its audio with PTP: a frame, its PTP time and the clock
+static constexpr uint8_t PAYLOAD_PTP_SYNC = 0x57;
+static constexpr size_t PTP_SYNC_PACKET_SIZE = 28;
 static constexpr uint8_t PAYLOAD_RESEND_REQUEST = 0x55;
 static constexpr uint8_t PAYLOAD_RETRANSMIT = 0x56;
 static constexpr uint8_t PAYLOAD_AUDIO = 0x60;
@@ -65,11 +74,18 @@ static constexpr uint32_t MAX_RESEND_RANGES = 4;
 // Synchronized playback
 /// Audio is handed to the sink at most this far ahead, so that a pause or seek takes effect quickly. Enough to ride
 /// out the driving thread being held up for a while, e.g. 200 ms on an ESP32 while its display redraws.
-static constexpr int64_t MAX_SPEAKER_QUEUE_US = 250000;
 /// A packet this far off its due time means that the sender's timeline does not fit its clock at all
 static constexpr int64_t MAX_TIMELINE_ERROR_US = 10000000;
 /// Silence to line up the first packet is only written once it is due within this window
 static constexpr int64_t START_WINDOW_US = 100000;
+/// An output that has not played anything yet may take a while to start (an ESPHome speaker starts its task first,
+/// and its main loop may be busy). It is started with a little silence this long before the first packet is due,
+/// and the audio is lined up once it reports what it played.
+static constexpr int64_t OUTPUT_START_LEAD_US = 500000;
+/// An output whose last report is this much older than its queued audio lasts has run dry
+static constexpr int64_t DRY_MARGIN_US = 20000;
+/// More than an output plays before it reports (its DMA buffers), and well within the lead
+static constexpr uint32_t OUTPUT_START_FRAMES = SAMPLE_RATE / 10;
 /// Packets later than this are dropped; packets earlier than this are lined up with silence
 static constexpr int64_t EARLY_LATE_THRESHOLD_US = 50000;
 /// A missing packet is replaced by silence once it is due within this time
@@ -85,8 +101,8 @@ static constexpr uint32_t PLAYED_REPORT_TIMEOUT_MS = 1000;
 // at the quietest point of a packet when the filtered timing error leaves a dead band
 static constexpr int32_t SERVO_FILTER_DIV = 16;
 static constexpr int32_t SERVO_INNOVATION_CLAMP_US = 1500;
-static constexpr int32_t SERVO_ENGAGE_US = 5000;
-static constexpr int32_t SERVO_DISENGAGE_US = 1500;
+static constexpr int32_t SERVO_ENGAGE_US = 2000;
+static constexpr int32_t SERVO_DISENGAGE_US = 500;
 static constexpr uint32_t SERVO_TRIM_INTERVAL = 4;
 static constexpr int32_t SERVO_FAST_US = 5000;
 /// Above SERVO_LARGE_US, one frame per SERVO_FAST_FRAME_US of error is dropped or repeated in each packet, up to
@@ -114,6 +130,9 @@ static constexpr int32_t FILL_SMOOTHING_SHIFT = 8;
 static constexpr uint32_t OUTPUT_RESTART_SETTLE_MS = 20;
 /// The session shows as paused when a playing sender sends no audio for this long
 static constexpr uint32_t SENDER_IDLE_MS = 3000;
+/// Payload of an audio packet that holds only silence: compressed ALAC silence of a packet is 32 bytes, and even
+/// the quietest audio takes a few hundred
+static constexpr size_t SILENT_PACKET_MAX_BYTES = 64;
 /// The buffer for buffered audio holds at least this much, so that pausing the connection leaves room
 static constexpr size_t MIN_BUFFERED_AUDIO_BYTES = 32 * 1024;
 /// Statistics are logged at debug level this often during playback
@@ -135,6 +154,10 @@ static inline uint32_t to_ms(int64_t now_us) { return static_cast<uint32_t>(now_
 
 /// Some timestamps use 0 for "not set"
 static inline uint32_t nonzero_ms(uint32_t ms) { return ms == 0 ? 1 : ms; }
+/// Adds a measured duration; nothing is measured without ReceiverConfig::clock_us, then both ends are 0
+static inline void add_us(std::atomic<uint32_t> &total, int64_t took_us) {
+  total.fetch_add(static_cast<uint32_t>(took_us), std::memory_order_relaxed);
+}
 
 /// Local time on the NTP time scale, in nanoseconds. Only offsets matter, so the caller's clock is used.
 static inline int64_t local_ntp_ns(int64_t now_us) { return now_us * 1000LL + NTP_UNIX_OFFSET_NS; }
@@ -237,8 +260,10 @@ Receiver::~Receiver() {
   this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
   this->free_(this->slots_);
-  this->free_(this->packet_buffer_);
-  this->free_(this->output_buffer_);
+  std::free(this->benchmark_input_);
+  std::free(this->benchmark_output_);
+  std::free(this->packet_buffer_);
+  std::free(this->output_buffer_);
   this->free_(this->rtsp_buffers_);
 }
 
@@ -263,6 +288,10 @@ bool Receiver::begin() {
     AIRPLAY_LOGE("Failed to allocate the decoder");
     return false;
   }
+  if (this->config_.clock_us != nullptr) {
+    this->benchmark_input_ = static_cast<uint8_t *>(std::malloc(PACKET_BUFFER_SIZE));
+    this->benchmark_output_ = static_cast<int16_t *>(std::malloc(FRAMES_PER_PACKET * BYTES_PER_FRAME));
+  }
 
   // Synchronized playback holds the sender's whole latency (about 2.25 s) in this buffer. Unsynchronized
   // playback fills three quarters of it, up to 500 ms, before it starts.
@@ -271,10 +300,12 @@ bool Receiver::begin() {
   this->fill_target_frames_ = std::min(MAX_FILL_TARGET_FRAMES, buffer_frames * 3 / 4);
 
   this->slots_ = static_cast<PacketSlot *>(this->allocate_(this->slot_count_ * sizeof(PacketSlot)));
-  this->packet_buffer_ = static_cast<uint8_t *>(this->allocate_(PACKET_BUFFER_SIZE));
-  // One spare frame, used when a frame is repeated to correct clock drift
+  // Small and touched for every packet, so with malloc, which keeps them in internal RAM on the ESP32: under load,
+  // decrypting and copying took about twice as long in external RAM
+  this->packet_buffer_ = static_cast<uint8_t *>(std::malloc(PACKET_BUFFER_SIZE));
+  // Room to repeat frames that correct clock drift
   this->output_buffer_ =
-      static_cast<int16_t *>(this->allocate_((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
+      static_cast<int16_t *>(std::malloc((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
   // One extra byte per connection so that headers and body can be null terminated in place. The extra headers of a
   // response follow; kept off the stack, because pairing needs much of it.
   this->rtsp_buffers_ =
@@ -283,8 +314,8 @@ bool Receiver::begin() {
       this->rtsp_buffers_ == nullptr) {
     AIRPLAY_LOGE("Failed to allocate buffers");
     this->free_(this->slots_);
-    this->free_(this->packet_buffer_);
-    this->free_(this->output_buffer_);
+    std::free(this->packet_buffer_);
+    std::free(this->output_buffer_);
     this->free_(this->rtsp_buffers_);
     this->slots_ = nullptr;
     this->packet_buffer_ = nullptr;
@@ -318,7 +349,8 @@ bool Receiver::begin() {
         this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
     }
   }
-  if (this->airplay2_ && this->config_.aac_decoder != nullptr) {
+  // Buffered audio: AAC from iOS (with an AAC decoder), ALAC from Music Assistant when PTP is offered
+  if (this->airplay2_) {
     const size_t bytes = std::max<size_t>(this->config_.buffered_audio_bytes, MIN_BUFFERED_AUDIO_BYTES);
     this->buffered_storage_ = static_cast<uint8_t *>(this->allocate_(bytes));
     this->aac_samples_ =
@@ -333,8 +365,19 @@ bool Receiver::begin() {
       this->buffered_queue_.init(this->buffered_storage_, bytes);
     }
   }
+  if (this->airplay2_ && this->config_.ptp) {
+    this->ptp_open_ = this->transport_.open_ptp();
+    this->ptp_clocks_.set_identity(this->config_.mac);
+    if (!this->ptp_open_)
+      AIRPLAY_LOGW("PTP is not available; senders that need it (macOS) are turned down");
+  }
   AIRPLAY_LOGD("Buffer of %" PRIu32 " packets", this->slot_count_);
   return true;
+}
+
+void Receiver::ptp_packet(bool general, const uint8_t *data, size_t length, uint32_t from_address, int64_t now_us) {
+  if (this->ptp_open_)
+    this->ptp_clocks_.handle(general, data, length, from_address, now_us);
 }
 
 size_t Receiver::service_instance_name(char *buffer, size_t size) const {
@@ -372,6 +415,10 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.encrypted = false;
   c.encrypt_after_response = false;
   c.event_channel = false;
+  c.event_requests = 0;
+  c.event_answers = 0;
+  c.event_first_request_ms = 0;
+  c.event_silent = false;
   c.audio_data = false;
   c.session_pending = false;
   c.pending_recording = false;
@@ -423,6 +470,8 @@ void Receiver::connection_closed(uint8_t connection) {
                      : connection == this->session_owner_ ? "playing sender"
                                                           : "other";
   AIRPLAY_LOGD("Connection closed (%u.%u.%u.%u, %s)", ip[0], ip[1], ip[2], ip[3], kind);
+  if (c.event_channel && c.event_requests > 0)
+    AIRPLAY_LOGD("Event connection: %u requests sent, %u answers", c.event_requests, c.event_answers);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->verify_connection_)
@@ -462,8 +511,14 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
   if (connection >= MAX_CONNECTIONS)
     return;
   Connection &c = this->connections_[connection];
-  if (!c.open || c.event_channel)
+  if (!c.open)
     return;
+  if (c.event_channel) {
+    // Answers to the receiver's requests; their content is not needed
+    if (c.event_answers++ == 0)
+      AIRPLAY_LOGD("The sender answers on its event connection");
+    return;
+  }
   if (c.audio_data) {
     this->receive_buffered_audio_(connection, data, length, to_ms(now_us));
     return;
@@ -802,6 +857,7 @@ void Receiver::adopt_session_(uint8_t connection, const char *request, size_t he
   this->airplay2_audio_ = false;
   this->encrypted_ = false;
   this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+  this->set_ptp_timing_(c.pending_ptp);
   this->read_sender_version_(request, header_length);
 }
 
@@ -823,6 +879,7 @@ bool Receiver::promote_pending_session_(uint8_t leaving) {
     this->codec_ = Codec::NONE;
     this->airplay2_audio_ = false;
     this->client_timing_ = Endpoint{c.peer.address, c.pending_timing_port};
+    this->set_ptp_timing_(c.pending_ptp);
     if (this->session_state_ == SessionState::PLAYING)
       this->set_session_state_(SessionState::PAUSED);
     return true;
@@ -1247,6 +1304,8 @@ void Receiver::end_session_(uint32_t keep_address) {
   this->stop_audio_();
   this->close_udp_();
   this->session_owner_ = NO_CONNECTION;
+  // Reported again in the next session, also when the same sender opens it with the same details
+  this->remote_target_ = RemoteTarget{};
   this->codec_ = Codec::NONE;
   this->airplay2_audio_ = false;
   this->event_channel_pending_ = false;
@@ -1333,6 +1392,7 @@ bool Receiver::start_audio_(int64_t now_us) {
   this->sync_logged_ = false;
   this->restarts_ = 0;
   this->late_logged_ = false;
+  this->alac_logged_ = false;
   this->timeline_mismatch_ = false;
   this->timeline_unusable_ = false;
   this->audio_active_ = true;
@@ -1411,6 +1471,9 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     case PAYLOAD_SYNC:
       this->handle_sync_packet_(packet, length, now_us);
       return;
+    case PAYLOAD_PTP_SYNC:
+      this->handle_ptp_sync_packet_(packet, length);
+      return;
     default:
       break;
   }
@@ -1418,8 +1481,13 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
     return;
   // Held: dropped as it arrives, unless the sender is paused and its audio may show that it plays again
   if (this->audio_held_ && this->session_state_ != SessionState::PAUSED) {
-    if (type == PAYLOAD_AUDIO)
+    // iOS keeps sending silence for several seconds after an AirPlay 1 pause: packets that small are not audio
+    if (type == PAYLOAD_AUDIO && length > RTP_HEADER_SIZE + SILENT_PACKET_MAX_BYTES) {
       this->last_packet_ms_ = to_ms(now_us);
+    } else if (type == PAYLOAD_AUDIO && !this->held_silence_logged_) {
+      this->held_silence_logged_ = true;
+      AIRPLAY_LOGD("The sender sends silence (packets of %u bytes)", static_cast<unsigned>(length - RTP_HEADER_SIZE));
+    }
     return;
   }
 
@@ -1444,6 +1512,82 @@ void Receiver::udp_packet(UdpChannel channel, const uint8_t *packet, size_t leng
 }
 
 void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payload, size_t length, uint32_t now_ms) {
+  if (this->config_.clock_us == nullptr) {
+    this->handle_audio_packet_timed_(header, payload, length, now_ms);
+    return;
+  }
+  const int64_t start = this->config_.clock_us();
+  this->handle_audio_packet_timed_(header, payload, length, now_ms);
+  this->packet_us_.fetch_add(static_cast<uint32_t>(this->config_.clock_us() - start), std::memory_order_relaxed);
+  this->timed_packets_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Receiver::benchmark_decoder_(const uint8_t *data, size_t length, int16_t *output) {
+  if (this->benchmark_input_ == nullptr || this->benchmark_output_ == nullptr || length > PACKET_BUFFER_SIZE)
+    return;
+  static constexpr uint32_t RUNS = 50;
+  std::memcpy(this->benchmark_input_, data, length);
+  struct Result {
+    uint32_t average_us;
+    uint32_t fastest_us;
+  };
+  const auto run = [&](const uint8_t *input, int16_t *samples) {
+    int64_t total = 0;
+    uint32_t fastest = UINT32_MAX;
+    for (uint32_t i = 0; i < RUNS; i++) {
+      const int64_t start = this->config_.clock_us();
+      this->decoder_.decode(input, length, samples);
+      const auto took = static_cast<uint32_t>(this->config_.clock_us() - start);
+      total += took;
+      fastest = std::min(fastest, took);
+    }
+    return Result{static_cast<uint32_t>(total / RUNS), fastest};
+  };
+  const Result internal = run(this->benchmark_input_, this->benchmark_output_);
+  const Result actual = run(data, output);
+  // The same length through ChaCha20-Poly1305, as AirPlay 2 audio is encrypted
+  int64_t crypto_total = 0;
+  uint32_t crypto_fastest = UINT32_MAX;
+  const uint8_t key[CHACHA_KEY_SIZE] = {};
+  const uint8_t nonce[CHACHA_NONCE_SIZE] = {};
+  uint8_t tag[POLY1305_TAG_SIZE];
+  for (uint32_t i = 0; i < RUNS; i++) {
+    const int64_t start = this->config_.clock_us();
+    chacha20_poly1305_encrypt(key, nonce, data, 8, this->benchmark_input_, length,
+                              reinterpret_cast<uint8_t *>(this->benchmark_output_), tag);
+    const auto took = static_cast<uint32_t>(this->config_.clock_us() - start);
+    crypto_total += took;
+    crypto_fastest = std::min(crypto_fastest, took);
+  }
+  AIRPLAY_LOGD("ALAC benchmark, %" PRIu32 " decodes of %u bytes: separate buffers %" PRIu32 " us (fastest %" PRIu32
+               "), the receiver's %" PRIu32 " us (fastest %" PRIu32 ")",
+               RUNS, static_cast<unsigned>(length), internal.average_us, internal.fastest_us, actual.average_us,
+               actual.fastest_us);
+  AIRPLAY_LOGD("ChaCha20-Poly1305 benchmark, %" PRIu32 " runs over %u bytes: %" PRIu32 " us (fastest %" PRIu32 ")",
+               RUNS, static_cast<unsigned>(length), static_cast<uint32_t>(crypto_total / RUNS), crypto_fastest);
+#if defined(ESP_PLATFORM)
+  AIRPLAY_LOGD("In PSRAM: separate input %d, output %d; the receiver's input %d, output %d; decoder %d",
+               esp_ptr_external_ram(this->benchmark_input_), esp_ptr_external_ram(this->benchmark_output_),
+               esp_ptr_external_ram(data), esp_ptr_external_ram(output),
+               esp_ptr_external_ram(this->decoder_.work_buffer()));
+#endif
+}
+
+Receiver::PlaybackTiming Receiver::take_playback_timing() {
+  return PlaybackTiming{
+      this->timers_us_.exchange(0, std::memory_order_relaxed), this->resend_us_.exchange(0, std::memory_order_relaxed),
+      this->copy_us_.exchange(0, std::memory_order_relaxed), this->write_us_.exchange(0, std::memory_order_relaxed)};
+}
+
+Receiver::PacketTiming Receiver::take_packet_timing() {
+  return PacketTiming{this->timed_packets_.exchange(0, std::memory_order_relaxed),
+                      this->decrypt_us_.exchange(0, std::memory_order_relaxed),
+                      this->decode_us_.exchange(0, std::memory_order_relaxed),
+                      this->packet_us_.exchange(0, std::memory_order_relaxed)};
+}
+
+void Receiver::handle_audio_packet_timed_(const uint8_t *header, const uint8_t *payload, size_t length,
+                                          uint32_t now_ms) {
   const uint16_t seq = read_be16(header + 2);
   const uint32_t rtp = read_be32(header + 4);
   this->last_packet_ms_ = now_ms;
@@ -1484,6 +1628,7 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
     return;  // Duplicate
 
   const uint8_t *data = payload;
+  const int64_t decrypt_start = this->config_.clock_us != nullptr ? this->config_.clock_us() : 0;
   if (this->airplay2_audio_) {
     length = this->decrypt_airplay2_audio_(header, payload, length, this->packet_buffer_);
     if (length == 0) {
@@ -1505,9 +1650,29 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
     data = plain;
   }
 
+  int64_t decode_start = 0;
+  if (this->config_.clock_us != nullptr) {
+    decode_start = this->config_.clock_us();
+    this->decrypt_us_.fetch_add(static_cast<uint32_t>(decode_start - decrypt_start), std::memory_order_relaxed);
+  }
   int32_t frames;
   if (this->codec_ == Codec::ALAC) {
     frames = this->decoder_.decode(data, length, slot.samples);
+    if (!this->alac_logged_ && frames > 0) {
+      // Once per stream: some senders store the audio uncompressed in ALAC packets
+      this->alac_logged_ = true;
+      if (this->config_.clock_us != nullptr)
+        this->benchmark_decoder_(data, length, slot.samples);
+      if (this->decoder_.last_uncompressed()) {
+        AIRPLAY_LOGD("ALAC packets of %u bytes, stored uncompressed", static_cast<unsigned>(length));
+      } else {
+        AIRPLAY_LOGD("ALAC packets of %u bytes, compressed, predictor order %" PRIu32, static_cast<unsigned>(length),
+                     this->decoder_.last_predictor_order());
+      }
+    }
+    if (this->config_.clock_us != nullptr)
+      this->decode_us_.fetch_add(static_cast<uint32_t>(this->config_.clock_us() - decode_start),
+                                 std::memory_order_relaxed);
   } else {
     // Big endian 16-bit PCM
     frames = static_cast<int32_t>(std::min<size_t>(length / BYTES_PER_FRAME, FRAMES_PER_PACKET));
@@ -1538,6 +1703,7 @@ void Receiver::handle_audio_packet_(const uint8_t *header, const uint8_t *payloa
       gap.valid = false;
       gap.missing_since_ms = nonzero_ms(now_ms);
       gap.last_request_ms = 0;
+      this->packets_missing_ = true;
     }
     this->highest_seq_ = seq;
   }
@@ -1590,6 +1756,71 @@ void Receiver::handle_sync_packet_(const uint8_t *packet, size_t length, int64_t
   if (!this->anchor_valid_)
     AIRPLAY_LOGV("Timeline of the sender received (latency %" PRIu32 " frames)", this->sender_latency_frames_);
   this->anchor_valid_ = true;
+}
+
+void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
+  if (length < PTP_SYNC_PACKET_SIZE)
+    return;
+  // As shairport-sync reads it: the frame at bytes 4-7 is due at the PTP time in nanoseconds at bytes 8-15 on the
+  // clock at bytes 20-27; bytes 16-19 hold the frame being sent now
+  const uint32_t rtp = read_be32(packet + 4);
+  const auto remote_ns =
+      static_cast<int64_t>((static_cast<uint64_t>(read_be32(packet + 8)) << 32) | read_be32(packet + 12));
+  const uint32_t rtp_now = read_be32(packet + 16);
+  const uint64_t clock = (static_cast<uint64_t>(read_be32(packet + 20)) << 32) | read_be32(packet + 24);
+  if (this->ptp_sync_logged_ < 3) {
+    this->ptp_sync_logged_++;
+    AIRPLAY_LOGV("PTP sync packet: frame %" PRIu32 " at %" PRId64 ".%09" PRId64 " s on clock %016" PRIx64
+                 ", frame %" PRIu32 " now (%" PRId32 " frames ahead), flags %02x%02x",
+                 rtp, remote_ns / 1000000000, remote_ns % 1000000000, clock, rtp_now,
+                 static_cast<int32_t>(rtp_now - rtp), packet[2], packet[3]);
+  }
+  if (!this->ptp_timing_)
+    return;
+  const uint32_t latency = rtp_now - rtp;
+  if (latency > MAX_SENDER_LATENCY_FRAMES)
+    return;
+  this->ptp_timeline_ = clock;
+  this->anchor_rtp_ = rtp;
+  this->anchor_remote_ns_ = remote_ns;
+  this->sender_latency_frames_ = latency;
+  this->anchor_valid_ = true;
+}
+
+void Receiver::update_ptp_clock_(int64_t now_us) {
+  int64_t offset = 0;
+  uint64_t clock = this->ptp_timeline_;
+  if (!this->ptp_clocks_.offset_ns(clock, now_us, &offset)) {
+    // The timeline may be named after a clock that is not the one that sends Sync messages
+    clock = 0;
+    if (this->ptp_timeline_ == 0 || !this->ptp_clocks_.offset_ns(0, now_us, &offset)) {
+      // No recent samples (the sender may have slept, which stops its clock): an old offset would be wrong
+      if (this->clock_locked_) {
+        this->clock_locked_ = false;
+        AIRPLAY_LOGD("Lost the PTP clock, waiting for it");
+      }
+      return;
+    }
+  }
+  // rtp_to_local_us_() takes offsets to the local time on the NTP time scale
+  this->clock_offset_ns_ = offset - NTP_UNIX_OFFSET_NS;
+  if (!this->clock_locked_) {
+    this->clock_locked_ = true;
+    AIRPLAY_LOGD("Clock locked to PTP clock %016" PRIx64 "%s", clock != 0 ? clock : this->ptp_clocks_.grandmaster(),
+                 clock == 0 && this->ptp_timeline_ != 0 ? " (the grandmaster, not the timeline's clock)" : "");
+  }
+}
+
+void Receiver::set_ptp_timing_(bool ptp) {
+  if (ptp)
+    AIRPLAY_LOGD("Timing with PTP");
+  this->ptp_timing_ = ptp;
+  this->ptp_timeline_ = 0;
+  this->ptp_error_logged_ = false;
+  this->anchor_fits_clock_ = false;
+  this->ptp_sync_logged_ = 0;
+  if (ptp)
+    this->clock_locked_ = false;
 }
 
 void Receiver::send_timing_request_(int64_t now_us) {
@@ -1647,7 +1878,8 @@ void Receiver::handle_timing_request_(UdpChannel channel, const uint8_t *packet,
 }
 
 void Receiver::retry_resends_(uint32_t now_ms) {
-  if (!this->have_seq_)
+  // Most of the time nothing is missing, and the scan reads a slot header in external RAM per buffered packet
+  if (!this->have_seq_ || !this->packets_missing_)
     return;
   const uint32_t buffered = this->buffered_packets_();
   const auto due = [now_ms](const PacketSlot &s) {
@@ -1658,11 +1890,15 @@ void Receiver::retry_resends_(uint32_t now_ms) {
   };
   uint32_t ranges = 0;
   uint32_t i = 0;
+  bool missing = false;
   while (i < buffered && ranges < MAX_RESEND_RANGES) {
-    if (!due(this->slots_[(this->head_slot_ + i) % this->slot_count_])) {
+    const PacketSlot &next = this->slots_[(this->head_slot_ + i) % this->slot_count_];
+    if (!due(next)) {
+      missing = missing || (!next.valid && next.missing_since_ms != 0);
       i++;
       continue;
     }
+    missing = true;
     // Ask for a run of consecutive missing packets at once
     const auto first = static_cast<uint16_t>(this->next_seq_ + i);
     uint16_t count = 0;
@@ -1677,6 +1913,7 @@ void Receiver::retry_resends_(uint32_t now_ms) {
     this->request_resend_(first, count);
     ranges++;
   }
+  this->packets_missing_ = missing;
 }
 
 void Receiver::request_resend_(uint16_t first, uint16_t count) {
@@ -1742,8 +1979,10 @@ bool Receiver::rtp_to_local_us_(uint32_t rtp, int64_t *local_us) const {
 bool Receiver::write_pending_output_(uint32_t now_ms) {
   if (this->output_offset_ >= this->output_length_)
     return true;
+  const int64_t write_start = this->clock_now_();
   const size_t written = this->sink_.write(this->output_buffer_ + this->output_offset_ * NUM_CHANNELS,
                                            this->output_length_ - this->output_offset_);
+  add_us(this->write_us_, this->clock_now_() - write_start);
   if (written > 0 && this->first_write_ms_ == 0)
     this->first_write_ms_ = nonzero_ms(now_ms);
   this->output_offset_ += written;
@@ -1752,10 +1991,11 @@ bool Receiver::write_pending_output_(uint32_t now_ms) {
   return this->output_offset_ >= this->output_length_;
 }
 
-void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
+void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim, uint32_t skip) {
+  const int64_t copy_start = this->clock_now_();
   int16_t *samples = this->output_buffer_;
-  uint32_t frames = slot.frames;
-  std::memcpy(samples, slot.samples, frames * BYTES_PER_FRAME);
+  uint32_t frames = slot.frames - skip;
+  std::memcpy(samples, slot.samples + skip * NUM_CHANNELS, frames * BYTES_PER_FRAME);
 
   const auto count = static_cast<uint32_t>(std::min(std::abs(trim), MAX_TRIM_FRAMES));
   if (count > 0 && frames > count + 2) {
@@ -1783,6 +2023,7 @@ void Receiver::queue_packet_output_(const PacketSlot &slot, int32_t trim) {
   }
   this->output_offset_ = 0;
   this->output_length_ = frames;
+  add_us(this->copy_us_, this->clock_now_() - copy_start);
 }
 
 void Receiver::queue_silence_output_() {
@@ -1797,6 +2038,7 @@ void Receiver::queue_silence_output_() {
 void Receiver::poll(int64_t now_us) {
   if (this->slots_ == nullptr)
     return;
+  const int64_t poll_start = this->clock_now_();
   const uint32_t now_ms = to_ms(now_us);
   if (this->audio_active_) {
     if (this->last_poll_ms_ != 0)
@@ -1804,7 +2046,8 @@ void Receiver::poll(int64_t now_us) {
     this->last_poll_ms_ = now_ms;
   }
 
-  this->update_event_channel_ready_();
+  this->poll_ms_ = now_ms;
+  this->update_event_channel_ready_(now_ms);
   this->update_sender_address_();
   this->update_sender_name_();
   this->send_sender_requests_(now_ms);
@@ -1823,6 +2066,7 @@ void Receiver::poll(int64_t now_us) {
   const bool hold = this->hold_requested_.load(std::memory_order_acquire);
   if (hold != this->audio_held_) {
     this->audio_held_ = hold;
+    this->held_silence_logged_ = false;
     if (hold) {
       AIRPLAY_LOGD("Holding the sender's audio");
     } else {
@@ -1851,8 +2095,19 @@ void Receiver::poll(int64_t now_us) {
     this->played_timestamp_.store(0, std::memory_order_relaxed);
   }
 
+  if (this->ptp_open_)
+    this->ptp_clocks_.log_status(now_us);
   if (!this->udp_open_)
     return;
+  if (this->ptp_timing_) {
+    uint8_t message[PtpClocks::MAX_MESSAGE_SIZE];
+    uint32_t to = 0;
+    bool general = false;
+    if (const size_t length = this->ptp_clocks_.next_message(this->ptp_timeline_, message, now_us, &to, &general)) {
+      this->transport_.send_ptp(general, Endpoint{to, general ? PTP_GENERAL_PORT : PTP_EVENT_PORT}, message, length);
+    }
+    this->update_ptp_clock_(now_us);
+  }
   // Keep asking quickly until the clock locks, so that a lost packet does not delay synchronized playback
   const uint32_t timing_interval = this->timing_requests_sent_ < TIMING_BURST_COUNT || !this->clock_locked_
                                        ? TIMING_BURST_INTERVAL_MS
@@ -1872,11 +2127,14 @@ void Receiver::poll(int64_t now_us) {
     return;
   }
 
+  const int64_t timers_end = this->clock_now_();
+  add_us(this->timers_us_, timers_end - poll_start);
   if (this->buffered_stream_) {
-    this->decode_buffered_audio_(now_ms);
+    this->decode_buffered_audio_(now_us);
   } else if (now_ms - this->last_resend_scan_ms_ >= RESEND_SCAN_INTERVAL_MS) {
     this->last_resend_scan_ms_ = now_ms;
     this->retry_resends_(now_ms);
+    add_us(this->resend_us_, this->clock_now_() - timers_end);
   }
 
   // A sender that stops sending without a FLUSH (e.g. iOS after a long pause) is shown as paused.
@@ -1889,6 +2147,15 @@ void Receiver::poll(int64_t now_us) {
 
 void Receiver::playback_step_(int64_t now_us) {
   const uint32_t now_ms = to_ms(now_us);
+  // How evenly the output reports played audio: a long gap makes the queued audio look larger than it is
+  const uint32_t reported_at = this->played_timestamp_.load(std::memory_order_relaxed);
+  if (reported_at != this->last_report_us_) {
+    if (this->last_report_us_ != 0 && this->playback_started_) {
+      const uint32_t gap_ms = (reported_at - this->last_report_us_) / 1000;
+      this->stats_.longest_report_gap_ms = std::max(this->stats_.longest_report_gap_ms, gap_ms);
+    }
+    this->last_report_us_ = reported_at;
+  }
   if (!this->played_reports_missing_ && this->first_write_ms_ != 0 &&
       this->frames_played_.load(std::memory_order_relaxed) == 0 &&
       now_ms - this->first_write_ms_ > PLAYED_REPORT_TIMEOUT_MS) {
@@ -1899,10 +2166,22 @@ void Receiver::playback_step_(int64_t now_us) {
   this->stats_.synchronized = this->playback_started_ && this->synced_;
 
   // The output ran dry while playing: an underrun, unless the sender stopped sending
+  // Also when the last report is older than the audio still queued lasts: outputs that report in chunks leave the
+  // end of the audio unreported until more arrives
+  const int64_t queued_us = frames_to_us(this->speaker_queued_frames_());
+  const auto report_age_us = static_cast<int32_t>(static_cast<uint32_t>(now_us) - reported_at);
   const bool dry = this->playback_started_ && this->frames_written_ > 0 &&
-                   this->frames_played_.load(std::memory_order_relaxed) != 0 && this->speaker_queued_frames_() == 0;
-  if (dry && !this->output_dry_ && this->buffered_packets_() > 0)
-    this->stats_.underruns++;
+                   this->frames_played_.load(std::memory_order_relaxed) != 0 &&
+                   (queued_us == 0 || (reported_at != 0 && report_age_us > queued_us + DRY_MARGIN_US));
+  // Before the first packet of a playback is lined up, the output is empty on purpose and the start handles it
+  if (dry && !this->output_dry_ && this->start_aligned_) {
+    if (this->buffered_packets_() > 0)
+      this->stats_.underruns++;
+    // The output may fill the gap with silence of its own that is not counted: what follows is lined up anew
+    this->kick_output_ = true;
+    this->waiting_for_output_ = false;
+    this->start_aligned_ = false;
+  }
   this->output_dry_ = dry;
 
   if (this->playback_started_ && now_ms - this->last_stats_log_ms_ >= STATS_LOG_INTERVAL_MS) {
@@ -1910,13 +2189,16 @@ void Receiver::playback_step_(int64_t now_us) {
     const ReceiverStats &st = this->stats_;
     AIRPLAY_LOGD("%s: buffered %" PRIu32 " ms, output %" PRIu32 " ms, servo %" PRId32 " us; lost %" PRIu32
                  ", late %" PRIu32 ", resend requests %" PRIu32 ", trimmed frames %" PRIu32 ", silence %" PRIu32
-                 " ms, underruns %" PRIu32 ", longest poll gap %" PRIu32 " ms, foreign packets %" PRIu32,
+                 " ms, underruns %" PRIu32,
                  this->synced_ ? "Synchronized" : "Unsynchronized",
                  static_cast<uint32_t>(frames_to_us(this->buffered_packets_() * FRAMES_PER_PACKET) / 1000),
                  static_cast<uint32_t>(frames_to_us(this->speaker_queued_frames_()) / 1000), this->servo_error_us_,
                  st.lost_packets, st.late_packets, st.resend_requests, st.trimmed_frames,
-                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns, st.longest_gap_ms,
-                 st.foreign_packets);
+                 static_cast<uint32_t>(frames_to_us(st.silence_frames) / 1000), st.underruns);
+    AIRPLAY_LOGD("Timing: longest poll gap %" PRIu32 " ms, longest output report gap %" PRIu32
+                 " ms, foreign packets %" PRIu32,
+                 st.longest_gap_ms, st.longest_report_gap_ms, st.foreign_packets);
+    this->late_detail_logged_ = false;
   }
 
   if (!this->have_seq_)
@@ -1927,9 +2209,12 @@ void Receiver::playback_step_(int64_t now_us) {
   if (!this->playback_started_ && !this->start_playback_())
     return;
 
-  for (uint32_t i = 0; i < MAX_CHUNKS_PER_STEP; i++) {
+  // Only steps that give the output audio count: packets that are dropped as late go quickly, which matters right
+  // after a start, when the output must not run dry while they go
+  for (uint32_t chunks = 0, steps = 0; chunks < MAX_CHUNKS_PER_STEP && steps < MAX_STEPS_PER_POLL; steps++) {
     if (!this->write_pending_output_(now_ms))
       return;
+    chunks++;
     if (this->silence_pending_frames_ > 0) {
       this->queue_silence_output_();
       continue;
@@ -1939,8 +2224,13 @@ void Receiver::playback_step_(int64_t now_us) {
         this->playback_started_ = false;  // Ran dry, so start again once there is enough audio
       return;
     }
+    const uint32_t written_before = static_cast<uint32_t>(this->frames_written_);
+    const bool queued_before = this->output_offset_ < this->output_length_;
     if (!(this->synced_ ? this->synced_step_(now_us) : this->unsynced_step_()))
       return;
+    if (!queued_before && this->output_offset_ >= this->output_length_ &&
+        static_cast<uint32_t>(this->frames_written_) == written_before)
+      chunks--;  // Nothing for the output
   }
 }
 
@@ -1988,6 +2278,10 @@ bool Receiver::start_playback_() {
     }
   }
   this->playback_started_ = true;
+  this->output_starting_ = false;
+  this->start_aligned_ = false;
+  this->kick_output_ = this->speaker_queued_frames_() == 0;
+  this->waiting_for_output_ = false;
   this->servo_error_us_ = 0;
   this->servo_engaged_ = false;
   this->drift_error_ = 0;
@@ -2011,7 +2305,7 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
 
   const int64_t queued_us = frames_to_us(this->speaker_queued_frames_());
-  if (queued_us >= MAX_SPEAKER_QUEUE_US)
+  if (queued_us >= static_cast<int64_t>(this->config_.output_queue_ms) * 1000)
     return false;
   // The output reports played audio in chunks. The audio it reported last ended at the report's timestamp,
   // and the queued audio follows on from there, which is more precise than counting from now.
@@ -2024,6 +2318,22 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
   // Positive: the packet would be heard too early; negative: too late
   const int64_t error_us = target_us - heard_us;
+  if (error_us < -MAX_TIMELINE_ERROR_US && this->buffered_stream_ && this->anchor_fits_clock_) {
+    // Audio from before a new anchor that fits the clock (Music Assistant resumes a pause further on its timeline)
+    if (present)
+      this->stats_.late_packets++;
+    this->advance_head_();
+    return true;
+  }
+  if ((error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) && this->ptp_timing_) {
+    // A PTP clock that jumped (its sender slept) gives a wrong time until its next samples: wait for them
+    if (!this->ptp_error_logged_) {
+      this->ptp_error_logged_ = true;
+      AIRPLAY_LOGW("The anchor is %" PRId64 " s off the PTP clock, waiting for the clock", error_us / 1000000);
+    }
+    this->playback_started_ = false;
+    return false;
+  }
   if (error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) {
     // The sender's sync packets and its clock disagree: Music Assistant answers clock requests on a group's PTP
     // timeline, or 70 years apart, but sends its own time in sync packets. Its sync packets are followed instead,
@@ -2039,8 +2349,31 @@ bool Receiver::synced_step_(int64_t now_us) {
     this->playback_started_ = false;
     return false;
   }
-  if (error_us > START_WINDOW_US)
+  // An empty output (not started yet, or run dry) may play its own silence that nobody counts (ESPHome's I2S
+  // speaker keeps 50 ms of DMA buffers full), and may take a while to start. It is started with a little silence
+  // ahead of time, and the audio is lined up once it reports what it played.
+  const uint32_t played = this->frames_played_.load(std::memory_order_relaxed);
+  if (this->kick_output_) {
+    if (error_us > OUTPUT_START_LEAD_US)
+      return false;
+    this->kick_output_ = false;
+    this->waiting_for_output_ = true;
+    this->played_at_kick_ = played;
+    this->kick_ms_ = nonzero_ms(to_ms(now_us));
+    this->silence_pending_frames_ = OUTPUT_START_FRAMES;
+    return true;
+  }
+  if (this->waiting_for_output_) {
+    // An output that never reports plays unsynchronized after a timeout; one that stopped reporting goes on
+    if (played == this->played_at_kick_ && to_ms(now_us) - this->kick_ms_ < PLAYED_REPORT_TIMEOUT_MS)
+      return false;
+    this->waiting_for_output_ = false;
+    this->output_starting_ = true;
+  }
+  // Once the output plays, the audio is lined up at once, before the output runs dry again
+  if (error_us > START_WINDOW_US && !this->output_starting_)
     return false;
+  this->output_starting_ = false;
 
   if (!present) {
     if (error_us > CONCEAL_MARGIN_US)
@@ -2063,12 +2396,41 @@ bool Receiver::synced_step_(int64_t now_us) {
                    static_cast<int32_t>(-error_us / 1000), this->buffered_packets_(), this->sender_version_,
                    static_cast<uint32_t>(frames_to_us(this->sender_latency_frames_) / 1000));
     }
+    if (!this->late_detail_logged_) {
+      // At most once per statistics line: whether the output queue or an old report made the packet late
+      this->late_detail_logged_ = true;
+      // A report may have come in after now_us was taken
+      const int32_t report_age_ms =
+          reported_at != 0
+              ? std::max<int32_t>(static_cast<int32_t>(static_cast<uint32_t>(now_us) - reported_at), 0) / 1000
+              : -1;
+      AIRPLAY_LOGD("Late packet: %" PRId32 " ms late, output queue %" PRIu32 " ms, last output report %" PRId32
+                   " ms ago, servo %" PRId32 " us",
+                   static_cast<int32_t>(-error_us / 1000), static_cast<uint32_t>(queued_us / 1000), report_age_ms,
+                   this->servo_error_us_);
+    }
     this->stats_.late_packets++;
     this->advance_head_();
     return true;
   }
-  // Line up with silence when starting from an empty output, or when far too early
-  if (error_us > EARLY_LATE_THRESHOLD_US || (queued_us == 0 && error_us > 0)) {
+  // The first packets after a start may be due already (macOS anchors a stream at the present): those that are
+  // past are dropped and the late part of the next one is left out, which lines up exactly instead of trimming
+  // frames for seconds
+  if (!this->start_aligned_ && error_us < 0) {
+    const auto late_frames = static_cast<uint32_t>(-error_us * SAMPLE_RATE / 1000000);
+    if (late_frames >= slot.frames) {
+      this->stats_.late_packets++;
+      this->advance_head_();
+      return true;
+    }
+    this->start_aligned_ = true;
+    this->servo_error_us_ = 0;
+    this->queue_packet_output_(slot, 0, late_frames);
+    this->advance_head_();
+    return true;
+  }
+  // Line up with silence when far too early, and the first packet after a start exactly
+  if (error_us > EARLY_LATE_THRESHOLD_US || (error_us > 0 && (queued_us == 0 || !this->start_aligned_))) {
     this->silence_pending_frames_ = static_cast<uint32_t>(error_us * SAMPLE_RATE / 1000000);
     this->servo_error_us_ = 0;
     if (this->silence_pending_frames_ > 0)
@@ -2101,6 +2463,7 @@ bool Receiver::synced_step_(int64_t now_us) {
     trim = this->servo_error_us_ > 0 ? frames : -frames;  // Early: repeat frames; late: drop some
   }
 
+  this->start_aligned_ = true;
   this->queue_packet_output_(slot, trim);
   this->advance_head_();
   return true;
