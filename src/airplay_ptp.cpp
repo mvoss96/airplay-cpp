@@ -41,7 +41,7 @@ static constexpr int64_t JUMP_NS = 1000000000;
 static constexpr uint32_t JUMP_SAMPLES = 3;
 /// After the first second, a sample more than this above the estimate counts only when the next ones confirm it
 static constexpr int64_t RISE_NS = 2000000;
-static constexpr uint32_t RISE_CONFIRMATIONS = 3;
+static constexpr uint32_t RISE_CONFIRMATIONS = 3;  // middle_recent_() takes the middle of three
 static constexpr uint32_t SETTLE_SAMPLES = 8;
 
 static uint64_t read_be(const uint8_t *data, size_t bytes) {
@@ -193,11 +193,14 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
     const int64_t drifted = clock.estimate - (now_us - clock.last_sample_us) * MAX_DRIFT_PPM / 1000;
     if (sample > drifted + RISE_NS && clock.count >= SETTLE_SAMPLES) {
       // Far better than the estimate: a single one is an error (macOS sends a correction of 100 ms now and then),
-      // several in a row show that the estimate was low
-      clock.above_lowest = clock.above == 0 ? sample : std::min(clock.above_lowest, sample);
-      set_estimate_(clock, ++clock.above >= RISE_CONFIRMATIONS ? clock.above_lowest : drifted);
-      if (clock.above >= RISE_CONFIRMATIONS)
+      // several in a row show that the estimate was low. Of those, the middle one: the lowest is late by the most
+      // delay, which put playback that much off after a sender's clock jumped.
+      if (++clock.above >= RISE_CONFIRMATIONS) {
         clock.above = 0;
+        set_estimate_(clock, middle_recent_(clock));
+      } else {
+        clock.estimate = drifted;
+      }
     } else {
       clock.above = 0;
       clock.estimate = std::max(sample, drifted);
@@ -219,6 +222,13 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
   }
   clock.count++;
   clock.last_sample_us = now_us;
+}
+
+int64_t PtpClocks::middle_recent_(const Clock &clock) {
+  const int64_t a = clock.samples[clock.count % WINDOW];
+  const int64_t b = clock.samples[(clock.count + WINDOW - 1) % WINDOW];
+  const int64_t c = clock.samples[(clock.count + WINDOW - 2) % WINDOW];
+  return std::max(std::min(a, b), std::min(std::max(a, b), c));
 }
 
 int64_t PtpClocks::best_recent_(const Clock &clock, uint32_t samples) {
@@ -268,6 +278,14 @@ const PtpClocks::Clock *PtpClocks::active_(uint64_t id, int64_t now_us) const {
       return &clock;
   }
   return nullptr;
+}
+
+uint64_t PtpClocks::clock_at(uint32_t address, int64_t now_us) const {
+  for (const Clock &clock : this->clocks_) {
+    if (clock.address == address && clock.count >= MIN_SAMPLES && now_us - clock.last_sample_us <= CLOCK_TIMEOUT_US)
+      return clock.id;
+  }
+  return 0;
 }
 
 size_t PtpClocks::active_clocks(uint64_t *ids, size_t max, int64_t now_us) const {

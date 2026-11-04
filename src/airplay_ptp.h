@@ -33,6 +33,8 @@ class PtpClocks {
   /// @brief How often a clock's time jumped by more than a second, and by how much the last time.
   /// @return the number of jumps so far (0 for an unknown clock)
   uint32_t jumps(uint64_t clock, int64_t *last_jump_ns) const;
+  /// The clock with an offset now that sends from address (a sender's own clock), 0 if none
+  uint64_t clock_at(uint32_t address, int64_t now_us) const;
   /// Writes the identities of the clocks that have an offset now (offset_ns() succeeds) to ids, at most max
   size_t active_clocks(uint64_t *ids, size_t max, int64_t now_us) const;
   /// Clock identity of the grandmaster that announced itself last, or of the clock that last sent Sync; 0 if none
@@ -61,9 +63,8 @@ class PtpClocks {
     // The offset less the least delay: rises with every better sample, falls only as fast as clocks drift apart,
     // so that samples taken late while the receiver was busy do not move it
     int64_t estimate;
-    uint32_t below;        // Samples in a row far below the estimate: the clock was set back
-    uint32_t above;        // Samples in a row far above it: a jump that counts once it is confirmed
-    int64_t above_lowest;  // The lowest of those
+    uint32_t below;  // Samples in a row far below the estimate: the clock was set back
+    uint32_t above;  // Samples in a row far above it: a jump that counts once it is confirmed
     uint16_t sync_sequence;
     bool sync_pending;
     int64_t sync_received_ns;
@@ -92,6 +93,7 @@ class PtpClocks {
   Clock *find_(uint64_t id, uint32_t address, int64_t now_us);
   void add_sample_(Clock &clock, int64_t sample, int64_t now_us);
   static int64_t best_recent_(const Clock &clock, uint32_t samples);
+  static int64_t middle_recent_(const Clock &clock);  // The middle of the last three samples
   static int64_t delay_ns_(const Clock &clock);
   static void set_estimate_(Clock &clock, int64_t estimate);
 
