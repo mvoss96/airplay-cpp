@@ -1786,8 +1786,14 @@ void Receiver::update_ptp_clock_(int64_t now_us) {
   if (!this->ptp_clocks_.offset_ns(clock, now_us, &offset)) {
     // The timeline may be named after a clock that is not the one that sends Sync messages
     clock = 0;
-    if (this->ptp_timeline_ == 0 || !this->ptp_clocks_.offset_ns(0, now_us, &offset))
+    if (this->ptp_timeline_ == 0 || !this->ptp_clocks_.offset_ns(0, now_us, &offset)) {
+      // No recent samples (the sender may have slept, which stops its clock): an old offset would be wrong
+      if (this->clock_locked_) {
+        this->clock_locked_ = false;
+        AIRPLAY_LOGD("Lost the PTP clock, waiting for it");
+      }
       return;
+    }
   }
   // rtp_to_local_us_() takes offsets to the local time on the NTP time scale
   this->clock_offset_ns_ = offset - NTP_UNIX_OFFSET_NS;
@@ -1803,6 +1809,7 @@ void Receiver::set_ptp_timing_(bool ptp) {
     AIRPLAY_LOGD("Timing with PTP");
   this->ptp_timing_ = ptp;
   this->ptp_timeline_ = 0;
+  this->ptp_error_logged_ = false;
   this->ptp_sync_logged_ = 0;
   if (ptp)
     this->clock_locked_ = false;
@@ -2302,6 +2309,15 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
   // Positive: the packet would be heard too early; negative: too late
   const int64_t error_us = target_us - heard_us;
+  if ((error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) && this->ptp_timing_) {
+    // A PTP clock that jumped (its sender slept) gives a wrong time until its next samples: wait for them
+    if (!this->ptp_error_logged_) {
+      this->ptp_error_logged_ = true;
+      AIRPLAY_LOGW("The anchor is %" PRId64 " s off the PTP clock, waiting for the clock", error_us / 1000000);
+    }
+    this->playback_started_ = false;
+    return false;
+  }
   if (error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) {
     // The sender's sync packets and its clock disagree: Music Assistant answers clock requests on a group's PTP
     // timeline, or 70 years apart, but sends its own time in sync packets. Its sync packets are followed instead,

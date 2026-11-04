@@ -184,8 +184,7 @@ static void test_ptp() {
   // Unknown or silent clocks have no offset
   CHECK(!clocks.offset_ns(0x99, now_us, &found));
   CHECK(!clocks.offset_ns(clock, now_us + 10000000, &found));
-  // Taking part: an Announce, then a Delay_Req to the grandmaster's address. With the delay measured both ways
-  // (1 ms each), the offset is exact.
+  // Taking part: an Announce to the grandmaster's address every 2 s, passing on its details one step further
   PtpClocks active;
   const uint8_t mac[6] = {0x3c, 0x84, 0x27, 0x14, 0x86, 0x94};
   active.set_identity(mac);
@@ -195,7 +194,6 @@ static void test_ptp() {
   CHECK(active.next_message(0, message, 1000000, &to, &general) == 0);  // No grandmaster yet
   now_us = 3000000;
   for (uint16_t seq = 0; seq < 8; seq++) {
-    clocks.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0, 0);  // Unrelated instance
     active.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0200000a, now_us + 1000);
     active.handle(true, ptp_message(0x8, clock, seq, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
                   now_us + 1100);
@@ -204,26 +202,9 @@ static void test_ptp() {
   CHECK(active.next_message(0, message, now_us, &to, &general) == 64 && general && to == 0x0200000a);
   CHECK((message[0] & 0x0f) == 0xb && message[47] == 255 && message[48] == 255);
   CHECK(message[20] == 0x3c && message[23] == 0xff && message[24] == 0xfe && message[27] == 0x94);
-  for (int round = 0; round < 3; round++) {
-    size_t length = active.next_message(0, message, now_us, &to, &general);
-    if (length == 64)
-      length = active.next_message(0, message, now_us, &to, &general);  // An Announce first, every 2 s
-    CHECK(length == 44 && !general && (message[0] & 0x0f) == 0x1);
-    // The grandmaster received it 1 ms later on its clock
-    std::vector<uint8_t> response = ptp_message(0x9, clock, static_cast<uint16_t>((message[30] << 8) | message[31]),
-                                                false, (now_us + 1000) * 1000 + offset, 54);
-    std::memcpy(response.data() + 44, message + 20, 10);
-    active.handle(true, response.data(), response.size(), 0x0200000a, now_us + 2000);
-    now_us += 1000000;
-    active.handle(false, ptp_message(0x0, clock, 99, true, 0).data(), 44, 0x0200000a, now_us + 1000);
-    active.handle(true, ptp_message(0x8, clock, 99, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
-                  now_us + 1100);
-  }
-  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
-  // A Delay_Resp for another receiver is ignored
-  std::vector<uint8_t> other = ptp_message(0x9, clock, 1, false, 0, 54);
-  active.handle(true, other.data(), other.size(), 0x0200000a, now_us);
-  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
+  CHECK(active.next_message(0, message, now_us + 1000000, &to, &general) == 0);  // Not due yet
+  CHECK(active.next_message(0, message, now_us + 2000000, &to, &general) == 64);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000)) < 100000);
 
   // Samples taken late for 3 s while the receiver is busy (50 to 300 ms) barely move the offset; a clock that was
   // set back by a second is followed after 64 samples
@@ -285,7 +266,23 @@ static void test_ptp() {
   }
   CHECK(two.next_message(phone, message, now_us, &to, &general) == 64 && to == 0x5302a8c0u);
   CHECK(message[47] == 250 && message[53] == 0x10 && message[62] == 1);  // The phone's details, one step more
-  CHECK(two.next_message(phone, message, now_us, &to, &general) == 44 && to == 0x5302a8c0u);
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 0);   // Nothing else to send
+
+  // A sender that slept comes back with its clock 332 s behind: three samples confirm the jump
+  PtpClocks sleeper;
+  now_us = 40000000;
+  auto sleeper_sync = [&](int64_t clock_offset) {
+    sleeper.handle(false, ptp_message(0x0, clock, sequence, true, 0).data(), 44, 1, now_us + 1000);
+    sleeper.handle(true, ptp_message(0x8, clock, sequence, false, now_us * 1000 + clock_offset).data(), 44, 1,
+                   now_us + 1000);
+    sequence++;
+    now_us += 125000;
+  };
+  for (int i = 0; i < 16; i++)
+    sleeper_sync(offset);
+  for (int i = 0; i < 3; i++)
+    sleeper_sync(offset - 332000000000LL);
+  CHECK(sleeper.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 332000000000LL - 1000000)) < 100000);
 
   // One-step Sync carries its own time
   PtpClocks one_step;

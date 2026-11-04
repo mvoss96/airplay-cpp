@@ -12,28 +12,24 @@ static constexpr size_t HEADER_SIZE = 34;
 static constexpr size_t TIMESTAMP_MESSAGE_SIZE = HEADER_SIZE + 10;
 static constexpr size_t ANNOUNCE_SIZE = 64;
 static constexpr uint8_t TYPE_SYNC = 0x0;
-static constexpr uint8_t TYPE_DELAY_REQ = 0x1;
 static constexpr uint8_t TYPE_FOLLOW_UP = 0x8;
-static constexpr uint8_t TYPE_DELAY_RESP = 0x9;
 static constexpr uint8_t TYPE_ANNOUNCE = 0xb;
-static constexpr size_t DELAY_RESP_SIZE = 54;
-static constexpr uint8_t TYPE_SIGNALING = 0xc;
-static constexpr size_t SIGNALING_TLV_OFFSET = 44;  // After the header and the target port identity
-static constexpr uint8_t FLAG_TWO_STEP = 0x02;      // In the first byte of the flags
+static constexpr uint8_t FLAG_TWO_STEP = 0x02;  // In the first byte of the flags
 /// Samples a clock needs before its offset is used
 static constexpr uint32_t MIN_SAMPLES = 4;
 /// A clock without samples for this long is not used, and its slot may go to another one
 static constexpr int64_t CLOCK_TIMEOUT_US = 5000000;
 static constexpr int64_t LOG_INTERVAL_US = 10000000;
-static constexpr int64_t DELAY_REQUEST_INTERVAL_US = 1000000;
 static constexpr int64_t ANNOUNCE_INTERVAL_US = 2000000;
-/// Delay measurements needed before they correct the offset
-static constexpr uint32_t MIN_DELAY_SAMPLES = 2;
 /// How fast two clocks may drift apart (quartz crystals stay within 50 ppm each)
 static constexpr int64_t MAX_DRIFT_PPM = 100;
 /// Samples this far below the estimate all the time mean the clock was set back
 static constexpr int64_t STEP_NS = 20000000;
 static constexpr uint32_t STEP_SAMPLES = 64;  // 8 s of Sync messages
+/// Samples this far below are no delay but a clock that jumped (macOS stops its clock while it sleeps): a few
+/// confirm it
+static constexpr int64_t JUMP_NS = 1000000000;
+static constexpr uint32_t JUMP_SAMPLES = 3;
 /// After the first second, a sample more than this above the estimate counts only when the next ones confirm it
 static constexpr int64_t RISE_NS = 2000000;
 static constexpr uint32_t RISE_CONFIRMATIONS = 3;
@@ -67,7 +63,6 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
   const uint8_t type = data[0] & 0x0f;
   const uint64_t id = read_be(data + 20, 8);
   const auto sequence = static_cast<uint16_t>(read_be(data + 30, 2));
-  this->type_counts_[type]++;
   // The first message of every type and port, to see what a sender expects
   const uint32_t type_bit = 1u << (type + (general ? 16 : 0));
   if ((this->types_logged_ & type_bit) == 0) {
@@ -105,40 +100,6 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
   }
   if (length < TIMESTAMP_MESSAGE_SIZE)
     return;
-  if (type == TYPE_SIGNALING && !this->signaling_logged_ && length >= SIGNALING_TLV_OFFSET + 4) {
-    // Signaling carries requests as TLVs after the target port; logged once to see what a sender asks for
-    this->signaling_logged_ = true;
-    char text[160];
-    size_t used = 0;
-    for (size_t at = SIGNALING_TLV_OFFSET; at + 4 <= length && used + 40 < sizeof(text);) {
-      const auto tlv_type = static_cast<unsigned>(read_be(data + at, 2));
-      const auto tlv_length = static_cast<size_t>(read_be(data + at + 2, 2));
-      used += static_cast<size_t>(
-          std::snprintf(text + used, sizeof(text) - used, " %04x/%u:", tlv_type, static_cast<unsigned>(tlv_length)));
-      for (size_t i = 0; i < tlv_length && i < 10 && at + 4 + i < length; i++)
-        used += static_cast<size_t>(std::snprintf(text + used, sizeof(text) - used, "%02x", data[at + 4 + i]));
-      at += 4 + tlv_length;
-    }
-    AIRPLAY_LOGV("PTP Signaling from %016" PRIx64 " to %016" PRIx64 ", TLVs (type/length:data)%s", id,
-                 read_be(data + 34, 8), used > 0 ? text : " none");
-    return;
-  }
-  if (type == TYPE_DELAY_RESP && general && length >= DELAY_RESP_SIZE) {
-    // The grandmaster's receive time of our Delay_Req
-    if (!this->delay_pending_ || id != this->delay_clock_ || sequence != this->delay_sequence_ ||
-        read_be(data + 44, 8) != this->identity_)
-      return;
-    this->delay_pending_ = false;
-    for (Clock &clock : this->clocks_) {
-      if (clock.id != id || clock.last_seen_us == 0)
-        continue;
-      clock.delay_samples[clock.delay_count % WINDOW] =
-          read_timestamp_ns(data + 34) - correction_ns - this->delay_sent_ns_;
-      clock.delay_count++;
-      clock.delay_responses++;
-    }
-    return;
-  }
   if (type == TYPE_SYNC && !general) {
     Clock *clock = this->find_(id, from_address, now_us);
     if (clock == nullptr)
@@ -161,7 +122,6 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
     Clock *clock = this->find_(id, from_address, now_us);
     if (clock == nullptr)
       return;
-    clock->follow_ups++;
     if (!clock->sync_pending || clock->sync_sequence != sequence)
       return;
     clock->sync_pending = false;
@@ -173,12 +133,6 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
                    clock->id, sent_ns / 1000000000, sent_ns % 1000000000, clock->sync_correction_ns, correction_ns,
                    clock->sync_received_ns / 1000000000, (clock->sync_received_ns / 1000) % 1000000);
     }
-    const int64_t correction = correction_ns + clock->sync_correction_ns;
-    clock->raw_samples[clock->count % WINDOW] = sent_ns - correction - clock->sync_received_ns;
-    if (clock->follow_ups == 1 || correction < clock->correction_min_ns)
-      clock->correction_min_ns = correction;
-    if (clock->follow_ups == 1 || correction > clock->correction_max_ns)
-      clock->correction_max_ns = correction;
     this->add_sample_(*clock, sent_ns - clock->sync_received_ns, now_us);
   }
 }
@@ -223,11 +177,14 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
       clock.above = 0;
       clock.estimate = std::max(sample, drifted);
     }
-    // A clock that was set back sends samples far below the estimate for longer than the receiver is ever busy:
-    // start over from them
+    // A clock that was set back sends samples far below the estimate for longer than the receiver is ever busy, or
+    // so far below that no delay explains them: start over from them
     if (sample < clock.estimate - STEP_NS) {
-      if (++clock.below >= STEP_SAMPLES) {
-        clock.estimate = *std::max_element(clock.samples, clock.samples + WINDOW);
+      clock.below++;
+      if (clock.below >= STEP_SAMPLES || (clock.below >= JUMP_SAMPLES && sample < clock.estimate - JUMP_NS)) {
+        AIRPLAY_LOGD("PTP clock %016" PRIx64 " jumped by %" PRId64 " ms", clock.id,
+                     (best_recent_(clock, clock.below) - clock.estimate) / 1000000);
+        clock.estimate = best_recent_(clock, clock.below);
         clock.below = 0;
       }
     } else {
@@ -236,6 +193,14 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
   }
   clock.count++;
   clock.last_sample_us = now_us;
+}
+
+int64_t PtpClocks::best_recent_(const Clock &clock, uint32_t samples) {
+  // The sample just added is at clock.count % WINDOW
+  int64_t best = clock.samples[clock.count % WINDOW];
+  for (uint32_t i = 1; i < std::min<uint32_t>(samples, WINDOW); i++)
+    best = std::max(best, clock.samples[(clock.count + WINDOW - i) % WINDOW]);
+  return best;
 }
 
 const PtpClocks::Clock *PtpClocks::active_(uint64_t id, int64_t now_us) const {
@@ -252,17 +217,7 @@ bool PtpClocks::offset_ns(uint64_t id, int64_t now_us, int64_t *offset) const {
   const Clock *clock = this->active_(id, now_us);
   if (clock == nullptr)
     return false;
-  // Every Sync sample is the offset less the delay to us, every Delay_Resp sample the offset plus the delay back:
-  // the largest of the first and the smallest of the second have the least delay, and with a symmetric path their
-  // mean is the offset
-  const int64_t sync = clock->estimate;
-  if (clock->delay_count < MIN_DELAY_SAMPLES) {
-    *offset = sync;
-    return true;
-  }
-  const int64_t delay =
-      *std::min_element(clock->delay_samples, clock->delay_samples + std::min<size_t>(clock->delay_count, WINDOW));
-  *offset = sync + (delay - sync) / 2;
+  *offset = clock->estimate;
   return true;
 }
 
@@ -316,16 +271,6 @@ size_t PtpClocks::next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, 
     *general = true;
     return ANNOUNCE_SIZE;
   }
-  if (now_us - this->last_delay_request_us_ >= DELAY_REQUEST_INTERVAL_US) {
-    this->last_delay_request_us_ = now_us;
-    this->delay_sequence_++;
-    this->delay_pending_ = true;
-    this->delay_clock_ = master->id;
-    this->delay_sent_ns_ = now_us * 1000;
-    write_header_(buffer, TYPE_DELAY_REQ, TIMESTAMP_MESSAGE_SIZE, master->domain, this->delay_sequence_, 1, 0x7f);
-    *general = false;
-    return TIMESTAMP_MESSAGE_SIZE;
-  }
   return 0;
 }
 
@@ -344,38 +289,11 @@ void PtpClocks::log_status(int64_t now_us) {
       spread = *high - *low;
       best = clock.estimate;
     }
-    int64_t delay = 0;
-    if (clock.delay_count > 0) {
-      const int64_t back =
-          *std::min_element(clock.delay_samples, clock.delay_samples + std::min<size_t>(clock.delay_count, WINDOW));
-      delay = (back - best) / 2;
-    }
-    int64_t raw_spread = 0;
-    if (used > 0) {
-      const auto [low, high] = std::minmax_element(clock.raw_samples, clock.raw_samples + used);
-      raw_spread = *high - *low;
-    }
-    AIRPLAY_LOGV("PTP clock %016" PRIx64 ": %" PRIu32 " Sync, %" PRIu32 " Follow_Up, %" PRIu32
-                 " Delay_Resp, offset %" PRId64 " ms, spread %" PRId64 " us (%" PRId64
-                 " us without corrections, which range from %" PRId64 " to %" PRId64 " us), delay %" PRId64 " us",
-                 clock.id, clock.syncs, clock.follow_ups, clock.delay_responses, best / 1000000, spread / 1000,
-                 raw_spread / 1000, clock.correction_min_ns / 1000, clock.correction_max_ns / 1000, delay / 1000);
+    AIRPLAY_LOGV("PTP clock %016" PRIx64 ": %" PRIu32 " Sync in %" PRId64 " s, offset %" PRId64 " ms, spread %" PRId64
+                 " us",
+                 clock.id, clock.syncs, LOG_INTERVAL_US / 1000000, best / 1000000, spread / 1000);
     clock.syncs = 0;
-    clock.follow_ups = 0;
-    clock.delay_responses = 0;
   }
-  // Every message type seen, e.g. "0:80 8:80 b:5"
-  char types[96];
-  size_t length = 0;
-  for (size_t type = 0; type < 16 && length + 16 < sizeof(types); type++) {
-    if (this->type_counts_[type] == 0)
-      continue;
-    length += static_cast<size_t>(std::snprintf(types + length, sizeof(types) - length, " %x:%" PRIu32,
-                                                static_cast<unsigned>(type), this->type_counts_[type]));
-    this->type_counts_[type] = 0;
-  }
-  if (length > 0)
-    AIRPLAY_LOGV("PTP messages by type:%s", types);
 }
 
 }  // namespace airplay

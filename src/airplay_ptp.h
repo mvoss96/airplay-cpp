@@ -9,10 +9,11 @@ namespace airplay {
 inline constexpr uint16_t PTP_EVENT_PORT = 319;
 inline constexpr uint16_t PTP_GENERAL_PORT = 320;
 
-/// Follows the PTP clocks of AirPlay 2 senders that time their audio with PTP (macOS). Each clock's offset comes
-/// from its Sync and Follow_Up messages, using the sample with the least network delay over a short window. While
-/// a session uses PTP, the receiver also takes part as a clock that never becomes master: it announces itself and
-/// measures the delay to the grandmaster with Delay_Req, which halves the error of the offset.
+/// Follows the PTP clocks of AirPlay 2 senders that time their audio with PTP (macOS), as nqptp does for
+/// shairport-sync. Each clock's offset comes from its Sync and Follow_Up messages, following the samples with the
+/// least network delay. While a session uses PTP, the receiver announces itself as a clock that follows the
+/// grandmaster and never becomes master, so that the grandmaster goes on sending it Sync messages. Apple's senders
+/// answer no Delay_Req, so the delay to the receiver (a few ms) stays in the offset.
 class PtpClocks {
  public:
   static constexpr size_t MAX_CLOCKS = 4;
@@ -33,10 +34,9 @@ class PtpClocks {
   uint64_t identity() const { return this->identity_; }
   /// Logs what the clocks look like, at most every few seconds
   void log_status(int64_t now_us);
-  /// @brief A message the receiver sends now, if one is due: a Delay_Req to the grandmaster about every second, and
-  /// an Announce every two seconds. Send it right away: the time of a Delay_Req is taken here.
-  /// @return its length, 0 if none is due
+  /// @brief A message the receiver sends now, if one is due: an Announce to the clock it follows every two seconds.
   /// @param clock The clock the receiver follows (the session's timeline), 0 for the grandmaster
+  /// @return its length, 0 if none is due
   size_t next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general);
 
  private:
@@ -48,10 +48,6 @@ class PtpClocks {
     int64_t last_seen_us;  // 0 for a free slot
     int64_t last_sample_us;
     int64_t samples[WINDOW];
-    // The same without the correction fields, and the range of those, to see whether a sender's corrections help
-    int64_t raw_samples[WINDOW];
-    int64_t correction_min_ns;
-    int64_t correction_max_ns;
     uint32_t count;  // Samples in total
     // The offset less the least delay: rises with every better sample, falls only as fast as clocks drift apart,
     // so that samples taken late while the receiver was busy do not move it
@@ -64,11 +60,6 @@ class PtpClocks {
     int64_t sync_received_ns;
     int64_t sync_correction_ns;
     uint32_t syncs;
-    uint32_t follow_ups;
-    // Delay_Resp: the grandmaster's receive time minus ours of sending, the offset plus the delay
-    int64_t delay_samples[WINDOW];
-    uint32_t delay_count;
-    uint32_t delay_responses;
     // The grandmaster part of its last Announce (priorities, quality, identity, steps, time source), passed on in
     // ours with one step more, as a clock that follows it does
     uint8_t announce[17];
@@ -79,22 +70,15 @@ class PtpClocks {
                      int8_t log_interval) const;
   Clock *find_(uint64_t id, uint32_t address, int64_t now_us);
   void add_sample_(Clock &clock, int64_t sample, int64_t now_us);
+  static int64_t best_recent_(const Clock &clock, uint32_t samples);
 
   Clock clocks_[MAX_CLOCKS]{};
   uint64_t grandmaster_{0};
   int64_t last_log_us_{0};
   uint64_t identity_{0};
-  uint16_t delay_sequence_{0};
-  bool delay_pending_{false};
-  uint64_t delay_clock_{0};
-  int64_t delay_sent_ns_{0};
-  int64_t last_delay_request_us_{0};
   uint16_t announce_sequence_{0};
   int64_t last_announce_us_{0};
-  // Messages seen per type (the low 4 bits of the first byte) since the last status line, and which were logged
-  uint32_t type_counts_[16]{};
-  uint32_t types_logged_{0};
-  bool signaling_logged_{false};
+  uint32_t types_logged_{0};  // Message types (on each port) logged when they first arrived
 };
 
 }  // namespace airplay
