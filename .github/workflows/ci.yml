@@ -118,7 +118,10 @@ jobs:
           JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
           IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
           HEADER=$(sed -n 's/^#define AIRPLAY_CPP_VERSION "\(.*\)"$/\1/p' src/airplay_version.h)
-          echo "library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER"
+          PARTS=$(for part in MAJOR MINOR PATCH; do
+            sed -n "s/^#define AIRPLAY_CPP_VERSION_$part \([0-9]*\)$/\1/p" src/airplay_version.h; done | paste -sd.)
+          echo "library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER ($PARTS)"
           test "$PROPS" = "$JSON"
           test "$PROPS" = "$IDF"
           test "$PROPS" = "$HEADER"
+          test "$PROPS" = "$PARTS"
