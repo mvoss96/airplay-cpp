@@ -134,7 +134,9 @@ async def main():
             "SETUP",
             {"deviceID": "AA:BB:CC:DD:EE:FF" if source == "127.0.0.1" else "AA:BB:CC:DD:EE:00",
              "sessionUUID": str(uuid.uuid4()).upper(), "timingPort": session_timing_port or timing_port,
-             "timingProtocol": "NTP", "name": "buffered test", "model": "iPhone17,3"},
+             "timingProtocol": "NTP", "name": "buffered test", "model": "iPhone17,3",
+             # As iOS sends it: the group it plays the receiver in
+             "groupUUID": "2F41DCA0-C513-4478-97E6-12AA296E0B08", "groupContainsGroupLeader": False},
         )
         event_reader, events = await asyncio.open_connection(host, session["eventPort"], local_addr=(source, 0))
         await asyncio.sleep(0.2)

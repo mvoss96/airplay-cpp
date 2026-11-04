@@ -427,6 +427,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';
+  c.group_id[0] = '\0';
+  c.group_leader = false;
   c.frame_length = 0;
   // An AirPlay 2 sender connects its event connection right after setting up its session
   if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
@@ -2112,6 +2114,8 @@ void Receiver::queue_silence_output_() {
 void Receiver::poll(int64_t now_us) {
   if (this->slots_ == nullptr)
     return;
+  if (this->airplay2_)
+    this->update_group_();
   const int64_t poll_start = this->clock_now_();
   const uint32_t now_ms = to_ms(now_us);
   if (this->audio_active_) {

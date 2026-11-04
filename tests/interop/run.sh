@@ -117,6 +117,9 @@ cat receiver.log
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
   grep -q "Stream: $([ "$ALAC" = 1 ] && echo ALAC || echo AAC), AirPlay 2 buffered" receiver.log
+  # The sender's group is announced while it plays (status flag bit 11), and the receiver's own afterwards
+  grep -q "Group 2F41DCA0-C513-4478-97E6-12AA296E0B08 (gcgl 0)" receiver.log
+  grep -q "Status flags 0x804" receiver.log
   if [ "$TAKEOVER" = 1 ]; then
     # The test sender reads its event connection but never answers, as Music Assistant
     grep -q "The sender does not answer on its event connection" receiver.log

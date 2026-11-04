@@ -55,6 +55,8 @@ static constexpr uint8_t TLV_SEPARATOR = 0xff;
 static constexpr uint8_t TLV_ERROR_MAX_PEERS = 0x04;
 /// Status flag: set up for HomeKit access control through the Home app
 static constexpr int64_t STATUS_FLAG_HOMEKIT_ACCESS_CONTROL = 1 << 10;
+/// In a sender's group, as other AirPlay 2 speakers announce it while they play in one
+static constexpr int64_t STATUS_FLAG_IN_GROUP = 1 << 11;
 /// Longest encrypted TLV of a pairing step: identifier, public key and signature, with the tag
 static constexpr size_t PAIRING_SUB_TLV_SIZE = 256;
 static constexpr char CONTROL_SALT[] = "Control-Salt";
@@ -140,6 +142,8 @@ void Receiver::init_airplay2_() {
                   "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", id[0], id[1], id[2], id[3],
                   id[4], id[5], id[6], id[7], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
   }
+  // Not in a sender's group: its own
+  std::snprintf(this->group_id_, sizeof(this->group_id_), "%s", this->pairing_id_);
   uint8_t feature_bytes[8];
   for (size_t i = 0; i < sizeof(feature_bytes); i++)
     feature_bytes[i] = static_cast<uint8_t>(this->airplay2_features_ >> (8 * i));
@@ -156,9 +160,9 @@ void Receiver::init_airplay2_() {
       {"protovers", "1.1"},
       {"acl", "0"},
       // Group details, as shairport-sync announces them: not in a group
-      {"gid", this->pairing_id_},
+      {"gid", this->group_id_},
       {"igl", "0"},
-      {"gcgl", "0"},
+      {"gcgl", this->group_leader_},
       {"psi", this->public_session_id_},
       {"fex", this->features_base64_},
       {"vv", "2"},
@@ -651,13 +655,30 @@ void Receiver::update_status_flags_() {
   char flags[sizeof(this->status_flags_)];
   std::snprintf(
       flags, sizeof(flags), "0x%" PRIX64,
-      static_cast<uint64_t>(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0)));
+      static_cast<uint64_t>(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
+                            (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0)));
   if (std::strcmp(flags, this->status_flags_) == 0)
     return;
   std::memcpy(this->status_flags_, flags, sizeof(flags));
   AIRPLAY_LOGD("Status flags %s", this->status_flags_);
   if (this->listener_ != nullptr)
     this->listener_->on_status_flags(this->status_flags_);
+}
+
+void Receiver::update_group_() {
+  const Connection *owner = this->session_owner_ != NO_CONNECTION ? &this->connections_[this->session_owner_] : nullptr;
+  const bool in_group = owner != nullptr && owner->group_id[0] != '\0';
+  const char *group_id = in_group ? owner->group_id : this->pairing_id_;
+  const char *leader = in_group && owner->group_leader ? "1" : "0";
+  if (in_group == this->in_group_ && std::strcmp(group_id, this->group_id_) == 0 && leader[0] == this->group_leader_[0])
+    return;
+  std::snprintf(this->group_id_, sizeof(this->group_id_), "%s", group_id);
+  this->group_leader_[0] = leader[0];
+  this->in_group_ = in_group;
+  AIRPLAY_LOGD("Group %s (gcgl %s)", this->group_id_, this->group_leader_);
+  this->update_status_flags_();
+  if (this->listener_ != nullptr)
+    this->listener_->on_group(this->group_id_, this->group_leader_);
 }
 
 void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {
@@ -801,6 +822,15 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
         response.body = this->body_buffer_;
       }
       return;
+    }
+    // The group the sender plays in, announced while its session plays
+    const char *group = nullptr;
+    size_t group_length = 0;
+    if (reader.get_string(reader.get(root, "groupUUID"), &group, &group_length) && group_length < sizeof(c.group_id)) {
+      std::memcpy(c.group_id, group, group_length);
+      c.group_id[group_length] = '\0';
+      c.group_leader = false;
+      reader.get_bool(reader.get(root, "groupContainsGroupLeader"), &c.group_leader);
     }
     const bool ptp = reader.string_equals(timing_protocol, "PTP");
     if (timing_protocol != PlistReader::NONE && !reader.string_equals(timing_protocol, "NTP") &&
@@ -1137,7 +1167,7 @@ bool Receiver::send_media_remote_command_(const char *value, float volume) {
 void Receiver::build_info_(Response &response) {
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
   const float device_volume = this->device_volume_.load(std::memory_order_relaxed);
-  writer.begin_dict(device_volume >= 0.0f ? 12 : 11);
+  writer.begin_dict(device_volume >= 0.0f ? 13 : 12);
   writer.key("deviceID");
   writer.string(this->device_id_);
   writer.key("macAddress");
@@ -1145,7 +1175,10 @@ void Receiver::build_info_(Response &response) {
   writer.key("features");
   writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
-  writer.integer(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0));
+  writer.integer(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
+                 (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0));
+  writer.key("gid");
+  writer.string(this->group_id_);
   writer.key("model");
   writer.string(this->config_.model);
   writer.key("name");
