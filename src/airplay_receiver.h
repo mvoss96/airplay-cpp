@@ -280,7 +280,8 @@ class Receiver {
     uint16_t event_answers{0};
     uint32_t event_first_request_ms{0};  // Of the first request while none was answered
     bool event_silent{false};
-    bool audio_data{false};  // A sender's buffered audio connection
+    bool audio_data{false};      // A sender's buffered audio connection
+    bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};

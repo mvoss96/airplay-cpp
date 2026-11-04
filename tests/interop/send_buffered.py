@@ -285,6 +285,7 @@ async def main():
             reply = await exchange(control_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
             assert "eventPort" in reply
             await asyncio.open_connection(host, reply["eventPort"])
+            await exchange(control_rtsp, "RECORD")  # As the Home app does when it adds the receiver
         await send(i)
         i += 1
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE

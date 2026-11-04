@@ -420,6 +420,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.event_first_request_ms = 0;
   c.event_silent = false;
   c.audio_data = false;
+  c.remote_control = false;
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';
@@ -690,7 +691,9 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     const bool airplay2_session = is_owner && c.encrypted;
     if (airplay2_session)
       this->airplay2_recording_ = true;
-    if (!is_owner && c.session_pending) {
+    if (c.remote_control) {
+      // The Home app sends it in the session it sets up to add the receiver; nothing plays
+    } else if (!is_owner && c.session_pending) {
       // The sender's other session plays on until this one sets up its stream
       c.pending_recording = true;
       std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "Audio-Latency: 11025\r\n");

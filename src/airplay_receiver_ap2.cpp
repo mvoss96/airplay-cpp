@@ -740,6 +740,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     if (remote_control_only || reader.string_equals(timing_protocol, "None")) {
       // iOS opens extra sessions only to control playback; they must not take over the speaker
       AIRPLAY_LOGD("Remote control session");
+      c.remote_control = true;
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
