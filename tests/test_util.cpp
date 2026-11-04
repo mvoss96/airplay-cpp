@@ -202,9 +202,31 @@ static void test_ptp() {
   CHECK(active.next_message(0, message, now_us, &to, &general) == 64 && general && to == 0x0200000a);
   CHECK((message[0] & 0x0f) == 0xb && message[47] == 255 && message[48] == 255);
   CHECK(message[20] == 0x3c && message[23] == 0xff && message[24] == 0xfe && message[27] == 0x94);
-  CHECK(active.next_message(0, message, now_us + 1000000, &to, &general) == 0);  // Not due yet
-  CHECK(active.next_message(0, message, now_us + 2000000, &to, &general) == 64);
   CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 1000000)) < 100000);
+  // Then a Delay_Req; the master's answer gives the delay (1 ms each way), which the offset then includes
+  CHECK(active.next_message(0, message, now_us, &to, &general) == 44 && !general && to == 0x0200000a);
+  CHECK((message[0] & 0x0f) == 0x1);
+  std::vector<uint8_t> answer = ptp_message(0x9, clock, static_cast<uint16_t>(message[30] << 8 | message[31]), false,
+                                            now_us * 1000 + offset + 1000000, 54);
+  std::copy(message + 20, message + 30, answer.begin() + 44);  // To the port that asked
+  active.handle(true, answer.data(), answer.size(), 0x0200000a, now_us + 2000);
+  CHECK(active.offset_ns(clock, now_us, &found) && std::llabs(found - offset) < 100000);
+  CHECK(active.next_message(0, message, now_us + 500000, &to, &general) == 0);  // Not due yet
+  CHECK(active.next_message(0, message, now_us + 1000000, &to, &general) == 44);
+  CHECK(active.next_message(0, message, now_us + 2000000, &to, &general) == 64);
+  // A master that answers none (macOS) gets no more after five
+  PtpClocks silent;
+  silent.set_identity(mac);
+  int requests = 0;
+  for (uint16_t seq = 0; seq < 160; seq++) {  // 20 s
+    now_us += 125000;
+    silent.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0200000a, now_us + 1000);
+    silent.handle(true, ptp_message(0x8, clock, seq, false, now_us * 1000 + offset).data(), 44, 0x0200000a,
+                  now_us + 1100);
+    if (silent.next_message(0, message, now_us, &to, &general) == 44)
+      requests++;
+  }
+  CHECK(requests == 5);
 
   // Samples taken late for 3 s while the receiver is busy (50 to 300 ms) barely move the offset; a clock that was
   // set back by a second is followed after 64 samples
@@ -266,7 +288,8 @@ static void test_ptp() {
   }
   CHECK(two.next_message(phone, message, now_us, &to, &general) == 64 && to == 0x5302a8c0u);
   CHECK(message[47] == 250 && message[53] == 0x10 && message[62] == 1);  // The phone's details, one step more
-  CHECK(two.next_message(phone, message, now_us, &to, &general) == 0);   // Nothing else to send
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 44 && to == 0x5302a8c0u);  // Its Delay_Req
+  CHECK(two.next_message(phone, message, now_us, &to, &general) == 0);                        // Nothing else to send
 
   // A sender that slept comes back with its clock 332 s behind: three samples confirm the jump
   PtpClocks sleeper;

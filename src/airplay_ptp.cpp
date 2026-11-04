@@ -12,7 +12,10 @@ static constexpr size_t HEADER_SIZE = 34;
 static constexpr size_t TIMESTAMP_MESSAGE_SIZE = HEADER_SIZE + 10;
 static constexpr size_t ANNOUNCE_SIZE = 64;
 static constexpr uint8_t TYPE_SYNC = 0x0;
+static constexpr uint8_t TYPE_DELAY_REQ = 0x1;
 static constexpr uint8_t TYPE_FOLLOW_UP = 0x8;
+static constexpr uint8_t TYPE_DELAY_RESP = 0x9;
+static constexpr size_t DELAY_RESP_SIZE = HEADER_SIZE + 20;
 static constexpr uint8_t TYPE_ANNOUNCE = 0xb;
 static constexpr uint8_t FLAG_TWO_STEP = 0x02;  // In the first byte of the flags
 /// Samples a clock needs before its offset is used
@@ -21,6 +24,12 @@ static constexpr uint32_t MIN_SAMPLES = 4;
 static constexpr int64_t CLOCK_TIMEOUT_US = 5000000;
 static constexpr int64_t LOG_INTERVAL_US = 10000000;
 static constexpr int64_t ANNOUNCE_INTERVAL_US = 2000000;
+/// Music Assistant counts a receiver as following its clock while Delay_Req come at most 3 s apart
+static constexpr int64_t DELAY_REQUEST_INTERVAL_US = 1000000;
+/// A clock that left this many in a row unanswered gets no more (macOS answers none)
+static constexpr uint8_t MAX_UNANSWERED = 5;
+/// A larger delay is not a delay on a home network but a wrong answer
+static constexpr int64_t MAX_DELAY_NS = 50000000;
 /// How fast two clocks may drift apart (quartz crystals stay within 50 ppm each)
 static constexpr int64_t MAX_DRIFT_PPM = 100;
 /// Samples this far below the estimate all the time mean the clock was set back
@@ -118,6 +127,22 @@ void PtpClocks::handle(bool general, const uint8_t *data, size_t length, uint32_
       clock->sync_pending = false;
       this->add_sample_(*clock, read_timestamp_ns(data + 34) + correction_ns - now_us * 1000, now_us);
     }
+  } else if (type == TYPE_DELAY_RESP && general && length >= DELAY_RESP_SIZE) {
+    // The answer to our Delay_Req: when the master received it
+    Clock *clock = this->find_(id, from_address, now_us);
+    if (clock == nullptr || !clock->delay_pending || clock->delay_sequence != sequence ||
+        read_be(data + 44, 8) != this->identity_ || clock->count < MIN_SAMPLES)
+      return;
+    clock->delay_pending = false;
+    clock->delay_unanswered = 0;
+    // The round trip is the offset plus the delay to the master; the estimate is the offset less the delay back
+    const int64_t round_trip_ns = read_timestamp_ns(data + 34) - correction_ns - clock->delay_sent_ns;
+    const int64_t delay = std::max<int64_t>((round_trip_ns - clock->estimate) / 2, 0);
+    if (delay > MAX_DELAY_NS)
+      return;
+    if (clock->delay_count == 0)
+      AIRPLAY_LOGD("PTP clock %016" PRIx64 " answers Delay_Req: network delay %" PRId64 " us", clock->id, delay / 1000);
+    clock->delays[clock->delay_count++ % DELAY_WINDOW] = static_cast<int32_t>(delay);
   } else if (type == TYPE_FOLLOW_UP && general) {
     Clock *clock = this->find_(id, from_address, now_us);
     if (clock == nullptr)
@@ -186,6 +211,7 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
                      (best_recent_(clock, clock.below) - clock.estimate) / 1000000);
         clock.estimate = best_recent_(clock, clock.below);
         clock.below = 0;
+        clock.delay_count = 0;  // Measured against the old estimate
       }
     } else {
       clock.below = 0;
@@ -203,6 +229,13 @@ int64_t PtpClocks::best_recent_(const Clock &clock, uint32_t samples) {
   return best;
 }
 
+int64_t PtpClocks::delay_ns_(const Clock &clock) {
+  if (clock.delay_count == 0)
+    return 0;
+  const auto *end = clock.delays + std::min<size_t>(clock.delay_count, DELAY_WINDOW);
+  return *std::min_element(clock.delays, end);
+}
+
 const PtpClocks::Clock *PtpClocks::active_(uint64_t id, int64_t now_us) const {
   if (id == 0)
     id = this->grandmaster_;
@@ -217,7 +250,7 @@ bool PtpClocks::offset_ns(uint64_t id, int64_t now_us, int64_t *offset) const {
   const Clock *clock = this->active_(id, now_us);
   if (clock == nullptr)
     return false;
-  *offset = clock->estimate;
+  *offset = clock->estimate + delay_ns_(*clock);
   return true;
 }
 
@@ -271,6 +304,22 @@ size_t PtpClocks::next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, 
     *general = true;
     return ANNOUNCE_SIZE;
   }
+  // The clock is one of ours; active_() only finds it
+  auto *followed = const_cast<Clock *>(master);
+  if (followed->delay_unanswered < MAX_UNANSWERED &&
+      now_us - followed->last_delay_request_us >= DELAY_REQUEST_INTERVAL_US) {
+    if (followed->delay_pending && ++followed->delay_unanswered == MAX_UNANSWERED)
+      AIRPLAY_LOGD("PTP clock %016" PRIx64 " answers no Delay_Req", followed->id);
+    if (followed->delay_unanswered >= MAX_UNANSWERED)
+      return 0;
+    followed->last_delay_request_us = now_us;
+    followed->delay_pending = true;
+    followed->delay_sequence = this->delay_sequence_++;
+    followed->delay_sent_ns = now_us * 1000;
+    write_header_(buffer, TYPE_DELAY_REQ, TIMESTAMP_MESSAGE_SIZE, master->domain, followed->delay_sequence, 1, 0x7f);
+    *general = false;
+    return TIMESTAMP_MESSAGE_SIZE;
+  }
   return 0;
 }
 
@@ -290,8 +339,9 @@ void PtpClocks::log_status(int64_t now_us) {
       best = clock.estimate;
     }
     AIRPLAY_LOGV("PTP clock %016" PRIx64 ": %" PRIu32 " Sync in %" PRId64 " s, offset %" PRId64 " ms, spread %" PRId64
-                 " us",
-                 clock.id, clock.syncs, LOG_INTERVAL_US / 1000000, best / 1000000, spread / 1000);
+                 " us, delay %" PRId64 " us",
+                 clock.id, clock.syncs, LOG_INTERVAL_US / 1000000, best / 1000000, spread / 1000,
+                 delay_ns_(clock) / 1000);
     clock.syncs = 0;
   }
 }

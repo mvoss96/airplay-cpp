@@ -12,8 +12,10 @@ inline constexpr uint16_t PTP_GENERAL_PORT = 320;
 /// Follows the PTP clocks of AirPlay 2 senders that time their audio with PTP (macOS), as nqptp does for
 /// shairport-sync. Each clock's offset comes from its Sync and Follow_Up messages, following the samples with the
 /// least network delay. While a session uses PTP, the receiver announces itself as a clock that follows the
-/// grandmaster and never becomes master, so that the grandmaster goes on sending it Sync messages. Apple's senders
-/// answer no Delay_Req, so the delay to the receiver (a few ms) stays in the offset.
+/// grandmaster and never becomes master, so that the grandmaster goes on sending it Sync messages. It also sends
+/// Delay_Req: Music Assistant answers them, which gives the network delay, and counts them to see that the receiver
+/// follows its clock. Apple's senders answer none, so they get no more after a few and the delay to the receiver (a
+/// few ms) stays in their offset.
 class PtpClocks {
  public:
   static constexpr size_t MAX_CLOCKS = 4;
@@ -34,13 +36,15 @@ class PtpClocks {
   uint64_t identity() const { return this->identity_; }
   /// Logs what the clocks look like, at most every few seconds
   void log_status(int64_t now_us);
-  /// @brief A message the receiver sends now, if one is due: an Announce to the clock it follows every two seconds.
+  /// @brief A message the receiver sends now, if one is due: an Announce to the clock it follows every two seconds,
+  /// a Delay_Req every second while the clock answers them.
   /// @param clock The clock the receiver follows (the session's timeline), 0 for the grandmaster
   /// @return its length, 0 if none is due
   size_t next_message(uint64_t clock, uint8_t *buffer, int64_t now_us, uint32_t *to_address, bool *general);
 
  private:
   static constexpr size_t WINDOW = 16;
+  static constexpr size_t DELAY_WINDOW = 8;
   struct Clock {
     uint64_t id;
     uint32_t address;
@@ -64,6 +68,14 @@ class PtpClocks {
     // ours with one step more, as a clock that follows it does
     uint8_t announce[17];
     bool has_announce;
+    // Delay_Req and the network delay from the answers (half the round trip, the least of the last few)
+    bool delay_pending;
+    uint8_t delay_unanswered;
+    uint16_t delay_sequence;
+    int64_t delay_sent_ns;
+    int64_t last_delay_request_us;
+    int32_t delays[DELAY_WINDOW];
+    uint32_t delay_count;
   };
   const Clock *active_(uint64_t id, int64_t now_us) const;
   void write_header_(uint8_t *buffer, uint8_t type, size_t length, uint8_t domain, uint16_t sequence, uint8_t control,
@@ -71,12 +83,14 @@ class PtpClocks {
   Clock *find_(uint64_t id, uint32_t address, int64_t now_us);
   void add_sample_(Clock &clock, int64_t sample, int64_t now_us);
   static int64_t best_recent_(const Clock &clock, uint32_t samples);
+  static int64_t delay_ns_(const Clock &clock);
 
   Clock clocks_[MAX_CLOCKS]{};
   uint64_t grandmaster_{0};
   int64_t last_log_us_{0};
   uint64_t identity_{0};
   uint16_t announce_sequence_{0};
+  uint16_t delay_sequence_{0};
   int64_t last_announce_us_{0};
   uint32_t types_logged_{0};  // Message types (on each port) logged when they first arrived
 };
