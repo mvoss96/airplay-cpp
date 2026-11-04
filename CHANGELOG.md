@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0
+
+- HomeKit pairing: the Home app can add the receiver (pair-setup with the fixed PIN, pair-verify with the Home's
+  keys, pair-add/remove/list, POST /configure). Like shairport-sync, pairings are kept in RAM only.
+- A session that only controls playback (as the Home app sets up) may send RECORD
+- PTP: when a second AirPlay 2 speaker joins an iPhone's session, the receiver follows the group's new grandmaster:
+  the anchor moves with a clock jump while playing, and an anchor in another clock's time follows that clock
+- PTP: before the sender names its timeline, the receiver follows the sender's own clock; after a jump, the middle
+  of the three confirming samples
+- Logs why a playing session gives no audio, and which PTP clock is used
+- ESP-IDF example: the large single app partition
+
 ## v0.2.2
 
 - Music Assistant: pause and resume play again (the audio held from before the pause no longer stops playback), and
