@@ -91,6 +91,10 @@ class Listener {
   /// The sender's remote control details, see dacp.h. Reported in every session that has them, and again when
   /// they change.
   virtual void on_remote_target(const RemoteTarget & /*target*/) {}
+  /// The AirPlay 2 sender does not answer on its event connection (Music Assistant): request_sender_volume() and
+  /// request_sender_command() fail from now on, and what was sent there last went nowhere. Remote control (DACP)
+  /// reaches such senders.
+  virtual void on_event_channel_silent() {}
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
   virtual void on_sender_name(const char * /*name*/) {}
@@ -271,6 +275,8 @@ class Receiver {
     // Requests sent on an event connection and pieces of data that came back. Music Assistant does not answer.
     uint16_t event_requests{0};
     uint16_t event_answers{0};
+    uint32_t event_first_request_ms{0};  // Of the first request while none was answered
+    bool event_silent{false};
     bool audio_data{false};  // A sender's buffered audio connection
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
@@ -382,7 +388,7 @@ class Receiver {
   void handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us);
   void handle_flush_buffered_(const uint8_t *body, size_t length);
   void stop_buffered_audio_();
-  void update_event_channel_ready_();
+  void update_event_channel_ready_(uint32_t now_ms);
   void update_sender_address_();
   /// Reports the name of the session owner's device when it changed
   void update_sender_name_();
@@ -638,6 +644,7 @@ class Receiver {
   int16_t *benchmark_output_{nullptr};  // The kind of ALAC packets was logged for this stream  // A late packet was
                                         // explained in the log since the last statistics
   uint32_t last_poll_ms_{0};
+  uint32_t poll_ms_{0};  // Time of the current poll(), for what is sent from it
   bool output_dry_{false};
   ReceiverStats stats_{};
 

@@ -416,6 +416,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.event_channel = false;
   c.event_requests = 0;
   c.event_answers = 0;
+  c.event_first_request_ms = 0;
+  c.event_silent = false;
   c.audio_data = false;
   c.session_pending = false;
   c.pending_recording = false;
@@ -2038,7 +2040,8 @@ void Receiver::poll(int64_t now_us) {
     this->last_poll_ms_ = now_ms;
   }
 
-  this->update_event_channel_ready_();
+  this->poll_ms_ = now_ms;
+  this->update_event_channel_ready_(now_ms);
   this->update_sender_address_();
   this->update_sender_name_();
   this->send_sender_requests_(now_ms);

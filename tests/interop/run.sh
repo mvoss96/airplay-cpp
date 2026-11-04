@@ -105,6 +105,10 @@ cat receiver.log
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
   grep -q "Stream: AAC, AirPlay 2 buffered" receiver.log
+  if [ "$TAKEOVER" = 1 ]; then
+    # The test sender reads its event connection but never answers, as Music Assistant
+    grep -q "The sender does not answer on its event connection" receiver.log
+  fi
   python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] || [ "$TAKEOVER" = 1 ] && echo --pause)
   exit 0
 fi

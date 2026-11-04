@@ -49,6 +49,8 @@ static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encry
 /// Unanswered requests after which nothing more is sent on an event connection. Music Assistant never reads it, and
 /// the requests that pile up there made the receiver lose audio packets.
 static constexpr uint16_t MAX_UNANSWERED_REQUESTS = 3;
+/// Apple's senders answer requests on the event connection at once; one that has not answered this long never does
+static constexpr uint32_t EVENT_ANSWER_TIMEOUT_MS = 2000;
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
 static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
@@ -660,12 +662,23 @@ bool Receiver::request_sender_volume(float volume) {
   return true;
 }
 
-void Receiver::update_event_channel_ready_() {
+void Receiver::update_event_channel_ready_(uint32_t now_ms) {
   bool ready = false;
   if (this->session_owner_ != NO_CONNECTION) {
     const uint32_t address = this->connections_[this->session_owner_].peer.address;
-    for (const Connection &c : this->connections_)
-      ready |= c.open && c.event_channel && c.encrypted && c.peer.address == address;
+    for (Connection &c : this->connections_) {
+      if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
+        continue;
+      if (!c.event_silent && c.event_answers == 0 && c.event_requests > 0 &&
+          (c.event_requests >= MAX_UNANSWERED_REQUESTS ||
+           now_ms - c.event_first_request_ms >= EVENT_ANSWER_TIMEOUT_MS)) {
+        c.event_silent = true;
+        AIRPLAY_LOGI("The sender does not answer on its event connection; nothing more is sent on it");
+        if (this->listener_ != nullptr)
+          this->listener_->on_event_channel_silent();
+      }
+      ready |= !c.event_silent;
+    }
   }
   this->event_channel_ready_.store(ready, std::memory_order_release);
 }
@@ -709,7 +722,7 @@ bool Receiver::send_media_remote_command_(const char *value, float volume) {
     Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
-    if (c.event_answers == 0 && c.event_requests >= MAX_UNANSWERED_REQUESTS)
+    if (c.event_silent)
       return false;
     // A volume is given at the top level and in the parameters; senders read either
     uint8_t body[192];
@@ -740,8 +753,9 @@ bool Receiver::send_media_remote_command_(const char *value, float volume) {
       return false;
     std::memcpy(message + header_length, body, body_length);
     this->send_(i, reinterpret_cast<const uint8_t *>(message), static_cast<size_t>(header_length) + body_length);
-    if (++c.event_requests == MAX_UNANSWERED_REQUESTS && c.event_answers == 0)
-      AIRPLAY_LOGI("The sender does not answer on its event connection; nothing more is sent on it");
+    c.event_requests++;
+    if (c.event_answers == 0 && c.event_first_request_ms == 0)
+      c.event_first_request_ms = this->poll_ms_ != 0 ? this->poll_ms_ : 1;
     return true;
   }
   return false;
