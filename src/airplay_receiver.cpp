@@ -222,8 +222,11 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
       {"vn", "65537"},  {"vs", "105.1"}, {"sf", "0x4"},   {"fv", "76400.10"},
   };
   static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 3 <= MAX_TXT_RECORDS, "No room for pw, am and md");
-  for (const TxtRecord &record : RECORDS)
-    this->txt_records_[this->txt_record_count_++] = record;
+  for (const TxtRecord &record : RECORDS) {
+    // The status flags change with HomeKit access control
+    this->txt_records_[this->txt_record_count_++] =
+        std::strcmp(record.key, "sf") == 0 ? TxtRecord{record.key, this->status_flags_} : record;
+  }
   this->txt_records_[this->txt_record_count_++] = TxtRecord{"pw", config.password != nullptr ? "true" : "false"};
   this->txt_records_[this->txt_record_count_++] = TxtRecord{"am", config.model};
   // md: which details the receiver takes (0 = text, 1 = cover art, 2 = progress)

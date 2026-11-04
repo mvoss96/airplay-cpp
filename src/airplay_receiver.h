@@ -64,6 +64,20 @@ enum class SenderCommand : uint8_t {
 /// buffer and one read of the transport (at most 2 KB)
 inline constexpr size_t ARTWORK_RESERVE = 6 * 1024;
 
+/// The devices paired through the Home app, to keep across restarts (Receiver::homekit_pairings(),
+/// Receiver::set_homekit_pairings()). Plain data that can be stored as it is.
+struct HomeKitPairings {
+  static constexpr size_t MAX_CONTROLLERS = 8;
+  static constexpr size_t ID_SIZE = 64;  // A controller's pairing identifier, usually a UUID
+  struct Controller {
+    char id[ID_SIZE];  // Empty when the entry is free
+    uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
+    uint8_t permissions;
+  };
+  bool access_control;  // Set up through the Home app (POST /configure)
+  Controller controllers[MAX_CONTROLLERS];
+};
+
 /// Events of the receiver. Called on the thread that drives the receiver.
 class Listener {
  public:
@@ -101,6 +115,11 @@ class Listener {
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
   virtual void on_sender_name(const char * /*name*/) {}
+  /// The HomeKit pairings changed (pair-add, pair-remove, POST /configure): store them to keep them across restarts
+  virtual void on_homekit_pairings(const HomeKitPairings & /*pairings*/) {}
+  /// The status flags changed (HomeKit access control): the "flags" TXT record of _airplay._tcp and "sf" of
+  /// _raop._tcp now hold this value
+  virtual void on_status_flags(const char * /*flags*/) {}
 };
 
 struct ReceiverConfig {
@@ -253,6 +272,12 @@ class Receiver {
   /// @brief TXT records of the _airplay._tcp service, which AirPlay 2 senders look for; none if AirPlay 2 is not
   /// offered. Its instance name is config.name and its port the RTSP port.
   const TxtRecord *airplay_txt_records(size_t *count) const;
+  /// Pairings made through the Home app, to store (see Listener::on_homekit_pairings())
+  const HomeKitPairings &homekit_pairings() const { return this->homekit_; }
+  /// Pairings stored before. Call before mDNS is set up from the TXT records: they hold the status flags.
+  void set_homekit_pairings(const HomeKitPairings &pairings);
+  /// Status flags as in the TXT records, e.g. "0x4"
+  const char *status_flags() const { return this->status_flags_; }
 
  protected:
   enum class Codec : uint8_t {
@@ -335,14 +360,8 @@ class Receiver {
   static constexpr size_t HAP_FRAME_DATA_SIZE = 1024;
   static constexpr size_t HAP_FRAME_SIZE = 2 + HAP_FRAME_DATA_SIZE + POLY1305_TAG_SIZE;
   static constexpr size_t AIRPLAY2_BODY_SIZE = 1024;
-  static constexpr size_t HOMEKIT_ID_SIZE = 64;  // A controller's pairing identifier, usually a UUID
-  static constexpr size_t MAX_CONTROLLERS = 8;
-  /// A device paired through HomeKit pair-setup or pair-add
-  struct Controller {
-    char id[HOMEKIT_ID_SIZE];  // Empty when the entry is free
-    uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
-    uint8_t permissions;
-  };
+  static constexpr size_t HOMEKIT_ID_SIZE = HomeKitPairings::ID_SIZE;
+  using Controller = HomeKitPairings::Controller;
 
   /// Version announced to AirPlay 2 senders
   static constexpr char AIRPLAY2_SOURCE_VERSION[] = "366.0";
@@ -396,6 +415,10 @@ class Receiver {
   /// @return the controller's entry, nullptr if unknown
   Controller *find_controller_(const uint8_t *id, size_t length);
   bool add_controller_(const uint8_t *id, size_t length, const uint8_t *public_key, uint8_t permissions);
+  /// After the pairings changed: access control ends with the last admin, the status flags follow, the listener
+  /// hears of it
+  void homekit_changed_();
+  void update_status_flags_();
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
                               size_t length, Response &response, int64_t now_us);
   void build_info_(Response &response);
@@ -533,18 +556,18 @@ class Receiver {
   // HomeKit pairing. Like shairport-sync, the pairings are kept in RAM only and pair-verify accepts controllers it
   // does not know: access is not restricted beyond what transient pairing allows.
   uint8_t accessory_secret_key_[ED25519_SECRET_KEY_SIZE]{};
-  Controller controllers_[MAX_CONTROLLERS]{};
+  HomeKitPairings homekit_{};
+  char status_flags_[12]{"0x4"};     // In the TXT records
   uint8_t verify_connection_{0xff};  // Connection between pair-verify M1 and M3
   uint8_t verify_secret_[X25519_KEY_SIZE]{};
   uint8_t verify_public_[X25519_KEY_SIZE]{};
   uint8_t verify_peer_public_[X25519_KEY_SIZE]{};
   uint8_t verify_shared_[X25519_KEY_SIZE]{};
-  bool homekit_access_control_{false};  // Set up through the Home app (POST /configure)
-  uint8_t *frames_{nullptr};            // Per connection: an incoming encrypted frame
-  uint8_t *send_buffer_{nullptr};       // An outgoing encrypted frame
-  uint8_t *body_buffer_{nullptr};       // Body of an AirPlay 2 response
-  bool airplay2_audio_{false};          // The session's audio is encrypted with audio_key_
-  bool event_channel_pending_{false};   // A sender is about to open its event connection, from this address:
+  uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
+  uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
+  uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response
+  bool airplay2_audio_{false};         // The session's audio is encrypted with audio_key_
+  bool event_channel_pending_{false};  // A sender is about to open its event connection, from this address:
   uint32_t event_channel_address_{0};
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
   uint32_t event_cseq_{0};

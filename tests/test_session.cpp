@@ -802,6 +802,27 @@ static void test_mdns() {
   Fixture without(false, 500, false);
   without.receiver.txt_records(&count);
   CHECK(count == 16);
+
+  // Pairings stored from an earlier run: with HomeKit access control, the status flags show it
+  auto status_flags = [&]() {
+    records = with.receiver.txt_records(&count);
+    for (size_t i = 0; i < count; i++) {
+      if (std::strcmp(records[i].key, "sf") == 0)
+        return std::string(records[i].value);
+    }
+    return std::string();
+  };
+  CHECK(status_flags() == "0x4");
+  HomeKitPairings pairings{};
+  pairings.access_control = true;
+  std::strcpy(pairings.controllers[0].id, "FF09B22B-636C-4976-9CFE-9F1573CB840F");
+  pairings.controllers[0].permissions = 1;
+  with.receiver.set_homekit_pairings(pairings);
+  CHECK(status_flags() == "0x404" && std::strcmp(with.receiver.status_flags(), "0x404") == 0);
+  CHECK(std::strcmp(with.receiver.homekit_pairings().controllers[0].id, pairings.controllers[0].id) == 0);
+  pairings.access_control = false;
+  with.receiver.set_homekit_pairings(pairings);
+  CHECK(status_flags() == "0x4");
 }
 
 int main() {

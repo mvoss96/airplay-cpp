@@ -21,10 +21,11 @@ namespace airplay {
 
 // Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), FairPlay (14), audio formats
 // (18-20, 22), unified advertiser info (30), control channel encryption (38), buffered audio (40), NTP timing (45),
-// HomeKit pairing and peer management (46, 47) and transient pairing (48). iOS streams only to receivers with
+// HomeKit pairing and peer management (46, 47) and transient pairing (48), and cover art, progress and text in
+// the AirPlay 1 way (15-17). iOS streams only to receivers with
 // FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
 // of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
-static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405C4A00ULL;
+static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405FCA00ULL;
 /// PTP timing (41), with ReceiverConfig::ptp. macOS only streams to receivers with it, and then only with PTP.
 static constexpr uint64_t FEATURE_PTP = 1ULL << 41;
 /// Status flags: an audio receiver
@@ -147,7 +148,7 @@ void Receiver::init_airplay2_() {
   const TxtRecord records[] = {
       {"deviceid", this->device_id_},
       {"features", this->features_},
-      {"flags", "0x4"},
+      {"flags", this->status_flags_},
       {"model", this->config_.model},
       {"pk", this->public_key_hex_},
       {"pi", this->pairing_id_},
@@ -489,6 +490,7 @@ bool Receiver::finish_pair_setup_(const uint8_t *body, size_t length, Tlv8Writer
     return false;
   if (!this->add_controller_(id, id_length, public_key, PERMISSION_ADMIN))
     return false;
+  this->homekit_changed_();
 
   // The receiver answers with its own
   const size_t accessory_id_length = std::strlen(this->pairing_id_);
@@ -605,7 +607,7 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
 }
 
 Receiver::Controller *Receiver::find_controller_(const uint8_t *id, size_t length) {
-  for (Controller &controller : this->controllers_) {
+  for (Controller &controller : this->homekit_.controllers) {
     if (controller.id[0] != '\0' && std::strlen(controller.id) == length && std::memcmp(controller.id, id, length) == 0)
       return &controller;
   }
@@ -616,9 +618,9 @@ bool Receiver::add_controller_(const uint8_t *id, size_t length, const uint8_t *
   if (length == 0 || length >= HOMEKIT_ID_SIZE)
     return false;
   Controller *controller = this->find_controller_(id, length);
-  for (size_t i = 0; controller == nullptr && i < MAX_CONTROLLERS; i++) {
-    if (this->controllers_[i].id[0] == '\0')
-      controller = &this->controllers_[i];
+  for (size_t i = 0; controller == nullptr && i < HomeKitPairings::MAX_CONTROLLERS; i++) {
+    if (this->homekit_.controllers[i].id[0] == '\0')
+      controller = &this->homekit_.controllers[i];
   }
   if (controller == nullptr)
     return false;
@@ -627,6 +629,47 @@ bool Receiver::add_controller_(const uint8_t *id, size_t length, const uint8_t *
   std::memcpy(controller->public_key, public_key, ED25519_PUBLIC_KEY_SIZE);
   controller->permissions = permissions;
   return true;
+}
+
+void Receiver::homekit_changed_() {
+  if (this->homekit_.access_control) {
+    bool admin = false;
+    for (const Controller &controller : this->homekit_.controllers)
+      admin = admin || (controller.id[0] != '\0' && (controller.permissions & PERMISSION_ADMIN) != 0);
+    if (!admin) {
+      // Nobody left who could set it up again
+      this->homekit_.access_control = false;
+      AIRPLAY_LOGI("HomeKit access control disabled: no admin is paired");
+    }
+  }
+  this->update_status_flags_();
+  if (this->listener_ != nullptr)
+    this->listener_->on_homekit_pairings(this->homekit_);
+}
+
+void Receiver::update_status_flags_() {
+  char flags[sizeof(this->status_flags_)];
+  std::snprintf(
+      flags, sizeof(flags), "0x%" PRIX64,
+      static_cast<uint64_t>(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0)));
+  if (std::strcmp(flags, this->status_flags_) == 0)
+    return;
+  std::memcpy(this->status_flags_, flags, sizeof(flags));
+  AIRPLAY_LOGD("Status flags %s", this->status_flags_);
+  if (this->listener_ != nullptr)
+    this->listener_->on_status_flags(this->status_flags_);
+}
+
+void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {
+  this->homekit_ = pairings;
+  size_t paired = 0;
+  for (Controller &controller : this->homekit_.controllers) {
+    controller.id[sizeof(controller.id) - 1] = '\0';
+    paired += controller.id[0] != '\0' ? 1 : 0;
+  }
+  AIRPLAY_LOGD("HomeKit: %u paired controllers, access control %s", static_cast<unsigned>(paired),
+               this->homekit_.access_control ? "enabled" : "disabled");
+  this->update_status_flags_();
 }
 
 void Receiver::handle_pairings_(const uint8_t *body, size_t length, Response &response) {
@@ -653,16 +696,18 @@ void Receiver::handle_pairings_(const uint8_t *body, size_t length, Response &re
       writer.add_byte(TLV_ERROR, TLV_ERROR_MAX_PEERS);
     } else {
       AIRPLAY_LOGD("HomeKit pairing added: %.*s", static_cast<int>(id_length), reinterpret_cast<const char *>(id));
+      this->homekit_changed_();
     }
   } else if (method == PAIRING_METHOD_REMOVE) {
     Controller *controller = has_id ? this->find_controller_(id, id_length) : nullptr;
     if (controller != nullptr) {
       AIRPLAY_LOGD("HomeKit pairing removed: %s", controller->id);
       controller->id[0] = '\0';
+      this->homekit_changed_();
     }
   } else if (method == PAIRING_METHOD_LIST) {
     bool first = true;
-    for (const Controller &controller : this->controllers_) {
+    for (const Controller &controller : this->homekit_.controllers) {
       if (controller.id[0] == '\0')
         continue;
       if (!first)
@@ -688,12 +733,13 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
   const PlistReader::Object settings = reader.get(reader.root(), "ConfigurationDictionary");
   bool enable = false;
   if (reader.get_bool(reader.get(settings, "Enable_HK_Access_Control"), &enable)) {
-    this->homekit_access_control_ = enable;
+    this->homekit_.access_control = enable;
     AIRPLAY_LOGI("HomeKit access control %s", enable ? "enabled" : "disabled");
+    this->homekit_changed_();
   }
   // As shairport-sync answers: the receiver's identity, and access for everyone on the network
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
-  if (this->homekit_access_control_) {
+  if (this->homekit_.access_control) {
     writer.begin_dict(5);
     writer.key("Identifier");
     writer.string(this->pairing_id_);
@@ -1099,7 +1145,7 @@ void Receiver::build_info_(Response &response) {
   writer.key("features");
   writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
-  writer.integer(STATUS_FLAGS | (this->homekit_access_control_ ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0));
+  writer.integer(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0));
   writer.key("model");
   writer.string(this->config_.model);
   writer.key("name");
