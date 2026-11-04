@@ -101,8 +101,8 @@ static constexpr uint32_t PLAYED_REPORT_TIMEOUT_MS = 1000;
 // at the quietest point of a packet when the filtered timing error leaves a dead band
 static constexpr int32_t SERVO_FILTER_DIV = 16;
 static constexpr int32_t SERVO_INNOVATION_CLAMP_US = 1500;
-static constexpr int32_t SERVO_ENGAGE_US = 5000;
-static constexpr int32_t SERVO_DISENGAGE_US = 1500;
+static constexpr int32_t SERVO_ENGAGE_US = 2000;
+static constexpr int32_t SERVO_DISENGAGE_US = 500;
 static constexpr uint32_t SERVO_TRIM_INTERVAL = 4;
 static constexpr int32_t SERVO_FAST_US = 5000;
 /// Above SERVO_LARGE_US, one frame per SERVO_FAST_FRAME_US of error is dropped or repeated in each packet, up to
