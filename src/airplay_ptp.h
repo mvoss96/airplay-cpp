@@ -30,6 +30,9 @@ class PtpClocks {
   /// @param clock Clock identity as AirPlay names timelines (networkTimeTimelineID); 0 for the grandmaster
   /// @return false while the clock has too few samples or none recently
   bool offset_ns(uint64_t clock, int64_t now_us, int64_t *offset) const;
+  /// @brief How often a clock's time jumped by more than a second, and by how much the last time.
+  /// @return the number of jumps so far (0 for an unknown clock)
+  uint32_t jumps(uint64_t clock, int64_t *last_jump_ns) const;
   /// Writes the identities of the clocks that have an offset now (offset_ns() succeeds) to ids, at most max
   size_t active_clocks(uint64_t *ids, size_t max, int64_t now_us) const;
   /// Clock identity of the grandmaster that announced itself last, or of the clock that last sent Sync; 0 if none
@@ -78,6 +81,10 @@ class PtpClocks {
     int64_t last_delay_request_us;
     int32_t delays[DELAY_WINDOW];
     uint32_t delay_count;
+    // Jumps of the estimate by more than a second: a sender that slept, or one that now follows another clock (a
+    // group's new grandmaster) and sends its time
+    uint32_t jumps;
+    int64_t last_jump_ns;
   };
   const Clock *active_(uint64_t id, int64_t now_us) const;
   void write_header_(uint8_t *buffer, uint8_t type, size_t length, uint8_t domain, uint16_t sequence, uint8_t control,
@@ -86,6 +93,7 @@ class PtpClocks {
   void add_sample_(Clock &clock, int64_t sample, int64_t now_us);
   static int64_t best_recent_(const Clock &clock, uint32_t samples);
   static int64_t delay_ns_(const Clock &clock);
+  static void set_estimate_(Clock &clock, int64_t estimate);
 
   Clock clocks_[MAX_CLOCKS]{};
   uint64_t grandmaster_{0};

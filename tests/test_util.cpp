@@ -306,6 +306,15 @@ static void test_ptp() {
   for (int i = 0; i < 3; i++)
     sleeper_sync(offset - 332000000000LL);
   CHECK(sleeper.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 332000000000LL - 1000000)) < 100000);
+  int64_t jump_ns = 0;
+  CHECK(sleeper.jumps(clock, &jump_ns) == 1 && std::llabs(jump_ns + 332000000000LL) < 1000000);
+  // A sender that follows a group's new grandmaster sends that clock's time: forward by 471070 s, which three
+  // samples confirm, as a jump too
+  for (int i = 0; i < 3; i++)
+    sleeper_sync(offset + 471070000000000LL);
+  CHECK(sleeper.offset_ns(clock, now_us, &found) &&
+        std::llabs(found - (offset + 471070000000000LL - 1000000)) < 100000);
+  CHECK(sleeper.jumps(clock, &jump_ns) == 2 && std::llabs(jump_ns - 471070000000000LL - 332000000000LL) < 1000000);
 
   // One-step Sync carries its own time
   PtpClocks one_step;

@@ -669,7 +669,8 @@ class Receiver {
   // The clock whose time the anchor is in, when that is not the timeline's: a sender that joins a group with
   // another AirPlay 2 speaker follows that speaker's clock and sends its time, under its own clock's name
   uint64_t ptp_clock_{0};
-  uint64_t ptp_clock_used_{0};  // The clock the offset came from last, for the log
+  uint64_t ptp_clock_used_{0};  // The clock the offset came from last
+  uint32_t ptp_jumps_seen_{0};  // Its jumps (PtpClocks::jumps()) already followed
   uint32_t ptp_sync_logged_{0};
   bool ptp_error_logged_{false};   // Once per session: an anchor far off the PTP clock
   bool anchor_fits_clock_{false};  // The last buffered anchor is near now on the PTP clock

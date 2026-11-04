@@ -195,7 +195,7 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
       // Far better than the estimate: a single one is an error (macOS sends a correction of 100 ms now and then),
       // several in a row show that the estimate was low
       clock.above_lowest = clock.above == 0 ? sample : std::min(clock.above_lowest, sample);
-      clock.estimate = ++clock.above >= RISE_CONFIRMATIONS ? clock.above_lowest : drifted;
+      set_estimate_(clock, ++clock.above >= RISE_CONFIRMATIONS ? clock.above_lowest : drifted);
       if (clock.above >= RISE_CONFIRMATIONS)
         clock.above = 0;
     } else {
@@ -209,7 +209,7 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
       if (clock.below >= STEP_SAMPLES || (clock.below >= JUMP_SAMPLES && sample < clock.estimate - JUMP_NS)) {
         AIRPLAY_LOGD("PTP clock %016" PRIx64 " jumped by %" PRId64 " ms", clock.id,
                      (best_recent_(clock, clock.below) - clock.estimate) / 1000000);
-        clock.estimate = best_recent_(clock, clock.below);
+        set_estimate_(clock, best_recent_(clock, clock.below));
         clock.below = 0;
         clock.delay_count = 0;  // Measured against the old estimate
       }
@@ -227,6 +227,30 @@ int64_t PtpClocks::best_recent_(const Clock &clock, uint32_t samples) {
   for (uint32_t i = 1; i < std::min<uint32_t>(samples, WINDOW); i++)
     best = std::max(best, clock.samples[(clock.count + WINDOW - i) % WINDOW]);
   return best;
+}
+
+void PtpClocks::set_estimate_(Clock &clock, int64_t estimate) {
+  const int64_t change = estimate - clock.estimate;
+  if (change > JUMP_NS)
+    AIRPLAY_LOGD("PTP clock %016" PRIx64 " jumped by %" PRId64 " ms", clock.id, change / 1000000);
+  if (change > JUMP_NS || change < -JUMP_NS) {
+    clock.jumps++;
+    clock.last_jump_ns = change;
+    clock.delay_count = 0;  // Measured against the old estimate
+  }
+  clock.estimate = estimate;
+}
+
+uint32_t PtpClocks::jumps(uint64_t id, int64_t *last_jump_ns) const {
+  if (id == 0)
+    id = this->grandmaster_;
+  for (const Clock &clock : this->clocks_) {
+    if (clock.id == id && clock.last_seen_us != 0) {
+      *last_jump_ns = clock.last_jump_ns;
+      return clock.jumps;
+    }
+  }
+  return 0;
 }
 
 int64_t PtpClocks::delay_ns_(const Clock &clock) {
