@@ -132,6 +132,9 @@ struct ReceiverConfig {
   const char *model{"airplay-cpp"};
   /// MAC address of the network interface; part of the mDNS name and of the Apple-Challenge answer
   uint8_t mac[6]{};
+  /// AirPlay 2: the receiver's HomeKit key and pairing identifier come from the MAC address and this number. A
+  /// different number makes it a new accessory for the Home app (0: from the MAC address alone).
+  uint32_t homekit_identity{0};
   /// Jitter buffer. Synchronized playback needs the sender's latency plus a margin, about 2250 ms;
   /// smaller buffers play unsynchronized with three quarters of the buffer (at most 500 ms) of delay.
   uint32_t buffer_ms{500};

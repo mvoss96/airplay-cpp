@@ -126,12 +126,19 @@ void Receiver::init_airplay2_() {
   Sha512 hash;
   hash.update(reinterpret_cast<const uint8_t *>("airplay-cpp"), 11);
   hash.update(mac, 6);
+  const uint32_t identity = this->config_.homekit_identity;
+  const uint8_t identity_bytes[4] = {static_cast<uint8_t>(identity >> 24), static_cast<uint8_t>(identity >> 16),
+                                     static_cast<uint8_t>(identity >> 8), static_cast<uint8_t>(identity)};
+  if (identity != 0)
+    hash.update(identity_bytes, sizeof(identity_bytes));
   hash.finish(digest);
   // The HomeKit key pair; derived from the MAC address like shairport-sync derives it from the device ID
   uint8_t seed[SHA512_SIZE];
   Sha512 seed_hash;
   seed_hash.update(reinterpret_cast<const uint8_t *>("airplay-cpp-ed25519"), 19);
   seed_hash.update(mac, 6);
+  if (identity != 0)
+    seed_hash.update(identity_bytes, sizeof(identity_bytes));
   seed_hash.finish(seed);
   ed25519_key_pair(seed, this->accessory_secret_key_, this->public_key_);
   for (size_t i = 0; i < sizeof(this->public_key_); i++)
