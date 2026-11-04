@@ -1812,6 +1812,19 @@ void Receiver::update_ptp_clock_(int64_t now_us) {
   const uint64_t used = clock != 0 ? clock : this->ptp_clocks_.grandmaster();
   if (this->clock_locked_ && used != this->ptp_clock_used_)
     AIRPLAY_LOGD("Now on PTP clock %016" PRIx64 " (was %016" PRIx64 ")", used, this->ptp_clock_used_);
+  int64_t jump_ns = 0;
+  const uint32_t jumps = this->ptp_clocks_.jumps(used, &jump_ns);
+  if (used == this->ptp_clock_used_ && jumps != this->ptp_jumps_seen_ && this->anchor_valid_ &&
+      this->session_state_ == SessionState::PLAYING) {
+    // While playing, the sender's clock jumps when the sender joins a group and follows its new grandmaster: it
+    // sends that clock's time from then on, but keeps its anchor. As shairport-sync does, the anchor moves with the
+    // clock. (A sender that sleeps has paused before.)
+    this->anchor_remote_ns_ += jump_ns;
+    AIRPLAY_LOGI("PTP clock %016" PRIx64 " jumped by %" PRId64 " ms while playing (a new grandmaster): the anchor "
+                 "moves with it",
+                 used, jump_ns / 1000000);
+  }
+  this->ptp_jumps_seen_ = jumps;
   this->ptp_clock_used_ = used;
   if (!this->clock_locked_) {
     this->clock_locked_ = true;
