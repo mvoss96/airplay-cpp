@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.1
+
+- Buffered ALAC, which Music Assistant sends when the receiver offers PTP: with v0.2.0 it could not play at all
+- Buffered audio goes on decoding after playback filled in for audio that came late; before, decoding could stop
+- Buffered audio is decoded by the amount of audio per poll, not by the number of packets
+- A sender that does not answer on its event connection gets nothing more there after 2 s
+- PTP: waits for a clock that went silent or jumped (a sender that slept) instead of playing on a wrong offset
+
 ## v0.2.0
 
 - PTP timing for AirPlay 2 (`ReceiverConfig::ptp`, `Transport::open_ptp()`), which macOS needs: the receiver
