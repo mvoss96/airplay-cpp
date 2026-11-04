@@ -1788,6 +1788,13 @@ void Receiver::handle_ptp_sync_packet_(const uint8_t *packet, size_t length) {
 void Receiver::update_ptp_clock_(int64_t now_us) {
   int64_t offset = 0;
   uint64_t clock = this->ptp_clock_ != 0 ? this->ptp_clock_ : this->ptp_timeline_;
+  if (clock == 0 && this->session_owner_ != NO_CONNECTION) {
+    // Before the sender names its timeline: its own clock, not whichever grandmaster announced itself last (Music
+    // Assistant's is on the network all the time)
+    clock = this->ptp_clocks_.clock_at(this->connections_[this->session_owner_].peer.address, now_us);
+    if (clock == 0)
+      return;
+  }
   if (!this->ptp_clocks_.offset_ns(clock, now_us, &offset)) {
     // The timeline may be named after a clock that is not the one that sends Sync messages
     clock = 0;
