@@ -103,6 +103,8 @@ async def main():
     host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     alac = "--alac" in sys.argv
     paced = "--paced" in sys.argv
+    paced_ahead = float(os.environ.get("PACED_AHEAD", "1.75"))  # Less for a sender that falls behind
+    paced_stall = float(os.environ.get("PACED_STALL", "0"))
     if alac:
         FRAMES_PER_PACKET = 352
     pause = "--pause" in sys.argv
@@ -212,7 +214,9 @@ async def main():
     i = ahead
     while i < len(frames):
         if paced:
-            await asyncio.sleep(max(0.001, start + i * FRAMES_PER_PACKET / SAMPLE_RATE - 1.75 - time.time()))
+            await asyncio.sleep(max(0.001, start + i * FRAMES_PER_PACKET / SAMPLE_RATE - paced_ahead - time.time()))
+            if paced_stall and i % 250 == 125:
+                await asyncio.sleep(paced_stall)  # A hold-up in the sender: what follows comes late
         if i == 140 and takeover:
             (cipher, data), start, i = await take_over_and_back(i)
             continue

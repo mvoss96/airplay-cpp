@@ -1044,6 +1044,10 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
   const uint32_t decodes = std::max<uint32_t>(decode_frames / this->buffered_frames_per_packet_, 1);
   uint32_t skipped = 0;
   for (uint32_t i = 0; i < decodes;) {
+    // Playback filled in for audio that was not decoded in time (it goes to the output ahead of its time): what
+    // follows goes on from there, rather than behind playback for the rest of the stream
+    if (this->have_seq_ && static_cast<int16_t>(this->buffered_next_seq_ - this->next_seq_) < 0)
+      this->buffered_next_seq_ = this->next_seq_;
     // Room in the jitter buffer for the pieces of one packet
     if (this->have_seq_ &&
         static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)
