@@ -20,6 +20,8 @@
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
 #   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
+#   MA_RESUME=1 (with ALAC=1) also pauses and resumes halfway as Music Assistant does (with a flush); MA_PAUSE=1
+#   pauses for 11 s and resumes further on the timeline, without a flush.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -69,6 +71,8 @@ if [ "$SENDER" = buffered ]; then
   if [ "$ALAC" = 1 ]; then
     INPUT="reference.pcm --alac"  # Sent as ALAC, which must arrive exactly
     [ "$PAUSE" = 1 ] || INPUT="$INPUT --paced"  # And timed as Music Assistant does
+    [ "$MA_RESUME" = 1 ] && INPUT="$INPUT --ma-resume"
+    [ "$MA_PAUSE" = 1 ] && INPUT="$INPUT --ma-pause"
   else
     INPUT=signal.aac
   fi
@@ -116,7 +120,13 @@ if [ "$SENDER" = buffered ]; then
     # The test sender reads its event connection but never answers, as Music Assistant
     grep -q "The sender does not answer on its event connection" receiver.log
   fi
-  python3 "$HERE/check_lossy.py" out.pcm reference.pcm $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] || [ "$TAKEOVER" = 1 ] && echo --pause)
+  if [ "$MA_RESUME" = 1 ]; then
+    # The audio sent before the flush must not play after the resume: before the resume it is dropped, not late
+    grep "Session ended" receiver.log | awk '{ for (i = 1; i < NF; i++) if ($(i + 1) == "late,") exit !($i < 20) }'
+  fi
+  python3 "$HERE/check_lossy.py" out.pcm reference.pcm \
+    $([ "$PAUSE" = 1 ] || [ "$HANDOVER" = 1 ] || [ "$TAKEOVER" = 1 ] || [ "$MA_RESUME" = 1 ] || [ "$MA_PAUSE" = 1 ] \
+      && echo --pause)
   exit 0
 fi
 if [ "$SENDER" = pyatv ]; then

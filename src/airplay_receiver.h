@@ -664,7 +664,8 @@ class Receiver {
   bool ptp_timing_{false};
   uint64_t ptp_timeline_{0};
   uint32_t ptp_sync_logged_{0};
-  bool ptp_error_logged_{false};  // Once per session: an anchor far off the PTP clock
+  bool ptp_error_logged_{false};   // Once per session: an anchor far off the PTP clock
+  bool anchor_fits_clock_{false};  // The last buffered anchor is near now on the PTP clock
   // How long before it is due buffered audio arrives, logged every few seconds
   int32_t lead_min_ms_{INT32_MAX};
   int32_t lead_max_ms_{INT32_MIN};

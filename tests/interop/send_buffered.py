@@ -8,8 +8,12 @@ Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-cont
        send_buffered.py <host> <port> <file.pcm (16-bit stereo)> --alac [--paced]
 
 --alac sends the PCM file as ALAC (uncompressed ALAC packets of 352 frames), as Music Assistant does when the receiver
-offers PTP timing. --paced also times it as Music Assistant does: playback starts 0.4 s after the anchor is sent,
-the audio follows it and runs at most 1.75 s ahead of playback.
+offers PTP timing. --paced also sends it as Music Assistant does: its RTP header (a 16-bit sequence number, the
+payload type in the byte above), playback 0.4 s after the anchor is sent, the audio following it at most 1.75 s
+ahead of playback. --ma-resume (with --paced) then pauses and resumes halfway as Music Assistant does on a start
+command: a rate 0 anchor, FLUSHBUFFERED, and a new anchor on a timeline moved past what was sent. --ma-pause (with
+--paced) pauses for 11 s without a flush and resumes where the sender's timeline went on in the meantime, as Music
+Assistant did: the audio held from before the pause is then 11 s late.
 
 --remote-control opens a second session during playback, only to control it, as iOS does; playback goes on.
 --second-session sets up a second audio session during playback without a stream, as iOS sometimes does; playback
@@ -105,6 +109,8 @@ async def main():
     paced = "--paced" in sys.argv
     paced_ahead = float(os.environ.get("PACED_AHEAD", "1.75"))  # Less for a sender that falls behind
     paced_stall = float(os.environ.get("PACED_STALL", "0"))
+    ma_resume = paced and "--ma-resume" in sys.argv
+    ma_pause = paced and "--ma-pause" in sys.argv
     if alac:
         FRAMES_PER_PACKET = 352
     pause = "--pause" in sys.argv
@@ -152,13 +158,25 @@ async def main():
     cipher, data = await open_stream(rtsp)
     ssrc = 0x12345678
     first_rtp = 1000000
+    # Music Assistant's header: the sequence number starts anywhere (here just before it wraps), the marker is set on
+    # the first packet of a timeline; its timeline moves on a resume
+    ma = {"seq": 0xFF00, "marker": True, "shift": 0, "packets": 0}
+
+    def rtp_of(index):
+        return (first_rtp + index * FRAMES_PER_PACKET + ma["shift"]) & 0xFFFFFFFF
 
     async def send(index, audio=None, stream=None):
         stream_cipher, stream_data = stream or (cipher, data)
-        rtp = first_rtp + index * FRAMES_PER_PACKET
-        header = struct.pack(">BBHII", 0x80, 0x60, 0, rtp, ssrc)
-        header = header[:1] + struct.pack(">I", index + 1)[1:] + header[4:]  # 24-bit sequence number
-        nonce = struct.pack("<Q", index)
+        rtp = rtp_of(index)
+        if paced:
+            header = struct.pack(">BBHII", 0x80, 0xE7 if ma["marker"] else 0x67, ma["seq"] & 0xFFFF, rtp, ssrc)
+            ma["seq"] += 1
+            ma["marker"] = False
+        else:
+            header = struct.pack(">BBHII", 0x80, 0x60, 0, rtp, ssrc)
+            header = header[:1] + struct.pack(">I", index + 1)[1:] + header[4:]  # 24-bit sequence number
+        nonce = struct.pack("<Q", ma["packets"])
+        ma["packets"] += 1
         sealed = stream_cipher.encrypt(b"\0\0\0\0" + nonce, frames[index] if audio is None else audio, header[4:12])
         packet = header + sealed + nonce
         stream_data.write(struct.pack(">H", len(packet) + 2) + packet)
@@ -212,7 +230,34 @@ async def main():
                                                 "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
     start = time.time() + lead
     i = ahead
+    resumed = False
     while i < len(frames):
+        if (ma_resume or ma_pause) and not resumed and i == len(frames) // 2:
+            resumed = True
+            audible = int((time.time() - start) * SAMPLE_RATE / FRAMES_PER_PACKET)
+            seconds, fraction = network_time(0)
+            await exchange(rtsp, "SETRATEANCHORTIME", {"rate": 0, "rtpTime": rtp_of(audible), "networkTimeSecs": seconds,
+                                                        "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
+            if ma_pause:
+                await asyncio.sleep(11.0)
+                # The audio goes on after what was sent, 11 s further on the timeline than where it was paused
+                ma["shift"] += 11 * SAMPLE_RATE - (i - audible) * FRAMES_PER_PACKET
+                seconds, fraction = network_time(lead)
+                await exchange(rtsp, "SETRATEANCHORTIME", {"rate": 1, "rtpTime": rtp_of(i), "networkTimeSecs": seconds,
+                                                            "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
+                start = time.time() + lead - i * FRAMES_PER_PACKET / SAMPLE_RATE
+                continue
+            await exchange(rtsp, "FLUSHBUFFERED", {"flushUntilSeq": ma["seq"] & 0xFFFF, "flushUntilTS": rtp_of(i)})
+            await asyncio.sleep(1.0)
+            # The audio from where it was paused follows on a timeline past all that was sent (and 100 ms more)
+            ma["shift"] += (i - audible) * FRAMES_PER_PACKET + SAMPLE_RATE // 10
+            ma["marker"] = True
+            i = audible
+            seconds, fraction = network_time(lead)
+            await exchange(rtsp, "SETRATEANCHORTIME", {"rate": 1, "rtpTime": rtp_of(i), "networkTimeSecs": seconds,
+                                                        "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
+            start = time.time() + lead - i * FRAMES_PER_PACKET / SAMPLE_RATE
+            continue
         if paced:
             await asyncio.sleep(max(0.001, start + i * FRAMES_PER_PACKET / SAMPLE_RATE - paced_ahead - time.time()))
             if paced_stall and i % 250 == 125:

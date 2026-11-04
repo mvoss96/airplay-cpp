@@ -1813,6 +1813,7 @@ void Receiver::set_ptp_timing_(bool ptp) {
   this->ptp_timing_ = ptp;
   this->ptp_timeline_ = 0;
   this->ptp_error_logged_ = false;
+  this->anchor_fits_clock_ = false;
   this->ptp_sync_logged_ = 0;
   if (ptp)
     this->clock_locked_ = false;
@@ -2313,6 +2314,13 @@ bool Receiver::synced_step_(int64_t now_us) {
   }
   // Positive: the packet would be heard too early; negative: too late
   const int64_t error_us = target_us - heard_us;
+  if (error_us < -MAX_TIMELINE_ERROR_US && this->buffered_stream_ && this->anchor_fits_clock_) {
+    // Audio from before a new anchor that fits the clock (Music Assistant resumes a pause further on its timeline)
+    if (present)
+      this->stats_.late_packets++;
+    this->advance_head_();
+    return true;
+  }
   if ((error_us > MAX_TIMELINE_ERROR_US || error_us < -MAX_TIMELINE_ERROR_US) && this->ptp_timing_) {
     // A PTP clock that jumped (its sender slept) gives a wrong time until its next samples: wait for them
     if (!this->ptp_error_logged_) {

@@ -19,7 +19,7 @@ jobs:
     # duplicate 5/2/1 % of the UDP packets the receiver gets. The password run makes pyatv log in with RTSP
     # Digest authentication. The airplay2 runs make pyatv use AirPlay 2 (transient pairing, encrypted RTSP and
     # ChaCha20-Poly1305 audio), one of them in the order iOS uses. The buffered runs send AirPlay 2 buffered audio
-    # (AAC over TCP, as iOS streams most apps; ALAC in the alac run, as Music Assistant sends it) and compare the
+    # (AAC over TCP, as iOS streams most apps; ALAC in the alac runs, as Music Assistant sends it and pauses it) and compare the
     # output with ffmpeg's decoding. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
     strategy:
@@ -50,6 +50,10 @@ jobs:
             network: takeover
           - sender: buffered
             network: alac
+          - sender: buffered
+            network: alac-resume
+          - sender: buffered
+            network: alac-pause
     steps:
       - uses: actions/checkout@v5
         with:
@@ -96,6 +100,8 @@ jobs:
             handover) export HANDOVER=1 ;;
             takeover) export TAKEOVER=1 ;;
             alac) export ALAC=1 ;;
+            alac-resume) export ALAC=1 MA_RESUME=1 ;;
+            alac-pause) export ALAC=1 MA_PAUSE=1 ;;
           esac
           if [ "${{ matrix.network }}" = password ]; then
             export PASSWORD=airplay-test

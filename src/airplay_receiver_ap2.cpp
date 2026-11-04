@@ -950,6 +950,14 @@ static constexpr int64_t NTP_UNIX_OFFSET_S = 2208988800LL;
 
 /// Whether 24-bit sequence number a comes before b
 static bool seq24_before(uint32_t a, uint32_t b) { return ((a - b) & 0xffffff) > 0x800000; }
+/// Whether buffered packet sequence number seq comes before flush point `point`. iOS counts in 24 bits; Music
+/// Assistant counts in 16 and puts the payload type in the byte above, so a point that fits in 16 bits is compared
+/// in 16 (which gives the same for iOS).
+static bool seq_before_flush(uint32_t seq, uint32_t point) {
+  if (point <= 0xffff)
+    return static_cast<int16_t>(static_cast<uint16_t>(seq - point)) < 0;
+  return seq24_before(seq, point);
+}
 
 void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, size_t length, uint32_t now_ms) {
   Connection &c = this->connections_[connection];
@@ -982,7 +990,7 @@ void Receiver::receive_buffered_audio_(uint8_t connection, const uint8_t *data, 
     const uint32_t rtp = (static_cast<uint32_t>(rtp_packet[4]) << 24) | (static_cast<uint32_t>(rtp_packet[5]) << 16) |
                          (static_cast<uint32_t>(rtp_packet[6]) << 8) | rtp_packet[7];
     if (this->flush_active_) {
-      if (seq24_before(seq, this->flush_until_seq_))
+      if (seq_before_flush(seq, this->flush_until_seq_))
         continue;  // Flushed
       this->flush_active_ = false;
     }
@@ -1127,6 +1135,9 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
   this->update_receive_pause_();
 }
 
+/// An anchor further from now on the sender's clock than this means our estimate of the clock is wrong (it jumped)
+static constexpr int64_t MAX_ANCHOR_DISTANCE_US = 10000000;
+
 void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t now_us) {
   PlistReader reader;
   if (!reader.parse(body, length))
@@ -1165,6 +1176,12 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t n
                    this->anchor_remote_ns_ / 1000000000, this->anchor_remote_ns_ % 1000000000,
                    static_cast<int32_t>((this->anchor_remote_ns_ - (now_us * 1000 + offset)) / 1000000));
     }
+    // Near now on the clock that times the stream: audio far off it is from before the anchor, not a clock that
+    // jumped
+    int64_t anchor_us = 0;
+    this->anchor_fits_clock_ = this->rtp_to_local_us_(this->anchor_rtp_, &anchor_us) &&
+                               anchor_us - now_us > -MAX_ANCHOR_DISTANCE_US &&
+                               anchor_us - now_us < MAX_ANCHOR_DISTANCE_US;
   }
   int64_t rate = 0;
   double real_rate = 0;
@@ -1196,8 +1213,8 @@ void Receiver::handle_flush_buffered_(const uint8_t *body, size_t length) {
   uint32_t seq;
   const uint8_t *data;
   uint16_t queued;
-  while (this->buffered_queue_.front(&rtp, &seq, &data, &queued) && seq24_before(seq, until_seq) &&
-         (!has_from || !seq24_before(seq, static_cast<uint32_t>(from) & 0xffffff))) {
+  while (this->buffered_queue_.front(&rtp, &seq, &data, &queued) && seq_before_flush(seq, until_seq) &&
+         (!has_from || !seq_before_flush(seq, static_cast<uint32_t>(from) & 0xffffff))) {
     this->buffered_queue_.pop();
   }
   if (!has_from) {
