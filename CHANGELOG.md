@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.2
+
+- Music Assistant: pause and resume play again (the audio held from before the pause no longer stops playback), and
+  a flush (start, seek) drops the audio sent before it (Music Assistant counts packets in 16 bits)
+- PTP: Delay_Req again, for masters that answer them (Music Assistant): the network delay is measured and added to
+  the clock offset; masters that answer none (macOS) get no more after five
+- The servo corrects timing errors from 2 ms on (was 5 ms), down to 0.5 ms
+
 ## v0.2.1
 
 - Buffered ALAC, which Music Assistant sends when the receiver offers PTP: with v0.2.0 it could not play at all
