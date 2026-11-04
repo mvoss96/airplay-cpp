@@ -133,11 +133,11 @@ struct ReceiverConfig {
   uint64_t airplay2_features{0};
   /// Also offer AirPlay 2 timing with PTP, which macOS needs (iOS then uses it too). Needs Transport::open_ptp().
   bool ptp{false};
-  /// Decoder for AirPlay 2 buffered audio (AAC), which iOS uses for most apps; not offered without one. Must stay
-  /// valid while the receiver exists.
+  /// Decoder for AirPlay 2 buffered audio in AAC, which iOS uses for most apps; not offered without one. Must stay
+  /// valid while the receiver exists. Buffered ALAC (Music Assistant with PTP) needs none.
   AacDecoder *aac_decoder{nullptr};
-  /// Buffer for the compressed audio that buffered streams send ahead (at 256 kbit/s, 32 KB per second). The audio
-  /// is decoded into the jitter buffer (buffer_ms) as that has room.
+  /// Buffer for the compressed audio that buffered streams send ahead (AAC at 256 kbit/s: 32 KB per second, ALAC
+  /// about three times that). The audio is decoded into the jitter buffer (buffer_ms) as that has room.
   uint32_t buffered_audio_bytes{128 * 1024};
   /// Allocator for the jitter buffer (e.g. external RAM); malloc/free when not set
   void *(*allocate)(size_t size){nullptr};
@@ -530,8 +530,10 @@ class Receiver {
   PacketQueue buffered_queue_;
   uint8_t *buffered_storage_{nullptr};
   int16_t *aac_samples_{nullptr};  // One decoded AAC frame
-  bool buffered_stream_{false};    // The session's audio stream is buffered (AAC over TCP)
-  bool buffered_playing_{false};   // Rate 1 from SETRATEANCHORTIME
+  bool buffered_stream_{false};    // The session's audio stream is buffered (AAC or ALAC over TCP)
+  uint32_t buffered_frames_per_packet_{AAC_FRAMES_PER_PACKET};
+  bool buffered_aac_{false};      // The buffered stream is AAC, decoded by ReceiverConfig::aac_decoder
+  bool buffered_playing_{false};  // Rate 1 from SETRATEANCHORTIME
   bool data_channel_pending_{false};
   bool receive_paused_{false};
   uint8_t data_connection_{0xff};

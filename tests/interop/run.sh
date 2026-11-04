@@ -19,6 +19,7 @@
 #   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
+#   ALAC=1 sends ALAC instead, as Music Assistant does when the receiver offers PTP.
 # pipewire: PipeWire's RAOP sink; RSA-encrypted session key and AES-encrypted audio. Needs pipewire,
 #   wireplumber and dbus-run-session.
 #
@@ -65,7 +66,12 @@ RECEIVER_PID=$!
 sleep 2
 
 if [ "$SENDER" = buffered ]; then
-  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 signal.aac $([ "$PAUSE" = 1 ] && echo --pause) \
+  if [ "$ALAC" = 1 ]; then
+    INPUT="reference.pcm --alac"  # Sent as ALAC, which must arrive exactly
+  else
+    INPUT=signal.aac
+  fi
+  python3 "$HERE/send_buffered.py" 127.0.0.1 5000 $INPUT $([ "$PAUSE" = 1 ] && echo --pause) \
     $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
     $([ "$HANDOVER" = 1 ] && echo --handover) $([ "$TAKEOVER" = 1 ] && echo --takeover-and-back) ||
     echo "The sender failed"
@@ -104,7 +110,7 @@ cat receiver.log
 
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
-  grep -q "Stream: AAC, AirPlay 2 buffered" receiver.log
+  grep -q "Stream: $([ "$ALAC" = 1 ] && echo ALAC || echo AAC), AirPlay 2 buffered" receiver.log
   if [ "$TAKEOVER" = 1 ]; then
     # The test sender reads its event connection but never answers, as Music Assistant
     grep -q "The sender does not answer on its event connection" receiver.log

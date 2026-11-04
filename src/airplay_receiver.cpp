@@ -349,7 +349,8 @@ bool Receiver::begin() {
         this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
     }
   }
-  if (this->airplay2_ && this->config_.aac_decoder != nullptr) {
+  // Buffered audio: AAC from iOS (with an AAC decoder), ALAC from Music Assistant when PTP is offered
+  if (this->airplay2_) {
     const size_t bytes = std::max<size_t>(this->config_.buffered_audio_bytes, MIN_BUFFERED_AUDIO_BYTES);
     this->buffered_storage_ = static_cast<uint8_t *>(this->allocate_(bytes));
     this->aac_samples_ =

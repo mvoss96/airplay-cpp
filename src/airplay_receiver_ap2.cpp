@@ -60,6 +60,7 @@ static constexpr int64_t COMPRESSION_ALAC = 2;
 static constexpr int64_t COMPRESSION_AAC = 4;
 /// "audioFormat" of AAC-LC, 44.1 kHz, stereo
 static constexpr int64_t AUDIO_FORMAT_AAC_44100 = 0x400000;
+static constexpr int64_t AUDIO_FORMAT_ALAC_44100 = 0x40000;  // 16-bit stereo
 
 /// Encrypted audio ends with the tag and the last 8 bytes of the nonce
 static constexpr size_t AUDIO_NONCE_SIZE = 8;
@@ -550,31 +551,43 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     if (type == STREAM_TYPE_BUFFERED) {
       int64_t audio_format = 0;
       reader.get_integer(reader.get(stream, "audioFormat"), &audio_format);
-      if (this->buffered_storage_ == nullptr) {
-        AIRPLAY_LOGW("Buffered audio needs an AAC decoder");
-        return;
-      }
-      if (compression != COMPRESSION_AAC || audio_format != AUDIO_FORMAT_AAC_44100 ||
-          frames_per_packet != AAC_FRAMES_PER_PACKET || (key == nullptr && !this->have_session_stream_key_)) {
-        AIRPLAY_LOGW("Unsupported buffered stream (ct %" PRId64 ", format 0x%" PRIx64 ")", compression, audio_format);
+      // iOS sends AAC, Music Assistant ALAC (when PTP is offered)
+      const bool aac = compression == COMPRESSION_AAC && audio_format == AUDIO_FORMAT_AAC_44100 &&
+                       frames_per_packet == AAC_FRAMES_PER_PACKET && this->config_.aac_decoder != nullptr;
+      const bool alac = compression == COMPRESSION_ALAC && audio_format == AUDIO_FORMAT_ALAC_44100 &&
+                        frames_per_packet > 0 && frames_per_packet <= FRAMES_PER_PACKET;
+      if (this->buffered_storage_ == nullptr || (!aac && !alac) ||
+          (key == nullptr && !this->have_session_stream_key_)) {
+        AIRPLAY_LOGW("Unsupported buffered stream (ct %" PRId64 ", format 0x%" PRIx64 "%s)", compression, audio_format,
+                     compression == COMPRESSION_AAC && this->config_.aac_decoder == nullptr ? ", no AAC decoder" : "");
         return;
       }
       this->stop_audio_();
       this->stop_buffered_audio_();
       this->forget_timeline_();
-      if (!this->config_.aac_decoder->begin()) {
+      if (aac && !this->config_.aac_decoder->begin()) {
         AIRPLAY_LOGW("Failed to start the AAC decoder");
         return;
       }
+      if (alac) {
+        ALACConfig alac_config;
+        alac_config.frame_length = static_cast<uint32_t>(frames_per_packet);
+        if (!this->decoder_.configure(alac_config)) {
+          AIRPLAY_LOGW("Unsupported ALAC stream");
+          return;
+        }
+      }
       std::memcpy(this->audio_key_, key != nullptr ? key : this->session_stream_key_, sizeof(this->audio_key_));
-      this->codec_ = Codec::AAC;
+      this->codec_ = aac ? Codec::AAC : Codec::ALAC;
+      this->buffered_frames_per_packet_ = static_cast<uint32_t>(frames_per_packet);
+      this->buffered_aac_ = aac;
       this->buffered_stream_ = true;
       this->airplay2_audio_ = false;
       this->encrypted_ = false;
       this->buffered_next_seq_ = 0;
       // The sender connects to the RTSP port for the audio, as for its events
       this->data_channel_pending_ = true;
-      AIRPLAY_LOGD("Stream: AAC, AirPlay 2 buffered");
+      AIRPLAY_LOGD("Stream: %s, AirPlay 2 buffered", aac ? "AAC" : "ALAC");
       if (this->airplay2_recording_ && this->start_audio_(now_us))
         AIRPLAY_LOGI("Playback started");
 
@@ -1024,7 +1037,7 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
   if (!this->audio_active_)
     return;
   const auto now_ms = static_cast<uint32_t>(now_us / 1000);
-  const uint32_t pieces = (AAC_FRAMES_PER_PACKET + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
+  const uint32_t pieces = (this->buffered_frames_per_packet_ + FRAMES_PER_PACKET - 1) / FRAMES_PER_PACKET;
   const uint32_t decodes = this->buffered_packets_() * FRAMES_PER_PACKET < BUFFERED_LOW_FRAMES
                                ? BUFFERED_DECODES_PER_POLL_LOW
                                : BUFFERED_DECODES_PER_POLL;
@@ -1044,7 +1057,7 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
     // from before its anchor, and decoding that held up the audio that can still be played
     int64_t due_us = 0;
     if (this->buffered_playing_ && skipped < MAX_SKIPPED_PER_POLL &&
-        this->rtp_to_local_us_(rtp + AAC_FRAMES_PER_PACKET, &due_us) && due_us < now_us) {
+        this->rtp_to_local_us_(rtp + this->buffered_frames_per_packet_, &due_us) && due_us < now_us) {
       this->buffered_queue_.pop();
       this->buffered_next_seq_ += pieces;
       this->stats_.late_packets += pieces;
@@ -1052,10 +1065,16 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
       continue;
     }
     i++;
-    const size_t frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
+    size_t frames = 0;
+    if (this->codec_ == Codec::ALAC) {
+      const int32_t decoded = this->decoder_.decode(data, length, this->aac_samples_);
+      frames = decoded > 0 ? static_cast<size_t>(decoded) : 0;
+    } else {
+      frames = this->config_.aac_decoder->decode(data, length, this->aac_samples_, AAC_FRAMES_PER_PACKET);
+    }
     this->buffered_queue_.pop();
     this->last_packet_ms_ = now_ms;
-    if (frames == 0 || frames > AAC_FRAMES_PER_PACKET) {
+    if (frames == 0 || frames > this->buffered_frames_per_packet_) {
       if (this->stats_.decode_errors++ == 0)
         AIRPLAY_LOGW("Failed to decode buffered audio (packet %" PRIu32 ", %u bytes)", seq, length);
       continue;
@@ -1171,7 +1190,7 @@ void Receiver::handle_flush_buffered_(const uint8_t *body, size_t length) {
 }
 
 void Receiver::stop_buffered_audio_() {
-  if (this->buffered_stream_)
+  if (this->buffered_stream_ && this->buffered_aac_)
     this->config_.aac_decoder->end();
   this->buffered_stream_ = false;
   this->buffered_playing_ = false;

@@ -5,6 +5,10 @@ cannot send, is done here.
 
 Usage: send_buffered.py <host> <port> <file.aac (ADTS)> [--pause] [--remote-control] [--second-session] [--handover]
                         [--takeover-and-back]
+       send_buffered.py <host> <port> <file.pcm (16-bit stereo)> --alac
+
+--alac sends the PCM file as ALAC (uncompressed ALAC packets of 352 frames), as Music Assistant does when the receiver
+offers PTP timing.
 
 --remote-control opens a second session during playback, only to control it, as iOS does; playback goes on.
 --second-session sets up a second audio session during playback without a stream, as iOS sometimes does; playback
@@ -46,6 +50,31 @@ def read_adts(path):
     return frames
 
 
+def alac_packets(path):
+    """Uncompressed ALAC packets of the raw 16-bit stereo PCM in path: a channel pair element with the escape flag,
+    the samples, then the end element"""
+    data = open(path, "rb").read()
+    packets = []
+    for offset in range(0, len(data) - 3, FRAMES_PER_PACKET * 4):
+        chunk = data[offset : offset + FRAMES_PER_PACKET * 4]
+        frames = len(chunk) // 4
+        partial = frames != FRAMES_PER_PACKET
+        bits = (1 << 4 | 0) << 12  # Channel pair element (type 1), instance 0, 12 unused bits
+        bits = (bits << 4) | (int(partial) << 3) | 1  # Partial frame, no shift, escape (uncompressed)
+        width = 3 + 4 + 12 + 4
+        if partial:
+            bits = (bits << 32) | frames
+            width += 32
+        for (sample,) in struct.iter_unpack("<h", chunk[: frames * 4]):
+            bits = (bits << 16) | (sample & 0xFFFF)
+            width += 16
+        bits = (bits << 3) | 7  # End element
+        width += 3
+        padding = -width % 8
+        packets.append((bits << padding).to_bytes((width + padding) // 8, "big"))
+    return packets
+
+
 def plist(value):
     return plistlib.dumps(value, fmt=plistlib.FMT_BINARY)
 
@@ -69,13 +98,17 @@ def network_time(seconds_from_now):
 
 
 async def main():
+    global FRAMES_PER_PACKET
     host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    alac = "--alac" in sys.argv
+    if alac:
+        FRAMES_PER_PACKET = 352
     pause = "--pause" in sys.argv
     remote_control = "--remote-control" in sys.argv
     second_session = "--second-session" in sys.argv or "--handover" in sys.argv
     handover = "--handover" in sys.argv
     takeover = "--takeover-and-back" in sys.argv
-    frames = read_adts(path)
+    frames = alac_packets(path) if alac else read_adts(path)
     loop = asyncio.get_running_loop()
 
     timing, _ = await loop.create_datagram_endpoint(TimingServer, local_addr=("127.0.0.1", 0))
@@ -103,7 +136,8 @@ async def main():
         stream = await exchange(
             rtsp,
             "SETUP",
-            {"streams": [{"type": 103, "ct": 4, "audioFormat": 0x400000, "spf": FRAMES_PER_PACKET, "shk": key,
+            {"streams": [{"type": 103, "ct": 2 if alac else 4, "audioFormat": 0x40000 if alac else 0x400000,
+                          "spf": FRAMES_PER_PACKET, "shk": key,
                           "audioMode": "default", "isMedia": True, "supportsDynamicStreamID": True}]},
         )
         print("buffer size", stream["streams"][0].get("audioBufferSize"))
