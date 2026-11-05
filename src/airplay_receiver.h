@@ -326,6 +326,7 @@ class Receiver {
     uint8_t read_key[CHACHA_KEY_SIZE];
     uint8_t write_key[CHACHA_KEY_SIZE];
     uint8_t event_key[CHACHA_KEY_SIZE];       // From pair-setup, for writing on the event connection that follows
+    uint8_t event_read_key[CHACHA_KEY_SIZE];  // And for reading the answers there
     uint8_t pair_secret[SHA512_SIZE];         // The pairing's shared secret, from which stream keys may be derived
     uint8_t pair_secret_length{SHA512_SIZE};  // 64 from pair-setup, 32 from pair-verify
     uint64_t read_counter{0};
@@ -440,6 +441,8 @@ class Receiver {
   bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length);
   /// The controller's stream ends: the sender hears of it
   void end_relay_(uint8_t connection);
+  /// Logs what a device answers on its event connection (debug level only)
+  void receive_event_answer_(uint8_t connection, const uint8_t *data, size_t length);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
                               size_t length, Response &response, int64_t now_us);
   void build_info_(Response &response);

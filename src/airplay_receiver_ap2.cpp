@@ -66,6 +66,7 @@ static constexpr char CONTROL_SENDER_READ_INFO[] = "Control-Read-Encryption-Key"
 // The receiver writes on the event connection with this key, though the sender opened it
 static constexpr char EVENTS_SALT[] = "Events-Salt";
 static constexpr char EVENTS_RECEIVER_WRITE_INFO[] = "Events-Write-Encryption-Key";
+static constexpr char EVENTS_RECEIVER_READ_INFO[] = "Events-Read-Encryption-Key";
 // The key of a realtime stream that came without one; the salt gets the stream's connection ID appended
 static constexpr char DATA_STREAM_SALT[] = "DataStream-Salt";
 static constexpr char DATA_STREAM_SENDER_WRITE_INFO[] = "DataStream-Output-Encryption-Key";
@@ -224,6 +225,61 @@ void Receiver::receive_encrypted_(uint8_t connection, const uint8_t *data, size_
   }
 }
 
+void Receiver::receive_event_answer_(uint8_t connection, const uint8_t *data, size_t length) {
+  Connection &c = this->connections_[connection];
+  const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+  if (!c.encrypted) {
+    AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %u bytes", ip[0], ip[1], ip[2], ip[3], static_cast<unsigned>(length));
+    return;
+  }
+  while (length > 0) {
+    size_t needed = 2;
+    if (c.frame_length >= 2) {
+      const size_t data_length = c.frame[0] | (static_cast<size_t>(c.frame[1]) << 8);
+      if (data_length > HAP_FRAME_DATA_SIZE) {
+        c.frame_length = 0;
+        return;
+      }
+      needed = 2 + data_length + POLY1305_TAG_SIZE;
+    }
+    const size_t take = std::min(needed - c.frame_length, length);
+    std::memcpy(c.frame + c.frame_length, data, take);
+    c.frame_length += take;
+    data += take;
+    length -= take;
+    if (c.frame_length < needed || needed == 2)
+      continue;
+    const size_t data_length = needed - 2 - POLY1305_TAG_SIZE;
+    c.frame_length = 0;
+    uint8_t nonce[CHACHA_NONCE_SIZE];
+    make_nonce(c.read_counter++, nonce);
+    if (!chacha20_poly1305_decrypt(c.read_key, nonce, c.frame, 2, c.frame + 2, data_length, c.frame + 2 + data_length,
+                                   c.frame + 2)) {
+      AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %u bytes, not decrypted", ip[0], ip[1], ip[2], ip[3],
+                   static_cast<unsigned>(data_length));
+      continue;
+    }
+    // The status line, and where the body starts its first bytes
+    const auto *text = reinterpret_cast<const char *>(c.frame + 2);
+    size_t line = 0;
+    while (line < data_length && line < 80 && text[line] != '\r')
+      line++;
+    size_t body = 0;
+    for (size_t i = 0; i + 3 < data_length; i++) {
+      if (std::memcmp(text + i, "\r\n\r\n", 4) == 0) {
+        body = i + 4;
+        break;
+      }
+    }
+    char hex[2 * 32 + 1] = "";
+    for (size_t i = 0; body != 0 && body + i < data_length && i < 32; i++)
+      std::snprintf(hex + 2 * i, 3, "%02x", c.frame[2 + body + i]);
+    AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %.*s, %u bytes, body %u bytes %s", ip[0], ip[1], ip[2], ip[3],
+                 static_cast<int>(line), text, static_cast<unsigned>(data_length),
+                 static_cast<unsigned>(body != 0 ? data_length - body : 0), hex);
+  }
+}
+
 bool Receiver::send_(uint8_t connection, const uint8_t *data, size_t length) {
   Connection &c = this->connections_[connection];
   if (!c.encrypted)
@@ -336,9 +392,43 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     this->end_relay_(connection);
     return true;
   }
-  if (relay.relay_stream != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && data != nullptr &&
-      body_length > 0 && this->session_owner_ != NO_CONNECTION) {
-    // A controller's MediaRemote message: to the sender, as a property list with the data
+  if (!has_stream && relay.relay_stream == 0 && plist && data != nullptr && std::strcmp(method, "POST") == 0 &&
+      path_is(request, "/command") && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
+    // What else comes as a command (now playing details, ...): its type
+    PlistReader reader;
+    const char *type = nullptr;
+    size_t type_length = 0;
+    if (reader.parse(data, body_length))
+      reader.get_string(reader.get(reader.root(), "type"), &type, &type_length);
+    const auto *ip = reinterpret_cast<const uint8_t *>(&this->connections_[connection].peer.address);
+    AIRPLAY_LOGD("Command from %u.%u.%u.%u: %.*s, %u bytes", ip[0], ip[1], ip[2], ip[3],
+                 static_cast<int>(type != nullptr ? type_length : 1), type != nullptr ? type : "-",
+                 static_cast<unsigned>(body_length));
+  }
+  // A message of a relayed stream: from the controller to the sender, or back. The stream comes from the
+  // connection it was set up on or from X-Apple-StreamID; the direction from where it comes from, as a controller may
+  // send on another connection than the one it set up the stream on.
+  uint32_t stream_id = relay.relay_stream;
+  if (stream_id == 0 && has_stream)
+    stream_id = static_cast<uint32_t>(std::strtoul(stream_text, nullptr, 10));
+  if (stream_id != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && data != nullptr &&
+      body_length > 0) {
+    const Connection *controller = nullptr;
+    for (const Connection &other : this->connections_) {
+      if (other.open && other.relay_stream == stream_id)
+        controller = &other;
+    }
+    const uint32_t sender =
+        this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].peer.address : 0;
+    const uint32_t from = this->connections_[connection].peer.address;
+    if (controller == nullptr || sender == 0) {
+      AIRPLAY_LOGD("Nothing to relay stream %" PRIu32 " to (%s)", stream_id,
+                   controller == nullptr ? "no controller" : "no sender");
+      return true;
+    }
+    const bool to_sender = from == controller->peer.address;
+    const uint32_t to = to_sender ? sender : controller->peer.address;
+    // Without a property list, the data goes in one, as other speakers relay it
     const uint8_t *forward = data;
     size_t forward_length = body_length;
     if (!plist) {
@@ -351,24 +441,13 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       forward = this->body_buffer_;
       forward_length = writer.finish();
     }
-    if (forward_length == 0 || !this->send_event_request_(this->connections_[this->session_owner_].peer.address,
-                                                          relay.relay_stream, forward, forward_length))
-      AIRPLAY_LOGW("Could not relay %u bytes of remote control stream %" PRIu32, static_cast<unsigned>(body_length),
-                   relay.relay_stream);
-    return true;
-  }
-  if (has_stream && relay.relay_stream == 0 && data != nullptr && body_length > 0) {
-    // The sender's answer on a relayed stream: to the controller's event connection
-    const auto stream_id = static_cast<uint32_t>(std::strtoul(stream_text, nullptr, 10));
-    for (const Connection &controller : this->connections_) {
-      if (!controller.open || controller.relay_stream != stream_id)
-        continue;
-      if (!this->send_event_request_(controller.peer.address, stream_id, data, body_length))
-        AIRPLAY_LOGW("Could not relay %u bytes to the controller of stream %" PRIu32,
-                     static_cast<unsigned>(body_length), stream_id);
-      return true;
-    }
-    AIRPLAY_LOGD("No controller for stream %" PRIu32, stream_id);
+    const auto *from_ip = reinterpret_cast<const uint8_t *>(&from);
+    const auto *to_ip = reinterpret_cast<const uint8_t *>(&to);
+    const bool sent = forward_length > 0 && this->send_event_request_(to, stream_id, forward, forward_length);
+    AIRPLAY_LOGD("Relay stream %" PRIu32 " %s: %u.%u.%u.%u -> %u.%u.%u.%u, %u bytes%s", stream_id,
+                 to_sender ? "to the sender" : "to the controller", from_ip[0], from_ip[1], from_ip[2], from_ip[3],
+                 to_ip[0], to_ip[1], to_ip[2], to_ip[3], static_cast<unsigned>(forward_length),
+                 sent ? "" : ", NOT SENT");
     return true;
   }
 
@@ -524,6 +603,7 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, SHA512_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, SHA512_SIZE, c.write_key);
       hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, SHA512_SIZE, c.event_key);
+      hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_READ_INFO, secret, SHA512_SIZE, c.event_read_key);
       std::memcpy(c.pair_secret, secret, sizeof(c.pair_secret));
       c.pair_secret_length = SHA512_SIZE;
       c.encrypt_after_response = true;
@@ -689,6 +769,7 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, X25519_KEY_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, X25519_KEY_SIZE, c.write_key);
       hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, X25519_KEY_SIZE, c.event_key);
+      hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_READ_INFO, secret, X25519_KEY_SIZE, c.event_read_key);
       std::memcpy(c.pair_secret, secret, X25519_KEY_SIZE);
       c.pair_secret_length = X25519_KEY_SIZE;
       c.encrypt_after_response = true;

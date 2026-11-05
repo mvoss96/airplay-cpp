@@ -439,7 +439,9 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
     const uint8_t source = this->event_channel_source_;
     if (source < MAX_CONNECTIONS && this->connections_[source].encrypted) {
       std::memcpy(c.write_key, this->connections_[source].event_key, sizeof(c.write_key));
+      std::memcpy(c.read_key, this->connections_[source].event_read_key, sizeof(c.read_key));
       c.write_counter = 0;
+      c.read_counter = 0;
       c.encrypted = true;
     }
     AIRPLAY_LOGD("Event connection");
@@ -523,9 +525,11 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
   if (!c.open)
     return;
   if (c.event_channel) {
-    // Answers to the receiver's requests; their content is not needed
+    // Answers to the receiver's requests; their content is only logged
     if (c.event_answers++ == 0)
       AIRPLAY_LOGD("The sender answers on its event connection");
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG)
+      this->receive_event_answer_(connection, data, length);
     return;
   }
   if (c.audio_data) {
