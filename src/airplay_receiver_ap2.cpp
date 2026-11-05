@@ -166,13 +166,9 @@ void Receiver::init_airplay2_() {
       {"srcvers", AIRPLAY2_SOURCE_VERSION},
       {"protovers", "1.1"},
       {"acl", "0"},
-      // Group details, as shairport-sync announces them: not in a group
+      // The group the receiver plays in; isGroupLeader=0 is added while it is in a sender's group (on_group())
       {"gid", this->group_id_},
-      {"igl", "0"},
       {"gcgl", this->group_leader_},
-      {"psi", this->public_session_id_},
-      {"fex", this->features_base64_},
-      {"vv", "2"},
   };
   static_assert(sizeof(records) / sizeof(records[0]) <= MAX_AIRPLAY_TXT_RECORDS, "Too many TXT records");
   this->airplay_txt_record_count_ = 0;
@@ -692,7 +688,7 @@ void Receiver::homekit_changed_() {
 void Receiver::update_status_flags_() {
   char flags[sizeof(this->status_flags_)];
   std::snprintf(
-      flags, sizeof(flags), "0x%" PRIX64,
+      flags, sizeof(flags), "0x%" PRIx64,
       static_cast<uint64_t>(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
                             (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0)));
   if (std::strcmp(flags, this->status_flags_) == 0)
@@ -716,7 +712,7 @@ void Receiver::update_group_() {
   AIRPLAY_LOGD("Group %s (gcgl %s)", this->group_id_, this->group_leader_);
   this->update_status_flags_();
   if (this->listener_ != nullptr)
-    this->listener_->on_group(this->group_id_, this->group_leader_);
+    this->listener_->on_group(this->group_id_, this->group_leader_, this->in_group_);
 }
 
 void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {

@@ -121,8 +121,9 @@ class Listener {
   /// _raop._tcp now hold this value
   virtual void on_status_flags(const char * /*flags*/) {}
   /// The group the playing sender put the receiver in changed: the "gid" and "gcgl" TXT records of _airplay._tcp
-  /// now hold these values (the receiver's own identifier and "0" when not in a sender's group)
-  virtual void on_group(const char * /*group_id*/, const char * /*contains_leader*/) {}
+  /// now hold these values (the receiver's own identifier and "0" when not in a sender's group). While in a sender's
+  /// group, _airplay._tcp also has "isGroupLeader=0", as other AirPlay 2 speakers announce it.
+  virtual void on_group(const char * /*group_id*/, const char * /*contains_leader*/, bool /*in_group*/) {}
 };
 
 struct ReceiverConfig {
