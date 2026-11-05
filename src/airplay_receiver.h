@@ -321,8 +321,9 @@ class Receiver {
     uint16_t relayed_to_sender{0};
     uint16_t relayed_to_controller{0};
     uint16_t relay_not_sent{0};
-    char group_id[40]{};       // The sender's group (groupUUID of its session SETUP), empty if none
-    bool group_leader{false};  // groupContainsGroupLeader
+    uint8_t relay_target{0xff};  // Where the body of a relayed request that did not fit in the buffer goes, as it comes
+    char group_id[40]{};         // The sender's group (groupUUID of its session SETUP), empty if none
+    bool group_leader{false};    // groupContainsGroupLeader
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};
@@ -443,8 +444,10 @@ class Receiver {
   /// SETUP of a remote control stream (type 130) on a controller's connection
   void setup_relay_(uint8_t connection, int64_t control_type, const char *client_uuid, const char *client_type_uuid,
                     Response &response);
-  /// Sends a request with a property list on the event connection of the device at address
-  bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length);
+  /// @brief Sends a request with a property list on the event connection of the device at address.
+  /// @param body nullptr to send only the header: the body of the given length follows on *to_connection
+  bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length,
+                           uint8_t *to_connection = nullptr);
   /// A controller's stream ends (all of its streams with 0): the sender hears of it
   void end_relay_(uint8_t connection, uint32_t stream_id = 0);
   void end_relay_stream_(const Connection &c, uint32_t stream);

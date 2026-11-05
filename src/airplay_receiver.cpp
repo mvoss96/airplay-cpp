@@ -430,6 +430,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.relayed_to_sender = 0;
   c.relayed_to_controller = 0;
   c.relay_not_sent = 0;
+  c.relay_target = NO_CONNECTION;
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';
@@ -568,6 +569,17 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
     if (c.discard_remaining > 0) {
       // Skipping the body of a request that did not fit in the buffer; cover art goes to the listener
       const size_t drop = std::min(c.discard_remaining, c.rx_length);
+      if (c.relay_target != NO_CONNECTION) {
+        // The body of a relayed message, passed on as it comes
+        if (this->connections_[c.relay_target].open)
+          this->send_(c.relay_target, reinterpret_cast<const uint8_t *>(buffer), drop);
+        std::memmove(buffer, buffer + drop, c.rx_length - drop);
+        c.rx_length -= drop;
+        c.discard_remaining -= drop;
+        if (c.discard_remaining == 0)
+          c.relay_target = NO_CONNECTION;
+        continue;
+      }
       const bool artwork = this->artwork_streaming_ && connection == this->session_owner_;
       if (artwork)
         this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(buffer), drop);

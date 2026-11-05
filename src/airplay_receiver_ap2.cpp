@@ -316,8 +316,14 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   if (path_is(request, "/feedback")) {
     AIRPLAY_LOGV("Request: %.*s", line_length, request);
   } else {
-    AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s)", line_length, request, content_type[0] != '\0' ? content_type : "-",
-                 static_cast<unsigned>(body_length), this->connections_[connection].encrypted ? ", encrypted" : "");
+    const auto *ip = reinterpret_cast<const uint8_t *>(&this->connections_[connection].peer.address);
+    char stream_header[16] = "";
+    const bool streamed = get_header(request, header_length, "X-Apple-StreamID", stream_header, sizeof(stream_header));
+    AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s) from %u.%u.%u.%u%s%s%s", line_length, request,
+                 content_type[0] != '\0' ? content_type : "-", static_cast<unsigned>(body_length),
+                 this->connections_[connection].encrypted ? ", encrypted" : "", ip[0], ip[1], ip[2], ip[3],
+                 streamed ? ", stream " : "", stream_header,
+                 body != nullptr || body_length == 0 ? "" : ", body not buffered");
   }
   const bool verbose = detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE;
   // Headers of the requests that come before a session, and the content of property lists
@@ -428,8 +434,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   // send on another connection than the one it set up the stream on.
   const uint32_t stream_id =
       has_stream ? static_cast<uint32_t>(std::strtoul(stream_text, nullptr, 10)) : relay.relay_latest;
-  if (stream_id != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && data != nullptr &&
-      body_length > 0) {
+  if (stream_id != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && body_length > 0) {
     Connection *controller = nullptr;
     for (Connection &other : this->connections_) {
       if (other.open && std::find(std::begin(other.relay_streams), std::end(other.relay_streams), stream_id) !=
@@ -446,6 +451,23 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     }
     const bool to_sender = from == controller->peer.address;
     const uint32_t to = to_sender ? sender : controller->peer.address;
+    if (data == nullptr) {
+      // Too large for the buffer (now playing details with cover art): the header now, the body as it comes
+      uint8_t target = NO_CONNECTION;
+      const bool sent = this->send_event_request_(to, stream_id, nullptr, body_length, &target);
+      this->connections_[connection].relay_target = sent ? target : NO_CONNECTION;
+      if (!sent) {
+        controller->relay_not_sent++;
+      } else if (to_sender) {
+        controller->relayed_to_sender++;
+      } else {
+        controller->relayed_to_controller++;
+      }
+      AIRPLAY_LOGD("Relay stream %" PRIu32 " %s: %u bytes, passed on as they come%s", stream_id,
+                   to_sender ? "to the sender" : "to the controller", static_cast<unsigned>(body_length),
+                   sent ? "" : ", NOT SENT");
+      return true;
+    }
     // Without a property list, the data goes in one, as other speakers relay it
     const uint8_t *forward = data;
     size_t forward_length = body_length;
@@ -1434,7 +1456,8 @@ void Receiver::end_relay_stream_(const Connection &c, uint32_t stream) {
   }
 }
 
-bool Receiver::send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length) {
+bool Receiver::send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length,
+                                   uint8_t *to_connection) {
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
@@ -1451,12 +1474,15 @@ bool Receiver::send_event_request_(uint32_t address, uint32_t stream_id, const u
       return false;
     // Header and body in frames of their own: the stream does not care where frames end
     if (!this->send_(i, reinterpret_cast<const uint8_t *>(header), static_cast<size_t>(header_length)) ||
-        !this->send_(i, body, length))
+        (body != nullptr && !this->send_(i, body, length)))
       return false;
     c.event_requests++;
+    if (to_connection != nullptr)
+      *to_connection = i;
     const auto *ip = reinterpret_cast<const uint8_t *>(&address);
-    AIRPLAY_LOGD("Event request to %u.%u.%u.%u: %u bytes%s", ip[0], ip[1], ip[2], ip[3], static_cast<unsigned>(length),
-                 stream_header[0] != '\0' ? " (relayed)" : "");
+    AIRPLAY_LOGD("Event request to %u.%u.%u.%u: %u bytes%s%s", ip[0], ip[1], ip[2], ip[3],
+                 static_cast<unsigned>(length), stream_header[0] != '\0' ? " (relayed)" : "",
+                 body == nullptr ? ", the body follows as it comes" : "");
     return true;
   }
   return false;

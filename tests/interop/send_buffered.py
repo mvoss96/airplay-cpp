@@ -223,9 +223,9 @@ async def main():
         return new_stream, new_start, i + 120
 
     async def received(reader):
-        """Whether something came on an event connection (encrypted, so only that it came)"""
+        """How much came on an event connection (encrypted, so only how much)"""
         await asyncio.sleep(0.3)
-        return len(await asyncio.wait_for(reader.read(65536), 3)) > 0
+        return len(await asyncio.wait_for(reader.read(65536), 3))
 
     async def relay_remote_control(control_rtsp, control_reader):
         """As an iPad controls the playing sender through a speaker: a remote control stream (type 130) whose
@@ -255,6 +255,12 @@ async def main():
                                        body=plistlib.dumps({"params": {"data": b"answer"}}, fmt=plistlib.FMT_BINARY))
         assert response.code == 200
         assert await received(control_reader), "the sender's answer did not reach the controller"
+        # Now playing details with cover art: larger than the receiver's buffer, passed on as they come
+        large = plistlib.dumps({"params": {"data": bytes(range(256)) * 14}}, fmt=plistlib.FMT_BINARY)
+        response = await rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
+                                       headers={"X-Apple-StreamID": stream_id}, body=large)
+        assert response.code == 200
+        assert await received(control_reader) > len(large), "the large answer did not reach the controller whole"
         await control_rtsp.exchange("TEARDOWN", content_type="application/x-apple-binary-plist",
                                     body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         assert await received(event_reader), "the sender heard nothing of the end"
