@@ -314,9 +314,11 @@ class Receiver {
     bool event_silent{false};
     bool audio_data{false};      // A sender's buffered audio connection
     bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
-    uint32_t relay_stream{0};    // A controller's remote control stream relayed to the playing sender, 0 if none
-    char group_id[40]{};         // The sender's group (groupUUID of its session SETUP), empty if none
-    bool group_leader{false};    // groupContainsGroupLeader
+    // A controller's remote control streams relayed to the playing sender (several apps of one device), 0 if free
+    uint32_t relay_streams[4]{};
+    uint32_t relay_latest{0};  // The one set up last, for messages that do not name theirs
+    char group_id[40]{};       // The sender's group (groupUUID of its session SETUP), empty if none
+    bool group_leader{false};  // groupContainsGroupLeader
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
     bool session_pending{false};
     bool pending_recording{false};
@@ -439,8 +441,9 @@ class Receiver {
                     Response &response);
   /// Sends a request with a property list on the event connection of the device at address
   bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length);
-  /// The controller's stream ends: the sender hears of it
-  void end_relay_(uint8_t connection);
+  /// A controller's stream ends (all of its streams with 0): the sender hears of it
+  void end_relay_(uint8_t connection, uint32_t stream_id = 0);
+  void end_relay_stream_(const Connection &c, uint32_t stream);
   /// Logs what a device answers on its event connection (debug level only)
   void receive_event_answer_(uint8_t connection, const uint8_t *data, size_t length);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,

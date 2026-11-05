@@ -9,6 +9,7 @@
 #endif
 
 #include <algorithm>
+#include <iterator>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -424,7 +425,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.event_silent = false;
   c.audio_data = false;
   c.remote_control = false;
-  c.relay_stream = 0;
+  std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
+  c.relay_latest = 0;
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';
@@ -1330,10 +1332,12 @@ void Receiver::end_session_(uint32_t keep_address) {
   // The sender's event connection goes with its session, unless the sender stays connected
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
-    if (c.open && c.relay_stream != 0) {
+    if (c.open && c.relay_latest != 0) {
       // A controller of the sender that played: nothing left to relay to
-      AIRPLAY_LOGI("Remote control stream %" PRIu32 " ended with the session", c.relay_stream);
-      c.relay_stream = 0;
+      const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+      AIRPLAY_LOGI("Remote control streams of %u.%u.%u.%u ended with the session", ip[0], ip[1], ip[2], ip[3]);
+      std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
+      c.relay_latest = 0;
       c.open = false;
       this->transport_.close(i);
       continue;

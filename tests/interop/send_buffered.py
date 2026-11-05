@@ -235,6 +235,17 @@ async def main():
             "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
         stream_id = reply["streams"][0]["streamID"]
         assert await received(event_reader), "the sender heard nothing of the controller"
+        # Another app of the same device: a stream of its own, which ends on its own
+        reply = await exchange(control_rtsp, "SETUP", {"streams": [{
+            "type": 130, "controlType": 1, "clientUUID": str(uuid.uuid4()).upper(),
+            "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
+        other_id = reply["streams"][0]["streamID"]
+        assert other_id != stream_id, "two streams with one number"
+        assert await received(event_reader), "the sender heard nothing of the second stream"
+        await control_rtsp.exchange("TEARDOWN", content_type="application/x-apple-binary-plist",
+                                    body=plistlib.dumps({"streams": [{"streamID": other_id, "type": 130}]},
+                                                        fmt=plistlib.FMT_BINARY))
+        assert await received(event_reader), "the sender heard nothing of the second stream's end"
         response = await control_rtsp.exchange("POST", uri="/command", content_type="application/octet-stream",
                                                body=bytes(range(256)) * 3)  # Larger than one frame of 512
         assert response.code == 200

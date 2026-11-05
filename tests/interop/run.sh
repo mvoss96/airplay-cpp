@@ -123,7 +123,8 @@ if [ "$SENDER" = buffered ]; then
   if [ "$REMOTE_CONTROL" = 1 ]; then
     # A controller's remote control stream was relayed to the sender, and ended
     grep -q "Remote control stream 1 for controller" receiver.log
-    grep -q "Remote control stream 1 ended" receiver.log
+    grep -q "Remote control stream 2 of 127.0.0.2 ended" receiver.log
+    grep -q "Remote control stream 1 of 127.0.0.2 ended" receiver.log
   fi
   if [ "$TAKEOVER" = 1 ]; then
     # The test sender reads its event connection but never answers, as Music Assistant
