@@ -427,6 +427,9 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.remote_control = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
+  c.relayed_to_sender = 0;
+  c.relayed_to_controller = 0;
+  c.relay_not_sent = 0;
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';

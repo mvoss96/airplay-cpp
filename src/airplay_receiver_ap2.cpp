@@ -354,7 +354,10 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     const Connection &c = this->connections_[connection];
     PlistReader reader;
     const bool parsed = plist && reader.parse(data, body_length);
-    bool control = c.remote_control || has_stream;
+    // Relayed messages get one line of their own below: many come at once, and a burst of log lines gets lost
+    const bool relayed =
+        std::strcmp(method, "POST") == 0 && path_is(request, "/command") && (has_stream || c.relay_latest != 0);
+    bool control = (c.remote_control || has_stream) && !relayed;
     if (parsed && std::strcmp(method, "SETUP") == 0) {
       bool remote_control_only = false;
       int64_t type = 0;
@@ -427,8 +430,8 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       has_stream ? static_cast<uint32_t>(std::strtoul(stream_text, nullptr, 10)) : relay.relay_latest;
   if (stream_id != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && data != nullptr &&
       body_length > 0) {
-    const Connection *controller = nullptr;
-    for (const Connection &other : this->connections_) {
+    Connection *controller = nullptr;
+    for (Connection &other : this->connections_) {
       if (other.open && std::find(std::begin(other.relay_streams), std::end(other.relay_streams), stream_id) !=
                             std::end(other.relay_streams))
         controller = &other;
@@ -459,6 +462,13 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     const auto *from_ip = reinterpret_cast<const uint8_t *>(&from);
     const auto *to_ip = reinterpret_cast<const uint8_t *>(&to);
     const bool sent = forward_length > 0 && this->send_event_request_(to, stream_id, forward, forward_length);
+    if (!sent) {
+      controller->relay_not_sent++;
+    } else if (to_sender) {
+      controller->relayed_to_sender++;
+    } else {
+      controller->relayed_to_controller++;
+    }
     AIRPLAY_LOGD("Relay stream %" PRIu32 " %s: %u.%u.%u.%u -> %u.%u.%u.%u, %u bytes%s", stream_id,
                  to_sender ? "to the sender" : "to the controller", from_ip[0], from_ip[1], from_ip[2], from_ip[3],
                  to_ip[0], to_ip[1], to_ip[2], to_ip[3], static_cast<unsigned>(forward_length),
@@ -1326,10 +1336,11 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
 void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char *client_uuid,
                             const char *client_type_uuid, Response &response) {
   Connection &c = this->connections_[connection];
-  const bool playing = this->session_owner_ != NO_CONNECTION && this->session_state_ == SessionState::PLAYING;
-  if (!c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !playing) {
+  // While a sender has a session, paused too: the controller offers to play again
+  const bool session = this->session_owner_ != NO_CONNECTION;
+  if (!c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !session) {
     AIRPLAY_LOGD("Remote control stream (control type %" PRId64 ") refused%s", control_type,
-                 playing ? "" : ": no sender plays");
+                 session ? "" : ": no sender has a session");
     response.status = 400;
     response.status_text = "Bad Request";
     return;
@@ -1383,15 +1394,26 @@ void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char
 
 void Receiver::end_relay_(uint8_t connection, uint32_t stream_id) {
   Connection &c = this->connections_[connection];
+  bool ended = false;
   for (uint32_t &stream : c.relay_streams) {
     if (stream == 0 || (stream_id != 0 && stream != stream_id))
       continue;
     this->end_relay_stream_(c, stream);
     stream = 0;
+    ended = true;
   }
   c.relay_latest = 0;
   for (uint32_t stream : c.relay_streams)
     c.relay_latest = std::max(c.relay_latest, stream);
+  if (ended && c.relay_latest == 0) {
+    // What the log may have lost of it
+    const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+    AIRPLAY_LOGI("Relayed for %u.%u.%u.%u: %u messages to the sender, %u to it, %u not sent", ip[0], ip[1], ip[2],
+                 ip[3], c.relayed_to_sender, c.relayed_to_controller, c.relay_not_sent);
+    c.relayed_to_sender = 0;
+    c.relayed_to_controller = 0;
+    c.relay_not_sent = 0;
+  }
 }
 
 void Receiver::end_relay_stream_(const Connection &c, uint32_t stream) {

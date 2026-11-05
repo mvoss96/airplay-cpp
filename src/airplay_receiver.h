@@ -317,6 +317,10 @@ class Receiver {
     // A controller's remote control streams relayed to the playing sender (several apps of one device), 0 if free
     uint32_t relay_streams[4]{};
     uint32_t relay_latest{0};  // The one set up last, for messages that do not name theirs
+    // Messages relayed for its streams: to the sender, to it, and not sent
+    uint16_t relayed_to_sender{0};
+    uint16_t relayed_to_controller{0};
+    uint16_t relay_not_sent{0};
     char group_id[40]{};       // The sender's group (groupUUID of its session SETUP), empty if none
     bool group_leader{false};  // groupContainsGroupLeader
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
