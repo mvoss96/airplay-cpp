@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.0
+
+- HomeKit pairings can be kept across restarts: `Receiver::homekit_pairings()` and `set_homekit_pairings()`, with
+  `Listener::on_homekit_pairings()` when they change. Access control ends with the last admin.
+- The status flags in the TXT records (`flags`, `sf`) and /info carry HomeKit access control (0x400), with
+  `Listener::on_status_flags()` when they change
+- While a sender's session plays, its group (`groupUUID`, `groupContainsGroupLeader`) is announced as `gid` and
+  `gcgl` with status flag 0x800, as other AirPlay 2 speakers do (`Listener::on_group()`); /info carries `gid`
+- Feature bits 15-17 (cover art, progress and text in the AirPlay 1 way)
+- `ReceiverConfig::homekit_identity`: a number other than 0 gives the receiver a new HomeKit key and pairing
+  identifier, so that a home holding a broken setup of it can add it again (the device ID stays the MAC)
+- The Home app's tile still shows "control not available", even with the same status signals as an MFi speaker;
+  the remaining difference is Apple's MFi authentication
+
 ## v0.3.0
 
 - HomeKit pairing: the Home app can add the receiver (pair-setup with the fixed PIN, pair-verify with the Home's
