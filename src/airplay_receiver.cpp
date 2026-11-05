@@ -424,6 +424,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.event_silent = false;
   c.audio_data = false;
   c.remote_control = false;
+  c.relay_stream = 0;
   c.session_pending = false;
   c.pending_recording = false;
   c.sender_name[0] = '\0';
@@ -478,6 +479,7 @@ void Receiver::connection_closed(uint8_t connection) {
   AIRPLAY_LOGD("Connection closed (%u.%u.%u.%u, %s)", ip[0], ip[1], ip[2], ip[3], kind);
   if (c.event_channel && c.event_requests > 0)
     AIRPLAY_LOGD("Event connection: %u requests sent, %u answers", c.event_requests, c.event_answers);
+  this->end_relay_(connection);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->verify_connection_)
@@ -492,6 +494,7 @@ void Receiver::connection_closed(uint8_t connection) {
 void Receiver::close_connection_(uint8_t connection) {
   if (connection >= MAX_CONNECTIONS || !this->connections_[connection].open)
     return;
+  this->end_relay_(connection);
   if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
     this->end_session_();
   if (connection == this->pairing_connection_)
@@ -1323,6 +1326,14 @@ void Receiver::end_session_(uint32_t keep_address) {
   // The sender's event connection goes with its session, unless the sender stays connected
   for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
     Connection &c = this->connections_[i];
+    if (c.open && c.relay_stream != 0) {
+      // A controller of the sender that played: nothing left to relay to
+      AIRPLAY_LOGI("Remote control stream %" PRIu32 " ended with the session", c.relay_stream);
+      c.relay_stream = 0;
+      c.open = false;
+      this->transport_.close(i);
+      continue;
+    }
     const bool kept = c.event_channel && keep_address != 0 && c.peer.address == keep_address;
     if (c.open && (c.event_channel || c.audio_data) && !kept) {
       c.open = false;

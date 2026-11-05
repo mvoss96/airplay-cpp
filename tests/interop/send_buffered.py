@@ -222,6 +222,32 @@ async def main():
         other_timing.close()
         return new_stream, new_start, i + 120
 
+    async def received(reader):
+        """Whether something came on an event connection (encrypted, so only that it came)"""
+        await asyncio.sleep(0.3)
+        return len(await asyncio.wait_for(reader.read(65536), 3)) > 0
+
+    async def relay_remote_control(control_rtsp, control_reader):
+        """As an iPad controls the playing sender through a speaker: a remote control stream (type 130) whose
+        MediaRemote messages the receiver passes on in both directions"""
+        reply = await exchange(control_rtsp, "SETUP", {"streams": [{
+            "type": 130, "controlType": 1, "clientUUID": str(uuid.uuid4()).upper(),
+            "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
+        stream_id = reply["streams"][0]["streamID"]
+        assert await received(event_reader), "the sender heard nothing of the controller"
+        response = await control_rtsp.exchange("POST", uri="/command", content_type="application/octet-stream",
+                                               body=bytes(range(256)) * 3)  # Larger than one frame of 512
+        assert response.code == 200
+        assert await received(event_reader), "the controller's message did not reach the sender"
+        response = await rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
+                                       headers={"X-Apple-StreamID": stream_id},
+                                       body=plistlib.dumps({"params": {"data": b"answer"}}, fmt=plistlib.FMT_BINARY))
+        assert response.code == 200
+        assert await received(control_reader), "the sender's answer did not reach the controller"
+        await control_rtsp.exchange("TEARDOWN", content_type="application/x-apple-binary-plist",
+                                    body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+        assert await received(event_reader), "the sender heard nothing of the end"
+
     # Some audio ahead, then playback starts half a second from now while the rest follows as the buffer drains
     ahead = 0 if paced else min(20, len(frames))
     for i in range(ahead):
@@ -281,13 +307,15 @@ async def main():
                                                             "networkTimeTimelineID": 1})
                 start = time.time() + 0.3 - i * FRAMES_PER_PACKET / SAMPLE_RATE
         if i == 120 and remote_control:
-            control = await http_connect(host, port)
+            # A controller on another device (an iPad), which then controls this sender through the receiver
+            _, control = await loop.create_connection(HttpConnection, host, port, local_addr=("127.0.0.2", 0))
             control_rtsp = RtspSession(control)
             await verify_connection(TRANSIENT_CREDENTIALS, control)
             reply = await exchange(control_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
             assert "eventPort" in reply
-            await asyncio.open_connection(host, reply["eventPort"])
+            control_reader, _ = await asyncio.open_connection(host, reply["eventPort"], local_addr=("127.0.0.2", 0))
             await exchange(control_rtsp, "RECORD")  # As the Home app does when it adds the receiver
+            await relay_remote_control(control_rtsp, control_reader)
         await send(i)
         i += 1
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE

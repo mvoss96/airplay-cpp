@@ -13,6 +13,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <utility>
@@ -77,6 +78,10 @@ static constexpr uint32_t EVENT_ANSWER_TIMEOUT_MS = 2000;
 /// Stream type of realtime audio over UDP; 103 is buffered audio over TCP
 static constexpr int64_t STREAM_TYPE_REALTIME = 96;
 static constexpr int64_t STREAM_TYPE_BUFFERED = 103;
+/// Remote control through the receiver: a controller's MediaRemote messages for the playing sender
+static constexpr int64_t STREAM_TYPE_REMOTE_CONTROL = 130;
+/// The relayed stream that carries MediaRemote messages (2 is not relayed, as other speakers do)
+static constexpr int64_t CONTROL_TYPE_MEDIA_REMOTE = 1;
 /// Compression types ("ct") of a stream
 static constexpr int64_t COMPRESSION_PCM = 1;
 static constexpr int64_t COMPRESSION_ALAC = 2;
@@ -283,13 +288,16 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       AIRPLAY_LOGV("  not a binary property list");
     }
   }
+  // Remote control relay: requests of a relayed stream carry its number
+  char stream_text[16] = "";
+  const bool has_stream = get_header(request, header_length, "X-Apple-StreamID", stream_text, sizeof(stream_text));
   // What controllers send: sessions only to control playback, remote control streams (type 130), and anything on
-  // a remote control connection
+  // a remote control connection or of a relayed stream
   if (!verbose && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && data != nullptr && body_length > 0) {
     const Connection &c = this->connections_[connection];
     PlistReader reader;
     const bool parsed = plist && reader.parse(data, body_length);
-    bool control = c.remote_control;
+    bool control = c.remote_control || has_stream;
     if (parsed && std::strcmp(method, "SETUP") == 0) {
       bool remote_control_only = false;
       int64_t type = 0;
@@ -299,6 +307,15 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     }
     if (control) {
       const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+      for (const char *line = line_end; line != nullptr && line + 2 < request + header_length;) {
+        line += 2;
+        const char *next = std::strstr(line, "\r\n");
+        if (next == nullptr || next == line)
+          break;
+        AIRPLAY_LOGD("Control from %u.%u.%u.%u, header %.*s", ip[0], ip[1], ip[2], ip[3],
+                     static_cast<int>(std::min<ptrdiff_t>(next - line, 160)), line);
+        line = next;
+      }
       if (parsed) {
         auto *text = reinterpret_cast<char *>(this->body_buffer_);
         const size_t length = reader.describe(reader.root(), text, AIRPLAY2_BODY_SIZE);
@@ -306,13 +323,53 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
           AIRPLAY_LOGD("Control from %u.%u.%u.%u: %.*s", ip[0], ip[1], ip[2], ip[3],
                        static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
       } else {
-        char hex[2 * 32 + 1] = "";
-        for (size_t i = 0; i < std::min<size_t>(body_length, 32); i++)
+        char hex[2 * 64 + 1] = "";
+        for (size_t i = 0; i < std::min<size_t>(body_length, 64); i++)
           std::snprintf(hex + 2 * i, 3, "%02x", data[i]);
         AIRPLAY_LOGD("Control from %u.%u.%u.%u: %u bytes, %s", ip[0], ip[1], ip[2], ip[3],
                      static_cast<unsigned>(body_length), hex);
       }
     }
+  }
+  Connection &relay = this->connections_[connection];
+  if (relay.relay_stream != 0 && std::strcmp(method, "TEARDOWN") == 0) {
+    this->end_relay_(connection);
+    return true;
+  }
+  if (relay.relay_stream != 0 && std::strcmp(method, "POST") == 0 && path_is(request, "/command") && data != nullptr &&
+      body_length > 0 && this->session_owner_ != NO_CONNECTION) {
+    // A controller's MediaRemote message: to the sender, as a property list with the data
+    const uint8_t *forward = data;
+    size_t forward_length = body_length;
+    if (!plist) {
+      PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+      writer.begin_dict(1);
+      writer.key("params");
+      writer.begin_dict(1);
+      writer.key("data");
+      writer.data(data, body_length);
+      forward = this->body_buffer_;
+      forward_length = writer.finish();
+    }
+    if (forward_length == 0 || !this->send_event_request_(this->connections_[this->session_owner_].peer.address,
+                                                          relay.relay_stream, forward, forward_length))
+      AIRPLAY_LOGW("Could not relay %u bytes of remote control stream %" PRIu32, static_cast<unsigned>(body_length),
+                   relay.relay_stream);
+    return true;
+  }
+  if (has_stream && relay.relay_stream == 0 && data != nullptr && body_length > 0) {
+    // The sender's answer on a relayed stream: to the controller's event connection
+    const auto stream_id = static_cast<uint32_t>(std::strtoul(stream_text, nullptr, 10));
+    for (const Connection &controller : this->connections_) {
+      if (!controller.open || controller.relay_stream != stream_id)
+        continue;
+      if (!this->send_event_request_(controller.peer.address, stream_id, data, body_length))
+        AIRPLAY_LOGW("Could not relay %u bytes to the controller of stream %" PRIu32,
+                     static_cast<unsigned>(body_length), stream_id);
+      return true;
+    }
+    AIRPLAY_LOGD("No controller for stream %" PRIu32, stream_id);
+    return true;
   }
 
   if (std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) {
@@ -945,6 +1002,25 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     writer.integer(c.local.port);
     write_timing(writer);
   } else {
+    const PlistReader::Object first = reader.at(streams, 0);
+    int64_t first_type = 0;
+    reader.get_integer(reader.get(first, "type"), &first_type);
+    if (first_type == STREAM_TYPE_REMOTE_CONTROL) {
+      int64_t control_type = 0;
+      reader.get_integer(reader.get(first, "controlType"), &control_type);
+      char client_uuid[64] = "";
+      char client_type_uuid[64] = "";
+      for (auto [key, out] : {std::pair{"clientUUID", client_uuid}, std::pair{"clientTypeUUID", client_type_uuid}}) {
+        const char *text = nullptr;
+        size_t text_length = 0;
+        if (reader.get_string(reader.get(first, key), &text, &text_length) && text_length < 64) {
+          std::memcpy(out, text, text_length);
+          out[text_length] = '\0';
+        }
+      }
+      this->setup_relay_(connection, control_type, client_uuid, client_type_uuid, response);
+      return;
+    }
     // An audio stream
     if (c.session_pending && this->udp_open_)
       this->adopt_session_(connection, request, header_length);
@@ -1149,6 +1225,103 @@ void Receiver::send_sender_requests_(uint32_t now_ms) {
         AIRPLAY_LOGD("Command %s sent to the sender", CODES[i]);
     }
   }
+}
+
+void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char *client_uuid,
+                            const char *client_type_uuid, Response &response) {
+  Connection &c = this->connections_[connection];
+  const bool playing = this->session_owner_ != NO_CONNECTION && this->session_state_ == SessionState::PLAYING;
+  if (!c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !playing) {
+    AIRPLAY_LOGD("Remote control stream (control type %" PRId64 ") refused%s", control_type,
+                 playing ? "" : ": no sender plays");
+    response.status = 400;
+    response.status_text = "Bad Request";
+    return;
+  }
+  if (c.relay_stream == 0)
+    c.relay_stream = this->relay_next_stream_++;
+  AIRPLAY_LOGI("Remote control stream %" PRIu32 " for controller %s (%s)", c.relay_stream, client_uuid,
+               client_type_uuid);
+  PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  writer.begin_dict(1);
+  writer.key("streams");
+  writer.begin_array(1);
+  writer.begin_dict(2);
+  writer.key("streamID");
+  writer.integer(c.relay_stream);
+  writer.key("type");
+  writer.integer(STREAM_TYPE_REMOTE_CONTROL);
+  response.body_length = writer.finish();
+  if (response.body_length == 0)
+    return;
+  response.status = 200;
+  response.status_text = "OK";
+  response.content_type = CONTENT_TYPE_PLIST;
+  response.body = this->body_buffer_;
+  // The sender hears of the controller, as AirPlay 2 speakers tell it ("remoteConrolSessionCreate", sic)
+  uint8_t body[256];
+  PlistWriter create(body, sizeof(body));
+  create.begin_dict(4);
+  create.key("type");
+  create.string("remoteConrolSessionCreate");
+  create.key("streamID");
+  create.integer(c.relay_stream);
+  create.key("clientTypeUUID");
+  create.string(client_type_uuid);
+  create.key("clientUUID");
+  create.string(client_uuid);
+  const size_t length = create.finish();
+  if (length == 0 || !this->send_event_request_(this->connections_[this->session_owner_].peer.address, 0, body, length))
+    AIRPLAY_LOGW("Could not tell the sender of remote control stream %" PRIu32, c.relay_stream);
+}
+
+void Receiver::end_relay_(uint8_t connection) {
+  Connection &c = this->connections_[connection];
+  if (c.relay_stream == 0)
+    return;
+  AIRPLAY_LOGI("Remote control stream %" PRIu32 " ended", c.relay_stream);
+  if (this->session_owner_ != NO_CONNECTION) {
+    uint8_t body[128];
+    PlistWriter invalidate(body, sizeof(body));
+    invalidate.begin_dict(2);
+    invalidate.key("type");
+    invalidate.string("remoteControlSessionInvalidate");
+    invalidate.key("streamID");
+    invalidate.integer(c.relay_stream);
+    const size_t length = invalidate.finish();
+    if (length == 0 ||
+        !this->send_event_request_(this->connections_[this->session_owner_].peer.address, 0, body, length))
+      AIRPLAY_LOGW("Could not tell the sender that remote control stream %" PRIu32 " ended", c.relay_stream);
+  }
+  c.relay_stream = 0;
+}
+
+bool Receiver::send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length) {
+  for (uint8_t i = 0; i < MAX_CONNECTIONS; i++) {
+    Connection &c = this->connections_[i];
+    if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
+      continue;
+    char header[192];
+    char stream_header[48] = "";
+    if (stream_id != 0)
+      std::snprintf(stream_header, sizeof(stream_header), "X-Apple-StreamID: %" PRIu32 "\r\n", stream_id);
+    const int header_length =
+        std::snprintf(header, sizeof(header),
+                      "POST /command RTSP/1.0\r\nCSeq: %" PRIu32 "\r\nContent-Type: %s\r\nContent-Length: %u\r\n%s\r\n",
+                      ++this->event_cseq_, CONTENT_TYPE_PLIST, static_cast<unsigned>(length), stream_header);
+    if (header_length <= 0 || static_cast<size_t>(header_length) >= sizeof(header))
+      return false;
+    // Header and body in frames of their own: the stream does not care where frames end
+    if (!this->send_(i, reinterpret_cast<const uint8_t *>(header), static_cast<size_t>(header_length)) ||
+        !this->send_(i, body, length))
+      return false;
+    c.event_requests++;
+    const auto *ip = reinterpret_cast<const uint8_t *>(&address);
+    AIRPLAY_LOGD("Event request to %u.%u.%u.%u: %u bytes%s", ip[0], ip[1], ip[2], ip[3], static_cast<unsigned>(length),
+                 stream_header[0] != '\0' ? " (relayed)" : "");
+    return true;
+  }
+  return false;
 }
 
 bool Receiver::send_media_remote_command_(const char *value, float volume) {

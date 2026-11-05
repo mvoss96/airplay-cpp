@@ -314,6 +314,7 @@ class Receiver {
     bool event_silent{false};
     bool audio_data{false};      // A sender's buffered audio connection
     bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
+    uint32_t relay_stream{0};    // A controller's remote control stream relayed to the playing sender, 0 if none
     char group_id[40]{};         // The sender's group (groupUUID of its session SETUP), empty if none
     bool group_leader{false};    // groupContainsGroupLeader
     // Another AirPlay 2 session of the sender that is playing: it takes over once it sets up a stream
@@ -430,6 +431,15 @@ class Receiver {
   void update_status_flags_();
   /// Follows the group of the session that plays (polled: the session changes in many places)
   void update_group_();
+  // Remote control relay: a controller (an iPad) sends MediaRemote messages for the playing sender through the
+  // receiver, as AirPlay 2 speakers relay them
+  /// SETUP of a remote control stream (type 130) on a controller's connection
+  void setup_relay_(uint8_t connection, int64_t control_type, const char *client_uuid, const char *client_type_uuid,
+                    Response &response);
+  /// Sends a request with a property list on the event connection of the device at address
+  bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length);
+  /// The controller's stream ends: the sender hears of it
+  void end_relay_(uint8_t connection);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
                               size_t length, Response &response, int64_t now_us);
   void build_info_(Response &response);
@@ -572,7 +582,9 @@ class Receiver {
   // The playing sender's group, as gid and gcgl in the TXT records; the receiver's own when not in one
   char group_id_[40]{};
   char group_leader_[2]{"0"};
-  bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
+  bool in_group_{false};
+  uint32_t relay_next_stream_{
+      1};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
   uint8_t verify_connection_{0xff};  // Connection between pair-verify M1 and M3
   uint8_t verify_secret_[X25519_KEY_SIZE]{};
   uint8_t verify_public_[X25519_KEY_SIZE]{};
