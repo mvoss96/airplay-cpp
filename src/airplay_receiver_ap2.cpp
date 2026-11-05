@@ -287,6 +287,37 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       AIRPLAY_LOGV("  not a binary property list");
     }
   }
+  // What controllers send: sessions only to control playback, remote control streams (type 130), and anything on
+  // a remote control connection
+  if (!verbose && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && data != nullptr && body_length > 0) {
+    const Connection &c = this->connections_[connection];
+    PlistReader reader;
+    const bool parsed = plist && reader.parse(data, body_length);
+    bool control = c.remote_control;
+    if (parsed && std::strcmp(method, "SETUP") == 0) {
+      bool remote_control_only = false;
+      int64_t type = 0;
+      reader.get_bool(reader.get(reader.root(), "isRemoteControlOnly"), &remote_control_only);
+      reader.get_integer(reader.get(reader.at(reader.get(reader.root(), "streams"), 0), "type"), &type);
+      control = control || remote_control_only || type == 130;
+    }
+    if (control) {
+      const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+      if (parsed) {
+        auto *text = reinterpret_cast<char *>(this->body_buffer_);
+        const size_t length = reader.describe(reader.root(), text, AIRPLAY2_BODY_SIZE);
+        for (size_t offset = 0; offset < length; offset += 150)
+          AIRPLAY_LOGD("Control from %u.%u.%u.%u: %.*s", ip[0], ip[1], ip[2], ip[3],
+                       static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
+      } else {
+        char hex[2 * 32 + 1] = "";
+        for (size_t i = 0; i < std::min<size_t>(body_length, 32); i++)
+          std::snprintf(hex + 2 * i, 3, "%02x", data[i]);
+        AIRPLAY_LOGD("Control from %u.%u.%u.%u: %u bytes, %s", ip[0], ip[1], ip[2], ip[3],
+                     static_cast<unsigned>(body_length), hex);
+      }
+    }
+  }
 
   if (std::strcmp(method, "GET") == 0 || std::strcmp(method, "POST") == 0) {
     if (path_is(request, "/info")) {

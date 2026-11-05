@@ -219,7 +219,7 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
   static const TxtRecord RECORDS[] = {
       {"txtvers", "1"}, {"ch", "2"},     {"cn", "0,1"},   {"et", "0,1"},      {"ek", "1"},
       {"sv", "false"},  {"da", "true"},  {"sr", "44100"}, {"ss", "16"},       {"tp", "UDP"},
-      {"vn", "65537"},  {"vs", "105.1"}, {"sf", "0x4"},   {"fv", "76400.10"},
+      {"vn", "65537"},  {"vs", "366.0"}, {"sf", "0x4"},   {"fv", "76400.10"},
   };
   static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 3 <= MAX_TXT_RECORDS, "No room for pw, am and md");
   for (const TxtRecord &record : RECORDS) {
