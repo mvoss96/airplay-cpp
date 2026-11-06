@@ -426,6 +426,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.remote_control = false;
   c.homekit_controller = false;
+  c.verify_pending = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
   c.relayed_to_sender = 0;
@@ -491,8 +492,6 @@ void Receiver::connection_closed(uint8_t connection) {
   this->end_relay_(connection);
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
-  if (connection == this->verify_connection_)
-    this->verify_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
@@ -508,8 +507,6 @@ void Receiver::close_connection_(uint8_t connection) {
     this->end_session_();
   if (connection == this->pairing_connection_)
     this->pairing_connection_ = NO_CONNECTION;
-  if (connection == this->verify_connection_)
-    this->verify_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;

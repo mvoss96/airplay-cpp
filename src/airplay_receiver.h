@@ -315,9 +315,13 @@ class Receiver {
     uint16_t event_answers{0};
     uint32_t event_first_request_ms{0};  // Of the first request while none was answered
     bool event_silent{false};
-    bool audio_data{false};          // A sender's buffered audio connection
-    bool remote_control{false};      // Its session only controls playback (iOS, the Home app): no audio
-    bool homekit_controller{false};  // Verified with the keys of a controller paired through the Home app
+    bool audio_data{false};      // A sender's buffered audio connection
+    bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
+    bool homekit_controller{false};
+    // Between pair-verify M1 and M3, per connection as several devices of a Home verify at once: the receiver's and
+    // the controller's ephemeral public keys and their shared secret
+    bool verify_pending{false};
+    uint8_t verify_keys[3 * X25519_KEY_SIZE];  // Verified with the keys of a controller paired through the Home app
     // A controller's remote control streams relayed to the playing sender (several apps of one device), 0 if free
     uint32_t relay_streams[4]{};
     uint32_t relay_latest{0};  // The one set up last, for messages that do not name theirs
@@ -602,11 +606,6 @@ class Receiver {
   char group_leader_[2]{"0"};
   bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
   uint32_t relay_next_stream_{1};
-  uint8_t verify_connection_{0xff};  // Connection between pair-verify M1 and M3
-  uint8_t verify_secret_[X25519_KEY_SIZE]{};
-  uint8_t verify_public_[X25519_KEY_SIZE]{};
-  uint8_t verify_peer_public_[X25519_KEY_SIZE]{};
-  uint8_t verify_shared_[X25519_KEY_SIZE]{};
   uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
   uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
   uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response

@@ -710,38 +710,43 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
   uint8_t plain[PAIRING_SUB_TLV_SIZE];
   const size_t accessory_id_length = std::strlen(this->pairing_id_);
 
+  uint8_t *own_public = c.verify_keys;
+  uint8_t *peer_public = c.verify_keys + X25519_KEY_SIZE;
+  uint8_t *shared = c.verify_keys + 2 * X25519_KEY_SIZE;
   if (state == 1) {
     writer.add_byte(TLV_STATE, 2);
+    c.verify_pending = false;
     size_t peer_length = 0;
-    this->config_.random(this->verify_secret_, sizeof(this->verify_secret_));
-    x25519_public_key(this->verify_secret_, this->verify_public_);
-    if (!tlv8_find(body, length, TLV_PUBLIC_KEY, this->verify_peer_public_, sizeof(this->verify_peer_public_),
-                   &peer_length) ||
-        peer_length != X25519_KEY_SIZE ||
-        !x25519(this->verify_secret_, this->verify_peer_public_, this->verify_shared_)) {
+    uint8_t secret[X25519_KEY_SIZE];
+    this->config_.random(secret, sizeof(secret));
+    x25519_public_key(secret, own_public);
+    const bool agreed = tlv8_find(body, length, TLV_PUBLIC_KEY, peer_public, X25519_KEY_SIZE, &peer_length) &&
+                        peer_length == X25519_KEY_SIZE && x25519(secret, peer_public, shared);
+    std::memset(secret, 0, sizeof(secret));
+    if (!agreed) {
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
       response.body_length = writer.length();
       return;
     }
     // The receiver signs both ephemeral keys and its identifier
     uint8_t info[2 * X25519_KEY_SIZE + HOMEKIT_ID_SIZE];
-    std::memcpy(info, this->verify_public_, X25519_KEY_SIZE);
+    std::memcpy(info, own_public, X25519_KEY_SIZE);
     std::memcpy(info + X25519_KEY_SIZE, this->pairing_id_, accessory_id_length);
-    std::memcpy(info + X25519_KEY_SIZE + accessory_id_length, this->verify_peer_public_, X25519_KEY_SIZE);
+    std::memcpy(info + X25519_KEY_SIZE + accessory_id_length, peer_public, X25519_KEY_SIZE);
     uint8_t signature[ED25519_SIGNATURE_SIZE];
     ed25519_sign(this->accessory_secret_key_, info, 2 * X25519_KEY_SIZE + accessory_id_length, signature);
     Tlv8Writer sub(plain, sizeof(plain) - POLY1305_TAG_SIZE);
     sub.add(TLV_IDENTIFIER, reinterpret_cast<const uint8_t *>(this->pairing_id_), accessory_id_length);
     sub.add(TLV_SIGNATURE, signature, sizeof(signature));
     const size_t sub_length = sub.length();
-    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, this->verify_shared_, X25519_KEY_SIZE, key);
+    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, shared, X25519_KEY_SIZE, key);
     pairing_nonce("PV-Msg02", nonce);
     chacha20_poly1305_encrypt(key, nonce, nullptr, 0, plain, sub_length, plain, plain + sub_length);
-    writer.add(TLV_PUBLIC_KEY, this->verify_public_, X25519_KEY_SIZE);
+    writer.add(TLV_PUBLIC_KEY, own_public, X25519_KEY_SIZE);
     writer.add(TLV_ENCRYPTED_DATA, plain, sub_length + POLY1305_TAG_SIZE);
-    this->verify_connection_ = connection;
-  } else if (state == 3 && connection == this->verify_connection_) {
-    this->verify_connection_ = NO_CONNECTION;
+    c.verify_pending = true;
+  } else if (state == 3 && c.verify_pending) {
+    c.verify_pending = false;
     writer.add_byte(TLV_STATE, 4);
     uint8_t encrypted[PAIRING_SUB_TLV_SIZE];
     size_t encrypted_length = 0;
@@ -749,7 +754,7 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
     size_t id_length = 0;
     uint8_t signature[ED25519_SIGNATURE_SIZE];
     size_t signature_length = 0;
-    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, this->verify_shared_, X25519_KEY_SIZE, key);
+    hkdf_sha512_key(PAIR_VERIFY_ENCRYPT_SALT, PAIR_VERIFY_ENCRYPT_INFO, shared, X25519_KEY_SIZE, key);
     pairing_nonce("PV-Msg03", nonce);
     bool ok = tlv8_find(body, length, TLV_ENCRYPTED_DATA, encrypted, sizeof(encrypted), &encrypted_length) &&
               encrypted_length >= POLY1305_TAG_SIZE;
@@ -764,9 +769,9 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
     const Controller *controller = ok ? this->find_controller_(id, id_length) : nullptr;
     if (ok && controller != nullptr) {
       uint8_t info[2 * X25519_KEY_SIZE + HOMEKIT_ID_SIZE];
-      std::memcpy(info, this->verify_peer_public_, X25519_KEY_SIZE);
+      std::memcpy(info, peer_public, X25519_KEY_SIZE);
       std::memcpy(info + X25519_KEY_SIZE, id, id_length);
-      std::memcpy(info + X25519_KEY_SIZE + id_length, this->verify_public_, X25519_KEY_SIZE);
+      std::memcpy(info + X25519_KEY_SIZE + id_length, own_public, X25519_KEY_SIZE);
       ok = ed25519_verify(signature, controller->public_key, info, 2 * X25519_KEY_SIZE + id_length);
     }
     c.homekit_controller = ok && controller != nullptr;
@@ -776,7 +781,7 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
       AIRPLAY_LOGW("pair-verify failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     } else {
-      const uint8_t *secret = this->verify_shared_;
+      const uint8_t *secret = shared;
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_WRITE_INFO, secret, X25519_KEY_SIZE, c.read_key);
       hkdf_sha512_key(CONTROL_SALT, CONTROL_SENDER_READ_INFO, secret, X25519_KEY_SIZE, c.write_key);
       hkdf_sha512_key(EVENTS_SALT, EVENTS_RECEIVER_WRITE_INFO, secret, X25519_KEY_SIZE, c.event_key);
@@ -823,9 +828,9 @@ bool Receiver::refuse_(uint8_t connection, const char *reason) {
   if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_HOME || c.homekit_controller)
     return false;
   const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
-  AIRPLAY_LOGW("Would refuse %u.%u.%u.%u (%s): the Home app allows only people sharing the Home (test build)", ip[0],
-               ip[1], ip[2], ip[3], reason);
-  return false;
+  AIRPLAY_LOGW("Refused %u.%u.%u.%u (%s): the Home app allows only people sharing the Home", ip[0], ip[1], ip[2], ip[3],
+               reason);
+  return true;
 }
 
 void Receiver::homekit_changed_() {
