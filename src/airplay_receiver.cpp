@@ -530,8 +530,14 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
     return;
   if (c.event_channel) {
     // Answers to the receiver's requests; their content is only logged
-    if (c.event_answers++ == 0)
-      AIRPLAY_LOGD("The sender answers on its event connection");
+    if (c.event_answers++ == 0) {
+      // macOS answers its first requests only after many seconds
+      if (c.event_silent)
+        AIRPLAY_LOGI("The sender answers on its event connection after all");
+      else
+        AIRPLAY_LOGD("The sender answers on its event connection");
+      c.event_silent = false;
+    }
     if (detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE)
       this->receive_event_answer_(connection, data, length);
     return;
