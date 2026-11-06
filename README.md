@@ -8,7 +8,7 @@ Targets:
   [esphome-airplay](https://github.com/mvoss96/esphome-airplay)
 - **Arduino ESP32** (core 3): example built in CI
 - **Linux**: all interop tests run here
-- **Zephyr**: built and streamed to in CI as `native_sim`, not yet on a real board
+- **Zephyr**: built and streamed to in CI as `native_sim`, PTP included; not yet on a real board
 - **macOS**: POSIX example, not tested
 
 Crypto through mbedTLS 2.28, 3.x or 4.x.
