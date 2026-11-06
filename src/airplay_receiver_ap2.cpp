@@ -158,10 +158,6 @@ void Receiver::init_airplay2_() {
   }
   // Not in a sender's group: its own
   std::snprintf(this->group_id_, sizeof(this->group_id_), "%s", this->pairing_id_);
-  uint8_t feature_bytes[8];
-  for (size_t i = 0; i < sizeof(feature_bytes); i++)
-    feature_bytes[i] = static_cast<uint8_t>(this->airplay2_features_ >> (8 * i));
-  base64_encode_unpadded(feature_bytes, sizeof(feature_bytes), this->features_base64_, sizeof(this->features_base64_));
 
   const TxtRecord records[] = {
       {"deviceid", this->device_id_},

@@ -582,7 +582,6 @@ class Receiver {
   char public_key_hex_[2 * CHACHA_KEY_SIZE + 1]{};
   char pairing_id_[37]{};
   char public_session_id_[37]{};  // "psi"
-  char features_base64_[16]{};    // "fex": the feature bits as little endian bytes
   uint8_t public_key_[CHACHA_KEY_SIZE]{};
   SrpServer *srp_{nullptr};
   uint8_t pairing_connection_{0xff};  // Connection between pair-setup M1 and M3, or M5 of a HomeKit pairing
