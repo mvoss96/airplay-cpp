@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- HomeKit access "Only people sharing this home": devices that are not the Home's, AirPlay 1 senders and Music
+  Assistant are refused, as by a HomePod. `HomeKitPairings::access_control` holds the level (`ACCESS_CONTROL_OFF`,
+  `_NETWORK`, `_HOME`) in the byte that held the bool, so stored pairings stay valid.
+- Several devices can pair-verify at once; before, the first one failed when the Home app changed a setting
+- PTP on Zephyr (`CONFIG_ZVFS_POLL_MAX` 8 or more); the Zephyr example offers AirPlay 2 with PTP
+
 ## v0.5.0
 
 - The Home app's tile can control playback without Apple's MFi authentication, also on devices other than the
