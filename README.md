@@ -63,7 +63,6 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 
 ## Limitations
 
-- 44.1 kHz, 16-bit stereo: no lossless high resolution, no video or screen mirroring
 - Validated on real hardware only on the ESP32-S3; the other targets only in CI
 - Access is not restricted to the members of the Home the receiver was added to
 - Siri is not tested
