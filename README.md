@@ -65,7 +65,6 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 
 - Validated on real hardware only on the ESP32-S3; the other targets only in CI
 - Access is not restricted to the members of the Home the receiver was added to
-- Siri is not tested
 - A password works with AirPlay 1 only
 
 ## Tests
