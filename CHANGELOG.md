@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.0
+
+- The Home app's tile can control playback without Apple's MFi authentication, also on devices other than the
+  sender (an iPad): the receiver relays remote control between a controller and the playing AirPlay 2 sender, as
+  other AirPlay 2 speakers do. A controller sets up a remote control stream (type 130) while a session exists, also
+  when it is paused. Its messages go to the sender's event connection and back, in any size.
+- The _airplay TXT records as AirPlay 2 speakers announce them: without psi, vv, fex and igl, the status flags in
+  lowercase hex, and isGroupLeader=0 while in a sender's group. `Listener::on_group()` has a third parameter for it
+  (`in_group`). _raop has vs=366.0.
+- Upgrade: a Home that added the receiver before does not reach it anymore after the TXT records changed. Remove the
+  receiver in the Home app and add it again; if that does not work, change `ReceiverConfig::homekit_identity`.
+- Relay details are logged at verbose level
+
 ## v0.4.0
 
 - HomeKit pairings can be kept across restarts: `Receiver::homekit_pairings()` and `set_homekit_pairings()`, with

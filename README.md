@@ -55,9 +55,8 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 - 44.1 kHz, 16-bit stereo: no lossless high resolution, no video or screen mirroring
 - macOS streams only with PTP timing, which needs `ReceiverConfig::ptp` and UDP ports 319 and 320 (not on Zephyr;
   root on Linux)
-- The receiver can be added to the Home app. The application keeps the pairings (`Receiver::homekit_pairings()`,
-  `Listener::on_homekit_pairings()`). Access is not restricted to the Home's members, and the Home app's tile shows
-  "control not available", as for other receivers without Apple's MFi authentication
+- The receiver can be added to the Home app, and its tile controls playback. The application keeps the pairings
+  (`Receiver::homekit_pairings()`, `Listener::on_homekit_pairings()`). Access is not restricted to the Home's members.
 - A password works with AirPlay 1 only
 - AirPlay 2 buffered audio needs an AAC decoder from the application (`AacDecoder`)
 
