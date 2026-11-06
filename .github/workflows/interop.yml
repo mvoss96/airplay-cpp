@@ -22,6 +22,7 @@ jobs:
     # (AAC over TCP, as iOS streams most apps; ALAC in the alac runs, as Music Assistant sends it and pauses it) and compare the
     # output with ffmpeg's decoding. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # A stuck job fails instead of running for hours
     strategy:
       fail-fast: false
       matrix:
@@ -70,9 +71,11 @@ jobs:
           if [ "${{ matrix.sender }}" = pyatv ]; then
             pip install pyatv "srptools<2"
           elif [ "${{ matrix.sender }}" = buffered ]; then
-            # AAC: ffmpeg encodes the test file and decodes the reference, FAAD2 decodes in the receiver
-            sudo apt-get install -y ffmpeg libfaad-dev
-            pip install pyatv "srptools<2" numpy
+            # AAC: ffmpeg encodes the test file and decodes the reference, FAAD2 decodes in the receiver. ffmpeg
+            # comes from PyPI: the apt package pulls about 100 MB from the Ubuntu mirror, which is sometimes very slow
+            sudo apt-get install -y libfaad-dev
+            pip install pyatv "srptools<2" numpy imageio-ffmpeg
+            sudo ln -sf "$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg
           else
             sudo apt-get install -y pipewire pipewire-bin wireplumber dbus-daemon
           fi
