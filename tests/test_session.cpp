@@ -827,8 +827,7 @@ static void test_mdns() {
   with.receiver.set_homekit_pairings(pairings);
   CHECK(status_flags() == "0x404");
   with.open(1);
-  // Test build: refusals are only logged
-  CHECK(status_code(with.request(1, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) != 403);
+  CHECK(status_code(with.request(1, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 403);
   CHECK(status_code(with.request(1, "OPTIONS")) == 200);
   pairings.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
   with.receiver.set_homekit_pairings(pairings);

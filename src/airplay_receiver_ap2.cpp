@@ -775,15 +775,6 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
       ok = ed25519_verify(signature, controller->public_key, info, 2 * X25519_KEY_SIZE + id_length);
     }
     c.homekit_controller = ok && controller != nullptr;
-    {
-      // Which identity a device verifies with (test build)
-      const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
-      AIRPLAY_LOGI("pair-verify from %u.%u.%u.%u: %.8s… %s", ip[0], ip[1], ip[2], ip[3],
-                   reinterpret_cast<const char *>(id),
-                   !ok                     ? "failed"
-                   : controller != nullptr ? "paired"
-                                           : "not paired");
-    }
     if (ok && controller == nullptr && this->refuse_(connection, "controller that is not paired")) {
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     } else if (!ok) {
@@ -837,9 +828,9 @@ bool Receiver::refuse_(uint8_t connection, const char *reason) {
   if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_HOME || c.homekit_controller)
     return false;
   const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
-  AIRPLAY_LOGW("Would refuse %u.%u.%u.%u (%s): the Home app allows only people sharing the Home (test build)", ip[0],
-               ip[1], ip[2], ip[3], reason);
-  return false;
+  AIRPLAY_LOGW("Refused %u.%u.%u.%u (%s): the Home app allows only people sharing the Home", ip[0], ip[1], ip[2], ip[3],
+               reason);
+  return true;
 }
 
 void Receiver::homekit_changed_() {
@@ -899,10 +890,6 @@ void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {
   }
   AIRPLAY_LOGD("HomeKit: %u paired controllers, access %s", static_cast<unsigned>(paired),
                access_control_name(this->homekit_.access_control));
-  for (const Controller &controller : this->homekit_.controllers) {
-    if (controller.id[0] != '\0')
-      AIRPLAY_LOGI("Paired controller %.8s… (%s)", controller.id, (controller.permissions & 1) != 0 ? "admin" : "user");
-  }
   this->update_status_flags_();
 }
 
