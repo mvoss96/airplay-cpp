@@ -814,13 +814,22 @@ static void test_mdns() {
   };
   CHECK(status_flags() == "0x4");
   HomeKitPairings pairings{};
-  pairings.access_control = true;
+  pairings.access_control = 1;  // Stored as true before v0.6: everyone on the network
   std::strcpy(pairings.controllers[0].id, "FF09B22B-636C-4976-9CFE-9F1573CB840F");
   pairings.controllers[0].permissions = 1;
   with.receiver.set_homekit_pairings(pairings);
   CHECK(status_flags() == "0x404" && std::strcmp(with.receiver.status_flags(), "0x404") == 0);
   CHECK(std::strcmp(with.receiver.homekit_pairings().controllers[0].id, pairings.controllers[0].id) == 0);
-  pairings.access_control = false;
+  with.open(0);
+  CHECK(status_code(with.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 200);
+  // Only for people sharing the Home: AirPlay 1 senders are refused
+  pairings.access_control = HomeKitPairings::ACCESS_CONTROL_HOME;
+  with.receiver.set_homekit_pairings(pairings);
+  CHECK(status_flags() == "0x404");
+  with.open(1);
+  CHECK(status_code(with.request(1, "ANNOUNCE", "Content-Type: application/sdp\r\n", PCM_SDP)) == 403);
+  CHECK(status_code(with.request(1, "OPTIONS")) == 200);
+  pairings.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
   with.receiver.set_homekit_pairings(pairings);
   CHECK(status_flags() == "0x4");
 }

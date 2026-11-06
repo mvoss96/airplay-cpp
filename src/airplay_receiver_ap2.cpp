@@ -102,6 +102,17 @@ static void make_nonce(uint64_t counter, uint8_t *nonce) {
 }
 
 /// Nonce of a pairing message: 4 zero bytes and an 8 character name such as "PS-Msg05"
+static const char *access_control_name(uint8_t access) {
+  switch (access) {
+    case HomeKitPairings::ACCESS_CONTROL_OFF:
+      return "not set up";
+    case HomeKitPairings::ACCESS_CONTROL_HOME:
+      return "people sharing the Home";
+    default:
+      return "everyone on the network";
+  }
+}
+
 static void pairing_nonce(const char *name, uint8_t *nonce) {
   std::memset(nonce, 0, CHACHA_NONCE_SIZE);
   std::memcpy(nonce + 4, name, 8);
@@ -561,6 +572,12 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
     uint8_t flags = 0;
     this->pairing_transient_ =
         tlv8_find(body, length, TLV_FLAGS, &flags, 1, &value_length) && (flags & TLV_FLAG_TRANSIENT) != 0;
+    if (this->refuse_(connection, this->pairing_transient_ ? "pairing for a session" : "HomeKit pairing")) {
+      writer.add_byte(TLV_STATE, 2);
+      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+      response.body_length = writer.length();
+      return;
+    }
     uint8_t salt[SRP_SALT_SIZE];
     uint8_t secret[SRP_SECRET_SIZE];
     this->config_.random(salt, sizeof(salt));
@@ -752,7 +769,10 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
       std::memcpy(info + X25519_KEY_SIZE + id_length, this->verify_public_, X25519_KEY_SIZE);
       ok = ed25519_verify(signature, controller->public_key, info, 2 * X25519_KEY_SIZE + id_length);
     }
-    if (!ok) {
+    c.homekit_controller = ok && controller != nullptr;
+    if (ok && controller == nullptr && this->refuse_(connection, "controller that is not paired")) {
+      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+    } else if (!ok) {
       AIRPLAY_LOGW("pair-verify failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     } else {
@@ -798,14 +818,24 @@ bool Receiver::add_controller_(const uint8_t *id, size_t length, const uint8_t *
   return true;
 }
 
+bool Receiver::refuse_(uint8_t connection, const char *reason) {
+  const Connection &c = this->connections_[connection];
+  if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_HOME || c.homekit_controller)
+    return false;
+  const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
+  AIRPLAY_LOGW("Refused %u.%u.%u.%u (%s): the Home app allows only people sharing the Home", ip[0], ip[1], ip[2], ip[3],
+               reason);
+  return true;
+}
+
 void Receiver::homekit_changed_() {
-  if (this->homekit_.access_control) {
+  if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF) {
     bool admin = false;
     for (const Controller &controller : this->homekit_.controllers)
       admin = admin || (controller.id[0] != '\0' && (controller.permissions & PERMISSION_ADMIN) != 0);
     if (!admin) {
       // Nobody left who could set it up again
-      this->homekit_.access_control = false;
+      this->homekit_.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
       AIRPLAY_LOGI("HomeKit access control disabled: no admin is paired");
     }
   }
@@ -816,10 +846,12 @@ void Receiver::homekit_changed_() {
 
 void Receiver::update_status_flags_() {
   char flags[sizeof(this->status_flags_)];
-  std::snprintf(
-      flags, sizeof(flags), "0x%" PRIx64,
-      static_cast<uint64_t>(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
-                            (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0)));
+  std::snprintf(flags, sizeof(flags), "0x%" PRIx64,
+                static_cast<uint64_t>(STATUS_FLAGS |
+                                      (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF
+                                           ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL
+                                           : 0) |
+                                      (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0)));
   if (std::strcmp(flags, this->status_flags_) == 0)
     return;
   std::memcpy(this->status_flags_, flags, sizeof(flags));
@@ -851,8 +883,8 @@ void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {
     controller.id[sizeof(controller.id) - 1] = '\0';
     paired += controller.id[0] != '\0' ? 1 : 0;
   }
-  AIRPLAY_LOGD("HomeKit: %u paired controllers, access control %s", static_cast<unsigned>(paired),
-               this->homekit_.access_control ? "enabled" : "disabled");
+  AIRPLAY_LOGD("HomeKit: %u paired controllers, access %s", static_cast<unsigned>(paired),
+               access_control_name(this->homekit_.access_control));
   this->update_status_flags_();
 }
 
@@ -915,15 +947,25 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
     return;
   }
   const PlistReader::Object settings = reader.get(reader.root(), "ConfigurationDictionary");
+  // Level 1 is for the people sharing the Home, 0 for everyone on the network. The Home app sends a lower level only
+  // to a receiver that answered with the level it has (shairport-sync answers 0), and nothing when a password goes.
   bool enable = false;
-  if (reader.get_bool(reader.get(settings, "Enable_HK_Access_Control"), &enable)) {
-    this->homekit_.access_control = enable;
-    AIRPLAY_LOGI("HomeKit access control %s", enable ? "enabled" : "disabled");
+  int64_t level = 0;
+  const bool has_enable = reader.get_bool(reader.get(settings, "Enable_HK_Access_Control"), &enable);
+  const bool has_level = reader.get_integer(reader.get(settings, "Access_Control_Level"), &level);
+  if (has_enable || has_level) {
+    if (has_enable && !enable) {
+      this->homekit_.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
+    } else if (has_enable || this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF) {
+      this->homekit_.access_control =
+          level >= 1 ? HomeKitPairings::ACCESS_CONTROL_HOME : HomeKitPairings::ACCESS_CONTROL_NETWORK;
+    }
+    AIRPLAY_LOGI("HomeKit access: %s", access_control_name(this->homekit_.access_control));
     this->homekit_changed_();
   }
-  // As shairport-sync answers: the receiver's identity, and access for everyone on the network
+  // The receiver's identity and the access it has
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
-  if (this->homekit_.access_control) {
+  if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF) {
     writer.begin_dict(5);
     writer.key("Identifier");
     writer.string(this->pairing_id_);
@@ -934,7 +976,7 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
     writer.key("Device_Name");
     writer.string(this->config_.name);
     writer.key("Access_Control_Level");
-    writer.integer(0);
+    writer.integer(this->homekit_.access_control == HomeKitPairings::ACCESS_CONTROL_HOME ? 1 : 0);
   } else {
     writer.begin_dict(0);
   }
@@ -1490,8 +1532,10 @@ void Receiver::build_info_(Response &response) {
   writer.key("features");
   writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
-  writer.integer(STATUS_FLAGS | (this->homekit_.access_control ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
-                 (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0));
+  writer.integer(
+      STATUS_FLAGS |
+      (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
+      (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0));
   writer.key("gid");
   writer.string(this->group_id_);
   writer.key("model");

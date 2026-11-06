@@ -74,7 +74,10 @@ struct HomeKitPairings {
     uint8_t public_key[ED25519_PUBLIC_KEY_SIZE];
     uint8_t permissions;
   };
-  bool access_control;  // Set up through the Home app (POST /configure)
+  /// Who may play, as set in the Home app (POST /configure): with ACCESS_CONTROL_HOME only the devices of people
+  /// sharing the Home. A bool before v0.6, whose true reads as ACCESS_CONTROL_NETWORK.
+  enum AccessControl : uint8_t { ACCESS_CONTROL_OFF = 0, ACCESS_CONTROL_NETWORK = 1, ACCESS_CONTROL_HOME = 2 };
+  uint8_t access_control;
   Controller controllers[MAX_CONTROLLERS];
 };
 
@@ -312,8 +315,9 @@ class Receiver {
     uint16_t event_answers{0};
     uint32_t event_first_request_ms{0};  // Of the first request while none was answered
     bool event_silent{false};
-    bool audio_data{false};      // A sender's buffered audio connection
-    bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
+    bool audio_data{false};          // A sender's buffered audio connection
+    bool remote_control{false};      // Its session only controls playback (iOS, the Home app): no audio
+    bool homekit_controller{false};  // Verified with the keys of a controller paired through the Home app
     // A controller's remote control streams relayed to the playing sender (several apps of one device), 0 if free
     uint32_t relay_streams[4]{};
     uint32_t relay_latest{0};  // The one set up last, for messages that do not name theirs
@@ -437,6 +441,8 @@ class Receiver {
   /// hears of it
   void homekit_changed_();
   void update_status_flags_();
+  /// With access for people sharing the Home only, a connection that is not theirs is refused: logs why
+  bool refuse_(uint8_t connection, const char *reason);
   /// Follows the group of the session that plays (polled: the session changes in many places)
   void update_group_();
   // Remote control relay: a controller (an iPad) sends MediaRemote messages for the playing sender through the

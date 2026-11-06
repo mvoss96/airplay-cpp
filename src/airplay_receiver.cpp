@@ -425,6 +425,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.event_silent = false;
   c.audio_data = false;
   c.remote_control = false;
+  c.homekit_controller = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
   c.relayed_to_sender = 0;
@@ -698,6 +699,12 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
                   c.nonce);
   } else if (std::strcmp(method, "OPTIONS") == 0) {
     std::snprintf(extra_headers, EXTRA_HEADERS_SIZE, "%s", this->airplay2_ ? AIRPLAY2_PUBLIC_METHODS : PUBLIC_METHODS);
+  } else if (!c.encrypted &&
+             (std::strcmp(method, "ANNOUNCE") == 0 || std::strcmp(method, "SETUP") == 0 ||
+              std::strcmp(method, "RECORD") == 0) &&
+             this->refuse_(connection, "AirPlay 1")) {
+    status = 403;
+    status_text = "Forbidden";
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
     this->take_session_(connection, request, header_length);
     if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
