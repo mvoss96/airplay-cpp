@@ -67,6 +67,8 @@ jobs:
           python-version: "3.13"
       - name: Install dependencies
         run: |
+          # A stalled download from the Ubuntu mirror is retried instead of holding the job
+          echo 'Acquire::http::Timeout "30"; Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/99retries
           sudo apt-get update && sudo apt-get install -y libmbedtls-dev
           if [ "${{ matrix.sender }}" = pyatv ]; then
             pip install pyatv "srptools<2"
