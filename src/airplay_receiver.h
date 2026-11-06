@@ -737,12 +737,12 @@ class Receiver {
   bool servo_engaged_{false};
   uint32_t trim_counter_{0};
   uint32_t last_stats_log_ms_{0};
-  uint32_t last_report_us_{0};  // Timestamp of the latest report of played audio seen by poll()
-  bool late_detail_logged_{false};
-  bool alac_logged_{false};
-  uint8_t *benchmark_input_{nullptr};   // With config.clock_us: plain heap memory, internal on the ESP32
-  int16_t *benchmark_output_{nullptr};  // The kind of ALAC packets was logged for this stream  // A late packet was
-                                        // explained in the log since the last statistics
+  uint32_t last_report_us_{0};      // Timestamp of the latest report of played audio seen by poll()
+  bool late_detail_logged_{false};  // A late packet was explained in the log since the last statistics
+  bool alac_logged_{false};         // The kind of ALAC packets was logged for this stream
+  // ALAC benchmark buffers with config.clock_us: plain heap memory, internal on the ESP32
+  uint8_t *benchmark_input_{nullptr};
+  int16_t *benchmark_output_{nullptr};
   uint32_t last_poll_ms_{0};
   uint32_t poll_ms_{0};  // Time of the current poll(), for what is sent from it
   bool output_dry_{false};
