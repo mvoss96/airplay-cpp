@@ -823,9 +823,9 @@ bool Receiver::refuse_(uint8_t connection, const char *reason) {
   if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_HOME || c.homekit_controller)
     return false;
   const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
-  AIRPLAY_LOGW("Refused %u.%u.%u.%u (%s): the Home app allows only people sharing the Home", ip[0], ip[1], ip[2], ip[3],
-               reason);
-  return true;
+  AIRPLAY_LOGW("Would refuse %u.%u.%u.%u (%s): the Home app allows only people sharing the Home (test build)", ip[0],
+               ip[1], ip[2], ip[3], reason);
+  return false;
 }
 
 void Receiver::homekit_changed_() {
