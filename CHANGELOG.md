@@ -9,8 +9,6 @@
 - The _airplay TXT records as AirPlay 2 speakers announce them: without psi, vv, fex and igl, the status flags in
   lowercase hex, and isGroupLeader=0 while in a sender's group. `Listener::on_group()` has a third parameter for it
   (`in_group`). _raop has vs=366.0.
-- Upgrade: a Home that added the receiver before does not reach it anymore after the TXT records changed. Remove the
-  receiver in the Home app and add it again; if that does not work, change `ReceiverConfig::homekit_identity`.
 - Relay details are logged at verbose level
 
 ## v0.4.0
