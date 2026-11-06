@@ -230,7 +230,7 @@ void Receiver::receive_event_answer_(uint8_t connection, const uint8_t *data, si
   Connection &c = this->connections_[connection];
   const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
   if (!c.encrypted) {
-    AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %u bytes", ip[0], ip[1], ip[2], ip[3], static_cast<unsigned>(length));
+    AIRPLAY_LOGV("Event answer from %u.%u.%u.%u: %u bytes", ip[0], ip[1], ip[2], ip[3], static_cast<unsigned>(length));
     return;
   }
   while (length > 0) {
@@ -256,7 +256,7 @@ void Receiver::receive_event_answer_(uint8_t connection, const uint8_t *data, si
     make_nonce(c.read_counter++, nonce);
     if (!chacha20_poly1305_decrypt(c.read_key, nonce, c.frame, 2, c.frame + 2, data_length, c.frame + 2 + data_length,
                                    c.frame + 2)) {
-      AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %u bytes, not decrypted", ip[0], ip[1], ip[2], ip[3],
+      AIRPLAY_LOGV("Event answer from %u.%u.%u.%u: %u bytes, not decrypted", ip[0], ip[1], ip[2], ip[3],
                    static_cast<unsigned>(data_length));
       continue;
     }
@@ -275,7 +275,7 @@ void Receiver::receive_event_answer_(uint8_t connection, const uint8_t *data, si
     char hex[2 * 32 + 1] = "";
     for (size_t i = 0; body != 0 && body + i < data_length && i < 32; i++)
       std::snprintf(hex + 2 * i, 3, "%02x", c.frame[2 + body + i]);
-    AIRPLAY_LOGD("Event answer from %u.%u.%u.%u: %.*s, %u bytes, body %u bytes %s", ip[0], ip[1], ip[2], ip[3],
+    AIRPLAY_LOGV("Event answer from %u.%u.%u.%u: %.*s, %u bytes, body %u bytes %s", ip[0], ip[1], ip[2], ip[3],
                  static_cast<int>(line), text, static_cast<unsigned>(data_length),
                  static_cast<unsigned>(body != 0 ? data_length - body : 0), hex);
   }
@@ -319,7 +319,9 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     const auto *ip = reinterpret_cast<const uint8_t *>(&this->connections_[connection].peer.address);
     char stream_header[16] = "";
     const bool streamed = get_header(request, header_length, "X-Apple-StreamID", stream_header, sizeof(stream_header));
-    AIRPLAY_LOGD("Request: %.*s (%s, %u bytes%s) from %u.%u.%u.%u%s%s%s", line_length, request,
+    // Relayed remote control messages come in bursts: only at verbose level
+    AIRPLAY_LOG_(streamed ? LogLevel::LOG_LEVEL_VERBOSE : LogLevel::LOG_LEVEL_DEBUG,
+                 "Request: %.*s (%s, %u bytes%s) from %u.%u.%u.%u%s%s%s", line_length, request,
                  content_type[0] != '\0' ? content_type : "-", static_cast<unsigned>(body_length),
                  this->connections_[connection].encrypted ? ", encrypted" : "", ip[0], ip[1], ip[2], ip[3],
                  streamed ? ", stream " : "", stream_header,
@@ -354,49 +356,6 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
   // Remote control relay: requests of a relayed stream carry its number
   char stream_text[16] = "";
   const bool has_stream = get_header(request, header_length, "X-Apple-StreamID", stream_text, sizeof(stream_text));
-  // What controllers send: sessions only to control playback, remote control streams (type 130), and anything on
-  // a remote control connection or of a relayed stream
-  if (!verbose && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG && data != nullptr && body_length > 0) {
-    const Connection &c = this->connections_[connection];
-    PlistReader reader;
-    const bool parsed = plist && reader.parse(data, body_length);
-    // Relayed messages get one line of their own below: many come at once, and a burst of log lines gets lost
-    const bool relayed =
-        std::strcmp(method, "POST") == 0 && path_is(request, "/command") && (has_stream || c.relay_latest != 0);
-    bool control = (c.remote_control || has_stream) && !relayed;
-    if (parsed && std::strcmp(method, "SETUP") == 0) {
-      bool remote_control_only = false;
-      int64_t type = 0;
-      reader.get_bool(reader.get(reader.root(), "isRemoteControlOnly"), &remote_control_only);
-      reader.get_integer(reader.get(reader.at(reader.get(reader.root(), "streams"), 0), "type"), &type);
-      control = control || remote_control_only || type == 130;
-    }
-    if (control) {
-      const auto *ip = reinterpret_cast<const uint8_t *>(&c.peer.address);
-      for (const char *line = line_end; line != nullptr && line + 2 < request + header_length;) {
-        line += 2;
-        const char *next = std::strstr(line, "\r\n");
-        if (next == nullptr || next == line)
-          break;
-        AIRPLAY_LOGD("Control from %u.%u.%u.%u, header %.*s", ip[0], ip[1], ip[2], ip[3],
-                     static_cast<int>(std::min<ptrdiff_t>(next - line, 160)), line);
-        line = next;
-      }
-      if (parsed) {
-        auto *text = reinterpret_cast<char *>(this->body_buffer_);
-        const size_t length = reader.describe(reader.root(), text, AIRPLAY2_BODY_SIZE);
-        for (size_t offset = 0; offset < length; offset += 150)
-          AIRPLAY_LOGD("Control from %u.%u.%u.%u: %.*s", ip[0], ip[1], ip[2], ip[3],
-                       static_cast<int>(std::min<size_t>(length - offset, 150)), text + offset);
-      } else {
-        char hex[2 * 64 + 1] = "";
-        for (size_t i = 0; i < std::min<size_t>(body_length, 64); i++)
-          std::snprintf(hex + 2 * i, 3, "%02x", data[i]);
-        AIRPLAY_LOGD("Control from %u.%u.%u.%u: %u bytes, %s", ip[0], ip[1], ip[2], ip[3],
-                     static_cast<unsigned>(body_length), hex);
-      }
-    }
-  }
   Connection &relay = this->connections_[connection];
   if (relay.relay_latest != 0 && std::strcmp(method, "TEARDOWN") == 0) {
     // The streams it names end, all without names
@@ -415,19 +374,6 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     if (!named)
       this->end_relay_(connection);
     return true;
-  }
-  if (!has_stream && relay.relay_latest == 0 && plist && data != nullptr && std::strcmp(method, "POST") == 0 &&
-      path_is(request, "/command") && detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG) {
-    // What else comes as a command (now playing details, ...): its type
-    PlistReader reader;
-    const char *type = nullptr;
-    size_t type_length = 0;
-    if (reader.parse(data, body_length))
-      reader.get_string(reader.get(reader.root(), "type"), &type, &type_length);
-    const auto *ip = reinterpret_cast<const uint8_t *>(&this->connections_[connection].peer.address);
-    AIRPLAY_LOGD("Command from %u.%u.%u.%u: %.*s, %u bytes", ip[0], ip[1], ip[2], ip[3],
-                 static_cast<int>(type != nullptr ? type_length : 1), type != nullptr ? type : "-",
-                 static_cast<unsigned>(body_length));
   }
   // A message of a relayed stream: from the controller to the sender, or back. The stream comes from the
   // connection it was set up on or from X-Apple-StreamID; the direction from where it comes from, as a controller may
@@ -463,9 +409,10 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
       } else {
         controller->relayed_to_controller++;
       }
-      AIRPLAY_LOGD("Relay stream %" PRIu32 " %s: %u bytes, passed on as they come%s", stream_id,
+      AIRPLAY_LOG_(sent ? LogLevel::LOG_LEVEL_VERBOSE : LogLevel::LOG_LEVEL_WARN,
+                   "Relay stream %" PRIu32 " %s: %u bytes, passed on as they come%s", stream_id,
                    to_sender ? "to the sender" : "to the controller", static_cast<unsigned>(body_length),
-                   sent ? "" : ", NOT SENT");
+                   sent ? "" : ", not sent");
       return true;
     }
     // Without a property list, the data goes in one, as other speakers relay it
@@ -491,10 +438,11 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     } else {
       controller->relayed_to_controller++;
     }
-    AIRPLAY_LOGD("Relay stream %" PRIu32 " %s: %u.%u.%u.%u -> %u.%u.%u.%u, %u bytes%s", stream_id,
+    AIRPLAY_LOG_(sent ? LogLevel::LOG_LEVEL_VERBOSE : LogLevel::LOG_LEVEL_WARN,
+                 "Relay stream %" PRIu32 " %s: %u.%u.%u.%u -> %u.%u.%u.%u, %u bytes%s", stream_id,
                  to_sender ? "to the sender" : "to the controller", from_ip[0], from_ip[1], from_ip[2], from_ip[3],
                  to_ip[0], to_ip[1], to_ip[2], to_ip[3], static_cast<unsigned>(forward_length),
-                 sent ? "" : ", NOT SENT");
+                 sent ? "" : ", not sent");
     return true;
   }
 

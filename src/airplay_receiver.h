@@ -451,7 +451,7 @@ class Receiver {
   /// A controller's stream ends (all of its streams with 0): the sender hears of it
   void end_relay_(uint8_t connection, uint32_t stream_id = 0);
   void end_relay_stream_(const Connection &c, uint32_t stream);
-  /// Logs what a device answers on its event connection (debug level only)
+  /// Logs what a device answers on its event connection (verbose level only)
   void receive_event_answer_(uint8_t connection, const uint8_t *data, size_t length);
   void handle_airplay2_setup_(uint8_t connection, const char *request, size_t header_length, const uint8_t *body,
                               size_t length, Response &response, int64_t now_us);
@@ -595,9 +595,8 @@ class Receiver {
   // The playing sender's group, as gid and gcgl in the TXT records; the receiver's own when not in one
   char group_id_[40]{};
   char group_leader_[2]{"0"};
-  bool in_group_{false};
-  uint32_t relay_next_stream_{
-      1};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
+  bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
+  uint32_t relay_next_stream_{1};
   uint8_t verify_connection_{0xff};  // Connection between pair-verify M1 and M3
   uint8_t verify_secret_[X25519_KEY_SIZE]{};
   uint8_t verify_public_[X25519_KEY_SIZE]{};

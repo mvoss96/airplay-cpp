@@ -534,7 +534,7 @@ void Receiver::connection_data(uint8_t connection, const uint8_t *data, size_t l
     // Answers to the receiver's requests; their content is only logged
     if (c.event_answers++ == 0)
       AIRPLAY_LOGD("The sender answers on its event connection");
-    if (detail::g_log_level >= LogLevel::LOG_LEVEL_DEBUG)
+    if (detail::g_log_level >= LogLevel::LOG_LEVEL_VERBOSE)
       this->receive_event_answer_(connection, data, length);
     return;
   }
