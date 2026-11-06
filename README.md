@@ -41,6 +41,12 @@ while (true)
   runner.run_once();
 ```
 
+Besides the audio output, the application provides:
+
+- a decoder for buffered AAC, which most iOS apps send (`AacDecoder`); ALAC is built in
+- storage for the Home app's pairings (`Receiver::homekit_pairings()`, `Listener::on_homekit_pairings()`)
+- for macOS, PTP timing (`ReceiverConfig::ptp`) on UDP ports 319 and 320, which need root on Linux
+
 [examples](examples) has complete programs for ESP-IDF, Arduino ESP32, Zephyr and POSIX. With the ESP-IDF
 component manager:
 
@@ -58,12 +64,10 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 ## Limitations
 
 - 44.1 kHz, 16-bit stereo: no lossless high resolution, no video or screen mirroring
-- macOS streams only with PTP timing, which needs `ReceiverConfig::ptp` and UDP ports 319 and 320 (not on Zephyr;
-  root on Linux)
-- The application keeps the Home app's pairings (`Receiver::homekit_pairings()`,
-  `Listener::on_homekit_pairings()`). Access is not restricted to the Home's members, and Siri is not tested.
+- No PTP on Zephyr, so no macOS there
+- Access is not restricted to the members of the Home the receiver was added to
+- Siri is not tested
 - A password works with AirPlay 1 only
-- Buffered AAC needs a decoder from the application (`AacDecoder`); ALAC is built in
 
 ## Tests
 
