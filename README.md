@@ -20,10 +20,15 @@ It is written for microcontrollers first. There are no exceptions, no RTTI and n
 BSD sockets is included, and other platforms implement a small `Transport` interface.
 
 Playback is synchronized to the sender's clock and corrects drift one frame at a time at the quietest point, so
-sound stays in sync with video. Lost packets are requested again. Cover art is passed on in pieces as it
-arrives, so a 200 KB image does not need 200 KB of RAM. A second sender can take over a session; the first one
-is paused, stays connected and can take it back. The receiver can also control the sender: play, pause, next,
-previous and volume.
+sound stays in sync with video and, over PTP, with other AirPlay 2 speakers in a group (within a few ms of a
+HomePod). Lost packets are requested again. Buffered AirPlay 2 audio comes as AAC (iOS apps) or ALAC (Music
+Assistant). Cover art is passed on in pieces as it arrives, so a 200 KB image does not need 200 KB of RAM. A
+second sender can take over a session; the first one is paused, stays connected and can take it back. The
+receiver can also control the sender: play, pause, next, previous and volume.
+
+The Home app can add the receiver. Its tile controls playback without Apple's MFi authentication, also from a
+device that is not playing (an iPad): the receiver relays remote control to the playing sender, as AirPlay 2
+speakers do.
 
 ## Usage
 
@@ -47,7 +52,7 @@ dependencies:
 
 ## Memory
 
-On the ESP32, synchronized playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for AAC
+On the ESP32, synchronized playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for buffered
 audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer.
 
 ## Limitations
@@ -55,10 +60,10 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 - 44.1 kHz, 16-bit stereo: no lossless high resolution, no video or screen mirroring
 - macOS streams only with PTP timing, which needs `ReceiverConfig::ptp` and UDP ports 319 and 320 (not on Zephyr;
   root on Linux)
-- The receiver can be added to the Home app, and its tile controls playback. The application keeps the pairings
-  (`Receiver::homekit_pairings()`, `Listener::on_homekit_pairings()`). Access is not restricted to the Home's members.
+- The application keeps the Home app's pairings (`Receiver::homekit_pairings()`,
+  `Listener::on_homekit_pairings()`). Access is not restricted to the Home's members, and Siri is not tested.
 - A password works with AirPlay 1 only
-- AirPlay 2 buffered audio needs an AAC decoder from the application (`AacDecoder`)
+- Buffered AAC needs a decoder from the application (`AacDecoder`); ALAC is built in
 
 ## Tests
 
@@ -66,8 +71,9 @@ audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 5
 cmake -S . -B build -DAIRPLAY_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
 ```
 
-CI also streams to the POSIX example from pyatv, PipeWire and a buffered AAC sender, with and without packet
-loss, and builds every example.
+CI also streams to the POSIX example from pyatv, PipeWire and a buffered sender (AAC, and ALAC timed as Music
+Assistant sends it), with and without packet loss. It covers HomeKit pairing, pause, takeover and the remote
+control relay, and builds every example.
 
 ## Credits
 
