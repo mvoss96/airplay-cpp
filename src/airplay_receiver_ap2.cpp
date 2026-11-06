@@ -573,9 +573,12 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
     this->pairing_transient_ =
         tlv8_find(body, length, TLV_FLAGS, &flags, 1, &value_length) && (flags & TLV_FLAG_TRANSIENT) != 0;
     if (this->refuse_(connection, this->pairing_transient_ ? "pairing for a session" : "HomeKit pairing")) {
-      writer.add_byte(TLV_STATE, 2);
-      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
-      response.body_length = writer.length();
+      // Forbidden rather than a pairing error, which senders take for a wrong password (Music Assistant then asks
+      // for one even after access is opened again)
+      response.status = 403;
+      response.status_text = "Forbidden";
+      response.content_type = nullptr;
+      response.body = nullptr;
       return;
     }
     uint8_t salt[SRP_SALT_SIZE];
@@ -776,7 +779,11 @@ void Receiver::handle_pair_verify_(uint8_t connection, const uint8_t *body, size
     }
     c.homekit_controller = ok && controller != nullptr;
     if (ok && controller == nullptr && this->refuse_(connection, "controller that is not paired")) {
-      writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
+      response.status = 403;
+      response.status_text = "Forbidden";
+      response.content_type = nullptr;
+      response.body = nullptr;
+      return;
     } else if (!ok) {
       AIRPLAY_LOGW("pair-verify failed");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
