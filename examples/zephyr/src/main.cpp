@@ -3,6 +3,7 @@
 #include "airplay.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/printk.h>
 
 #include <algorithm>
@@ -69,7 +70,8 @@ static PrintingListener listener(output);
 static airplay::SocketRunner runner;
 
 int main() {
-  airplay::set_log_handler([](airplay::LogLevel, const char *message) { printk("%s\n", message); });
+  airplay::set_log_handler([](airplay::LogLevel, const char *message) { printk("%s\n", message); },
+                           airplay::LogLevel::LOG_LEVEL_DEBUG);
 
   airplay::ReceiverConfig config;
   config.name = "Zephyr Speaker";
@@ -77,6 +79,13 @@ int main() {
   std::copy(mac, mac + 6, config.mac);
   config.buffer_ms = 2500;
   config.metadata = true;
+  // AirPlay 2 with PTP timing, which macOS needs; ports 319 and 320 need root on Linux (native_sim)
+  config.airplay2 = true;
+  config.ptp = true;
+  config.random = [](uint8_t *buffer, size_t length) {
+    if (sys_csrand_get(buffer, length) != 0)
+      k_panic();
+  };
   config.allocate = [](size_t size) { return k_malloc(size); };
   config.deallocate = k_free;
 

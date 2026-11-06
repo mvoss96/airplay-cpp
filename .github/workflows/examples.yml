@@ -138,3 +138,21 @@ jobs:
           ZEPHYR_TOOLCHAIN_VARIANT=host west build -p always -b native_sim/native/64 "$GITHUB_WORKSPACE/examples/zephyr"
       - name: Stream with pyatv
         run: tests/interop/run.sh zephyr zephyr-ws/build/zephyr/zephyr.exe
+      - name: PTP on ports 319 and 320
+        # As root for the ports below 1024: the receiver opens them and follows a clock that announces itself
+        run: |
+          sudo zephyr-ws/build/zephyr/zephyr.exe > ptp.log 2>&1 &
+          for i in $(seq 1 30); do grep -q "Listening for PTP" ptp.log && break; sleep 0.5; done
+          python3 - <<'PY'
+          import socket
+          announce = bytearray(64)
+          announce[0:4] = bytes([0x0B, 0x02, 0x00, 64])
+          announce[20:28] = bytes.fromhex("0011223344556677")  # The clock
+          announce[53:61] = bytes.fromhex("0011223344556677")  # Its grandmaster: itself
+          socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(bytes(announce), ("127.0.0.1", 320))
+          PY
+          sleep 1
+          sudo pkill -INT -f zephyr.exe || true
+          cat ptp.log
+          grep -q "Listening for PTP on ports 319 and 320" ptp.log
+          grep -q "PTP grandmaster 0011223344556677 announced by 0011223344556677" ptp.log

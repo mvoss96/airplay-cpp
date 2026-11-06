@@ -18,9 +18,12 @@
 // Zephyr's own socket API, so that CONFIG_POSIX_API is not needed
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
-// The runner polls up to 6 sockets at once (3 UDP, 2 RTSP connections and the listening socket)
+// The runner polls up to 6 sockets at once (3 UDP, 2 RTSP connections and the listening socket), 8 with PTP
 #if defined(CONFIG_ZVFS_POLL_MAX) && CONFIG_ZVFS_POLL_MAX < 6
 #error "airplay-cpp needs CONFIG_ZVFS_POLL_MAX=6 or more"
+#endif
+#if defined(CONFIG_ZVFS_POLL_MAX) && CONFIG_ZVFS_POLL_MAX < 8
+#define AIRPLAY_NO_PTP_SOCKETS
 #endif
 #else
 #include <arpa/inet.h>
@@ -527,8 +530,9 @@ void SocketRunner::send_udp(UdpChannel channel, const Endpoint &to, const uint8_
 }
 
 bool SocketRunner::open_ptp() {
-#if defined(__ZEPHYR__)
-  return false;  // Two more sockets than CONFIG_ZVFS_POLL_MAX allows for
+#if defined(AIRPLAY_NO_PTP_SOCKETS)
+  AIRPLAY_LOGW("PTP needs CONFIG_ZVFS_POLL_MAX=8 or more");
+  return false;
 #else
   if (this->ptp_fds_[0] >= 0)
     return true;
@@ -551,9 +555,14 @@ bool SocketRunner::open_ptp() {
       return false;
     }
     // Senders may send to the PTP multicast group as well as to the receiver
+#if defined(__ZEPHYR__)
+    struct ip_mreqn group {};  // Interface index 0: the default interface
+    group.imr_address.s_addr = htonl(INADDR_ANY);
+#else
     struct ip_mreq group {};
-    group.imr_multiaddr.s_addr = htonl(0xe0000181);  // 224.0.1.129
     group.imr_interface.s_addr = htonl(INADDR_ANY);
+#endif
+    group.imr_multiaddr.s_addr = htonl(0xe0000181);  // 224.0.1.129
     if (net::setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) != 0)
       AIRPLAY_LOGD("Failed to join the PTP multicast group on port %u: %d", ports[i], errno);
     this->ptp_fds_[i] = fd;
