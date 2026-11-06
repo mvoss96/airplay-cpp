@@ -1536,7 +1536,7 @@ bool Receiver::send_media_remote_command_(const char *value, float volume) {
 void Receiver::build_info_(Response &response) {
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
   const float device_volume = this->device_volume_.load(std::memory_order_relaxed);
-  writer.begin_dict(device_volume >= 0.0f ? 13 : 12);
+  writer.begin_dict(device_volume >= 0.0f ? 14 : 13);
   writer.key("deviceID");
   writer.string(this->device_id_);
   writer.key("macAddress");
@@ -1564,6 +1564,10 @@ void Receiver::build_info_(Response &response) {
   writer.data(this->public_key_, sizeof(this->public_key_));
   writer.key("vv");
   writer.integer(2);
+  // The receiver sets its own volume: without this macOS shows no volume control and sends no volume changes
+  // (3 as shairport-sync announces it)
+  writer.key("volumeControlType");
+  writer.integer(3);
   if (device_volume >= 0.0f) {
     // In AirPlay's dB: -30 to 0, -144 for silence
     writer.key("initialVolume");
