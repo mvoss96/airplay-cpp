@@ -62,6 +62,7 @@ class ProtoReader {
 namespace mrp {
 
 enum MessageType : uint32_t {
+  MESSAGE_TYPE_REPLY = 0,  // An answer that only confirms a request
   MESSAGE_TYPE_SEND_COMMAND = 1,
   MESSAGE_TYPE_SEND_COMMAND_RESULT = 2,
   MESSAGE_TYPE_SET_STATE = 4,
@@ -69,7 +70,10 @@ enum MessageType : uint32_t {
   MESSAGE_TYPE_CLIENT_UPDATES_CONFIG = 16,
   MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST = 32,
   MESSAGE_TYPE_SET_CONNECTION_STATE = 38,
+  MESSAGE_TYPE_SET_NOW_PLAYING_CLIENT = 46,
+  MESSAGE_TYPE_UPDATE_CLIENT = 55,
   MESSAGE_TYPE_UPDATE_CONTENT_ITEM = 56,
+  MESSAGE_TYPE_PLAYER_CLIENT_PROPERTIES = 104,
 };
 
 enum Command : uint32_t {
@@ -117,6 +121,12 @@ size_t write_device_info(uint8_t *buffer, size_t size, const char *reply_to, con
                          const DeviceInfo &info);
 /// Playback state, now playing details and the commands that work (play, pause, next, previous)
 size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id, const NowPlaying &now);
+/// The app that plays (now playing client and its properties), as iOS sends it when a controller asks for updates
+size_t write_now_playing_client(uint8_t *buffer, size_t size, const char *message_id);
+size_t write_update_client(uint8_t *buffer, size_t size, const char *message_id);
+size_t write_player_properties(uint8_t *buffer, size_t size, const char *message_id, const NowPlaying &now);
+/// Confirms a request that has no answer of its own (CLIENT_UPDATES_CONFIG)
+size_t write_reply(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id);
 size_t write_command_result(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id,
                             const char *command_id, const NowPlaying &now);
 

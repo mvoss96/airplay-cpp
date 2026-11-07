@@ -1494,19 +1494,42 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
         this->send_to_controller_(
             controller, stream_id,
             mrp::write_device_info(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id, info));
-        this->make_message_id_(id);
-        this->send_to_controller_(controller, stream_id,
-                                  mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), nullptr, id, now));
         break;
       }
-      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG:
+      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG: {
+        // As iOS answers it: the app that plays and its state, then the confirmation the controller waits for
+        size_t used = 0;
+        bool fits = true;
+        auto add = [&](size_t length) {
+          fits = fits && length != 0;
+          used += length;
+        };
+        this->make_message_id_(id);
+        add(mrp::write_now_playing_client(this->mrp_buffer_, sizeof(this->mrp_buffer_), id));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_update_client(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_state(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, nullptr, id, now));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_player_properties(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id, now));
+        if (fits)
+          this->send_to_controller_(controller, stream_id, used);
+        else
+          AIRPLAY_LOGW("Remote control stream %" PRIu32 ": the now playing details do not fit", stream_id);
+        this->make_message_id_(id);
+        this->send_to_controller_(
+            controller, stream_id,
+            mrp::write_reply(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id));
+        break;
+      }
       case mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST:
         this->make_message_id_(id);
         this->send_to_controller_(
             controller, stream_id,
-            mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_),
-                             request.type == mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST ? request.identifier : nullptr,
-                             id, now));
+            mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id, now));
         break;
       case mrp::MESSAGE_TYPE_SEND_COMMAND: {
         bool known = true;

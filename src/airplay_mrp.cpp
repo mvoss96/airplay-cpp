@@ -177,6 +177,9 @@ static constexpr uint32_t EXT_SEND_COMMAND = 6;
 static constexpr uint32_t EXT_SEND_COMMAND_RESULT = 7;
 static constexpr uint32_t EXT_SET_STATE = 9;
 static constexpr uint32_t EXT_DEVICE_INFO = 20;
+static constexpr uint32_t EXT_SET_NOW_PLAYING_CLIENT = 50;
+static constexpr uint32_t EXT_UPDATE_CLIENT = 59;
+static constexpr uint32_t EXT_PLAYER_CLIENT_PROPERTIES = 86;
 // SendCommandMessage
 static constexpr uint32_t SEND_COMMAND_COMMAND = 1;
 static constexpr uint32_t SEND_COMMAND_OPTIONS = 2;
@@ -185,6 +188,9 @@ static constexpr uint32_t OPTIONS_COMMAND_ID = 32;
 static constexpr const char PLAYER_ID[] = "MediaRemote-DefaultPlayer";
 static constexpr const char PLAYER_NAME[] = "Default Player";
 static constexpr const char MUSIC_APP[] = "com.apple.Music";
+static constexpr const char MUSIC_APP_NAME[] = "Music";
+static constexpr uint32_t MUSIC_APP_PID = 1;
+static constexpr const char CONTENT_ITEM_ID[] = "airplay-now-playing";
 static constexpr uint32_t PLAYBACK_STATE_PLAYING = 1;
 static constexpr uint32_t PLAYBACK_STATE_PAUSED = 2;
 
@@ -241,17 +247,28 @@ size_t parse(const uint8_t *data, size_t length, Request *requests, size_t max) 
   return count;
 }
 
+/// The app that plays, as a NowPlayingClient
+static void write_client(ProtoWriter &w, uint32_t field, bool full) {
+  w.begin(field);
+  w.varint(1, MUSIC_APP_PID);
+  w.string(2, MUSIC_APP);
+  if (full) {
+    w.varint(4, 501);  // processUserIdentifier
+    w.string(7, MUSIC_APP_NAME);
+  }
+  w.end();
+}
+
 /// The player that plays: the sender's music app, as controllers know it from other speakers
-static void write_player_path(ProtoWriter &w, uint32_t field, const NowPlaying &now) {
+static void write_player_path(ProtoWriter &w, uint32_t field, const NowPlaying &now, bool locally_hosted = false) {
   w.begin(field);
   w.begin(1);  // Origin
   w.string(2, now.sender != nullptr && now.sender[0] != '\0' ? now.sender : "AirPlay");
   w.varint(3, 1);
+  if (locally_hosted)
+    w.boolean(5, true);
   w.end();
-  w.begin(2);  // NowPlayingClient
-  w.varint(1, 1);
-  w.string(2, MUSIC_APP);
-  w.end();
+  write_client(w, 2, locally_hosted);
   w.begin(3);  // NowPlayingPlayer
   w.string(1, PLAYER_ID);
   w.string(2, PLAYER_NAME);
@@ -350,10 +367,11 @@ size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const cha
     w.end();
   }
   w.end();
-  w.begin(3);  // PlaybackQueue: the item that plays
+  w.string(5, MUSIC_APP_NAME);  // displayName
+  w.begin(3);                   // PlaybackQueue: the item that plays
   w.varint(1, 0);
   w.begin(2);
-  w.string(1, "airplay-now-playing");
+  w.string(1, CONTENT_ITEM_ID);
   w.begin(2);  // ContentItemMetadata
   if (now.title != nullptr && now.title[0] != '\0')
     w.string(1, now.title);
@@ -368,6 +386,7 @@ size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const cha
   }
   w.boolean(27, true);  // isCurrentlyPlaying
   w.real32(39, now.playing ? 1.0f : 0.0f);
+  w.string(44, CONTENT_ITEM_ID);  // contentIdentifier
   w.end();
   w.end();
   w.end();
@@ -376,6 +395,48 @@ size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const cha
   w.end();
   write_player_path(w, 9, now);
   w.end();
+  return finish_message(buffer, size, w, message_id);
+}
+
+size_t write_now_playing_client(uint8_t *buffer, size_t size, const char *message_id) {
+  if (size <= MAX_PREFIX)
+    return 0;
+  ProtoWriter w(buffer, size - MAX_PREFIX);
+  begin_message(w, MESSAGE_TYPE_SET_NOW_PLAYING_CLIENT, nullptr);
+  w.begin(EXT_SET_NOW_PLAYING_CLIENT);
+  write_client(w, 1, false);
+  w.end();
+  return finish_message(buffer, size, w, message_id);
+}
+
+size_t write_update_client(uint8_t *buffer, size_t size, const char *message_id) {
+  if (size <= MAX_PREFIX)
+    return 0;
+  ProtoWriter w(buffer, size - MAX_PREFIX);
+  begin_message(w, MESSAGE_TYPE_UPDATE_CLIENT, nullptr);
+  w.begin(EXT_UPDATE_CLIENT);
+  write_client(w, 1, true);
+  w.end();
+  return finish_message(buffer, size, w, message_id);
+}
+
+size_t write_player_properties(uint8_t *buffer, size_t size, const char *message_id, const NowPlaying &now) {
+  if (size <= MAX_PREFIX)
+    return 0;
+  ProtoWriter w(buffer, size - MAX_PREFIX);
+  begin_message(w, MESSAGE_TYPE_PLAYER_CLIENT_PROPERTIES, nullptr);
+  w.begin(EXT_PLAYER_CLIENT_PROPERTIES);
+  write_player_path(w, 1, now, true);
+  w.end();
+  return finish_message(buffer, size, w, message_id);
+}
+
+size_t write_reply(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id) {
+  if (size <= MAX_PREFIX)
+    return 0;
+  ProtoWriter w(buffer, size - MAX_PREFIX);
+  w.varint(FIELD_TYPE, MESSAGE_TYPE_REPLY);
+  w.string(FIELD_IDENTIFIER, reply_to);
   return finish_message(buffer, size, w, message_id);
 }
 
