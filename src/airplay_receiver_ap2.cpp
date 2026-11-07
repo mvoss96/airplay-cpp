@@ -1962,6 +1962,8 @@ void Receiver::handle_rate_anchor_(const uint8_t *body, size_t length, int64_t n
   AIRPLAY_LOGD("Rate %d from %" PRIu32, playing ? 1 : 0, this->anchor_rtp_);
   if (playing != this->buffered_playing_) {
     this->buffered_playing_ = playing;
+    // Nothing was decoded while paused: the time without audio counts from now
+    this->last_packet_ms_ = static_cast<uint32_t>(now_us / 1000);
     this->playback_started_ = false;  // Lines up with the new anchor
     this->set_session_state_(playing ? SessionState::PLAYING : SessionState::PAUSED);
   }
