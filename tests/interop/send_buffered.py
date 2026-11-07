@@ -84,6 +84,47 @@ def plist(value):
     return plistlib.dumps(value, fmt=plistlib.FMT_BINARY)
 
 
+# A JPEG's start (an APP0 segment, then the start of frame for 600x600) and filler, as a cover
+COVER = (bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x02, 0x58])
+         + bytes(range(256)) * 160 + bytes([0xFF, 0xD9]))
+
+
+class EventReader:
+    """The event connection of a controller, decrypted: what the receiver sends there"""
+
+    def __init__(self, reader, verifier):
+        from pyatv.auth.hap_session import HAPSession
+
+        self.reader = reader
+        self.session = HAPSession()
+        self.session.enable(*verifier.encryption_keys("Events-Salt", "Events-Read-Encryption-Key",
+                                                       "Events-Write-Encryption-Key"))
+        self.pending = b""  # What request() has not taken yet
+
+    async def read(self, size):
+        data = b""
+        while not data:
+            encrypted = await self.reader.read(size)
+            if not encrypted:
+                break
+            data = self.session.decrypt(encrypted)
+        self.pending += data
+        return data
+
+    async def request(self):
+        """The body of the next request (each is answered as iOS does)"""
+        while True:
+            head, separator, rest = self.pending.partition(b"\r\n\r\n")
+            if separator:
+                length = next(int(line.split(b":")[1]) for line in head.split(b"\r\n")
+                              if line.lower().startswith(b"content-length:"))
+                if len(rest) >= length:
+                    self.pending = rest[length:]
+                    return rest[:length]
+            if not await self.read(65536):
+                raise EOFError("the event connection closed")
+
+
 async def exchange(rtsp, method, body=None, uri=None):
     response = await rtsp.exchange(
         method,
@@ -272,7 +313,7 @@ async def main():
         """As an iPad's Home app tile while a Mac plays: the receiver answers its MediaRemote messages and passes
         its commands on to the sender"""
         from pyatv.protocols.mrp import messages, protobuf
-        from pyatv.support.variant import write_variant
+        from pyatv.support.variant import read_variant, write_variant
 
         def mrp(*protos):
             data = b"".join(write_variant(len(p.SerializeToString())) + p.SerializeToString() for p in protos)
@@ -285,13 +326,32 @@ async def main():
         assert await received(event_reader), "the sender heard nothing of the controller"
         info = messages.create(protobuf.DEVICE_INFO_MESSAGE, identifier=str(uuid.uuid4()).upper())
         protobuf.extract_inner(info).name = "iPad"
-        for body in (mrp(info), mrp(messages.set_connection_state(), messages.client_updates_config()),
-                     mrp(messages.playback_queue_request(0))):
+        for body in (mrp(info), mrp(messages.set_connection_state(), messages.client_updates_config())):
             response = await control_rtsp.exchange("POST", uri="/command",
                                                    content_type="application/x-apple-binary-plist",
                                                    headers={"X-Apple-StreamID": stream_id}, body=body)
             assert response.code == 200
         assert await received(control_reader) > 300, "the controller got no answer"
+        # The queue with the cover the Mac sent: more than the cover itself arrives
+        response = await control_rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
+                                               headers={"X-Apple-StreamID": stream_id},
+                                               body=mrp(messages.playback_queue_request(0, 600, 600)))
+        assert response.code == 200
+        cover = None
+        while cover is None:
+            body = await asyncio.wait_for(control_reader.request(), 5)
+            data = plistlib.loads(body)["params"]["data"]
+            while data:
+                length, data = read_variant(data)
+                message = protobuf.ProtocolMessage()
+                message.ParseFromString(data[:length])
+                data = data[length:]
+                if message.type == protobuf.ProtocolMessage.SET_STATE_MESSAGE:
+                    items = protobuf.extract_inner(message).playbackQueue.contentItems
+                    if items and items[0].artworkData:
+                        cover = items[0]
+        assert cover.artworkData == COVER, "the cover the controller got is not the one the Mac sent"
+        assert cover.metadata.artworkMIMEType == "image/jpeg" and cover.metadata.artworkAvailable
         # A second controller (another iPad) at the same time: both stay connected
         _, second = await loop.create_connection(HttpConnection, host, port, local_addr=("127.0.0.3", 0))
         second_rtsp = RtspSession(second)
@@ -372,14 +432,19 @@ async def main():
                                                             "networkTimeSecs": seconds, "networkTimeFrac": fraction,
                                                             "networkTimeTimelineID": 1})
                 start = time.time() + 0.3 - i * FRAMES_PER_PACKET / SAMPLE_RATE
+        if i == 60 and remote_control and macos:
+            # Cover art, as a Mac sends it: what the receiver keeps for controllers
+            response = await rtsp.exchange("SET_PARAMETER", content_type="image/jpeg", body=COVER)
+            assert response.code == 200
         if i == 120 and remote_control:
             # A controller on another device (an iPad), which then controls this sender through the receiver
             _, control = await loop.create_connection(HttpConnection, host, port, local_addr=("127.0.0.2", 0))
             control_rtsp = RtspSession(control)
-            await verify_connection(TRANSIENT_CREDENTIALS, control)
+            verifier = await verify_connection(TRANSIENT_CREDENTIALS, control)
             reply = await exchange(control_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
             assert "eventPort" in reply
             control_reader, _ = await asyncio.open_connection(host, reply["eventPort"], local_addr=("127.0.0.2", 0))
+            control_reader = EventReader(control_reader, verifier)
             await exchange(control_rtsp, "RECORD")  # As the Home app does when it adds the receiver
             if macos:
                 await answered_remote_control(control_rtsp, control_reader)

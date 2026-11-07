@@ -156,6 +156,10 @@ struct ReceiverConfig {
   /// receiver: relayed to senders that answer (iOS), answered by the receiver for those that do not (macOS). Takes
   /// four more connections (Receiver::connection_limit()).
   bool remote_control{true};
+  /// With remote control and artwork: the receiver keeps the cover of a sender that answers no remote control
+  /// (macOS) for the controllers, up to this size in `allocate` memory (allocated with the first such cover). 0 for
+  /// none.
+  size_t remote_cover_size{256 * 1024};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
   /// Also offer AirPlay 2 (transient pairing, realtime audio with NTP timing). Needs `random`. Not offered when a
@@ -632,6 +636,28 @@ class Receiver {
   uint32_t relay_next_stream_{1};
   // For answering controllers: the track and its progress as the sender last told them, and room for a message
   Metadata now_playing_{};
+  // The cover kept for controllers (ReceiverConfig::remote_cover_size)
+  uint8_t *cover_{nullptr};
+  size_t cover_length_{0};
+  size_t cover_expected_{0};
+  uint32_t cover_hash_{0};
+  uint16_t cover_width_{0};
+  uint16_t cover_height_{0};
+  bool cover_png_{false};
+  bool cover_capture_{false};   // The cover that arrives is kept
+  bool cover_complete_{false};  // cover_ holds a whole cover
+  bool artwork_to_listener_{false};
+  void artwork_data_(const uint8_t *data, size_t length);
+  /// The cover for a controller's state, if one is kept
+  bool cover_info_(mrp::Cover *cover, char *identifier, bool with_data) const;
+  // A state with the cover to a controller, sent a piece per poll as it is large: the header and the start go at
+  // once, the cover and the end of the property list after
+  uint8_t cover_send_connection_{0xff};
+  size_t cover_send_offset_{0};
+  uint8_t cover_send_end_[64];
+  size_t cover_send_end_length_{0};
+  bool send_cover_state_(Connection &controller, uint32_t stream_id, const char *reply_to);
+  void send_cover_piece_(bool all);
   uint32_t progress_position_ms_{0};
   uint32_t progress_duration_ms_{0};
   uint32_t progress_at_ms_{0};

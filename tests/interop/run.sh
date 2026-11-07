@@ -131,6 +131,8 @@ if [ "$SENDER" = buffered ]; then
     # A controller of a Mac is answered by the receiver, and its pause goes to the sender
     grep -q "Remote control stream 1: message 15 answered here" receiver.log
     grep -q "Remote control stream 1: message 32 answered here" receiver.log
+    grep -q "Cover art kept for controllers: 600x600" receiver.log
+    grep -q "Remote control stream 1: cover art follows" receiver.log
     # A second controller at the same time does not push the first one out: its pause still arrives afterwards
     awk '/controller .* at 127.0.0.3/ { second = NR } /Remote control stream 1: command 2/ { command = NR }
          /Connection closed \(127.0.0.2/ && !closed { closed = NR }

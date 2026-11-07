@@ -18,7 +18,12 @@ class ProtoWriter {
   void real32(uint32_t field, float value);  // A float
   void begin(uint32_t field);
   void end();
+  /// A bytes field whose content the caller sends after what is written here: it must be the last field of every
+  /// message that is open, and nothing but end() may follow
+  void external(uint32_t field, size_t length);
+  /// What is written (without the external bytes); 0 after an overflow
   size_t length() const { return this->failed_ || this->depth_ != 0 ? 0 : this->length_; }
+  size_t external_length() const { return this->external_; }
 
  private:
   static constexpr size_t MAX_DEPTH = 8;
@@ -27,6 +32,7 @@ class ProtoWriter {
   uint8_t *buffer_;
   size_t size_;
   size_t length_{0};
+  size_t external_{0};
   size_t starts_[MAX_DEPTH]{};
   size_t depth_{0};
   bool failed_{false};
@@ -91,6 +97,7 @@ struct Request {
   char identifier[48];
   uint32_t command;
   char command_id[48];  // Of a SEND_COMMAND, which its result repeats
+  bool wants_artwork;   // A PLAYBACK_QUEUE_REQUEST that asks for the cover
 };
 
 /// Reads the messages in data; returns how many were written to requests
@@ -115,12 +122,24 @@ struct NowPlaying {
   bool playing;
 };
 
+/// The cover of what plays, kept by the receiver
+struct Cover {
+  const char *mime;        // "image/jpeg" or "image/png"
+  const char *identifier;  // Changes with the image
+  uint16_t width;
+  uint16_t height;
+  size_t size;
+  bool with_data;  // The image itself follows the message (write_state() leaves room for it)
+};
+
 /// Each writes one message (its length first) to buffer, answering the request with reply_to (nullptr for none)
 /// and with message_id as its own identifier; returns its size, 0 if it does not fit.
 size_t write_device_info(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id,
                          const DeviceInfo &info);
-/// Playback state, now playing details and the commands that work (play, pause, next, previous)
-size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id, const NowPlaying &now);
+/// Playback state, now playing details and the commands that work (play, pause, next, previous). With a cover
+/// with_data, the image's bytes belong right after what is written: the message is the size returned plus cover->size.
+size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id, const NowPlaying &now,
+                   const Cover *cover = nullptr);
 /// The app that plays (now playing client and its properties), as iOS sends it when a controller asks for updates
 size_t write_now_playing_client(uint8_t *buffer, size_t size, const char *message_id);
 size_t write_update_client(uint8_t *buffer, size_t size, const char *message_id);

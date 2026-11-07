@@ -79,6 +79,12 @@ void ProtoWriter::real32(uint32_t field, float value) {
   this->raw_(bytes, sizeof(bytes));
 }
 
+void ProtoWriter::external(uint32_t field, size_t length) {
+  this->raw_varint_(static_cast<uint64_t>(field) << 3 | WIRE_BYTES);
+  this->raw_varint_(length);
+  this->external_ += length;
+}
+
 void ProtoWriter::begin(uint32_t field) {
   if (this->depth_ >= MAX_DEPTH) {
     this->failed_ = true;
@@ -99,13 +105,14 @@ void ProtoWriter::end() {
   const size_t start = this->starts_[--this->depth_];
   if (this->failed_)
     return;
-  const size_t length = this->length_ - start - 1;
+  const size_t written = this->length_ - start - 1;
+  const size_t length = written + this->external_;
   const size_t extra = varint_size(length) - 1;
   if (this->length_ + extra > this->size_) {
     this->failed_ = true;
     return;
   }
-  std::memmove(this->buffer_ + start + 1 + extra, this->buffer_ + start + 1, length);
+  std::memmove(this->buffer_ + start + 1 + extra, this->buffer_ + start + 1, written);
   size_t at = start;
   uint64_t value = length;
   do {
@@ -184,6 +191,9 @@ static constexpr uint32_t EXT_PLAYER_CLIENT_PROPERTIES = 86;
 static constexpr uint32_t SEND_COMMAND_COMMAND = 1;
 static constexpr uint32_t SEND_COMMAND_OPTIONS = 2;
 static constexpr uint32_t OPTIONS_COMMAND_ID = 32;
+static constexpr uint32_t EXT_PLAYBACK_QUEUE_REQUEST = 37;
+static constexpr uint32_t QUEUE_REQUEST_ARTWORK_WIDTH = 4;
+static constexpr uint32_t QUEUE_REQUEST_ARTWORK_HEIGHT = 5;
 
 static constexpr const char PLAYER_ID[] = "MediaRemote-DefaultPlayer";
 static constexpr const char PLAYER_NAME[] = "Default Player";
@@ -227,6 +237,16 @@ size_t parse(const uint8_t *data, size_t length, Request *requests, size_t max) 
         request.type = static_cast<uint32_t>(message.value());
       } else if (message.field() == FIELD_IDENTIFIER && message.is_bytes()) {
         copy_text(request.identifier, sizeof(request.identifier), message.data(), message.size());
+      } else if (message.field() == EXT_PLAYBACK_QUEUE_REQUEST && message.is_bytes()) {
+        ProtoReader queue(message.data(), message.size());
+        while (queue.next()) {
+          if (queue.field() == QUEUE_REQUEST_ARTWORK_WIDTH || queue.field() == QUEUE_REQUEST_ARTWORK_HEIGHT) {
+            double value = 0;
+            const uint64_t bits = queue.value();
+            std::memcpy(&value, &bits, sizeof(value));
+            request.wants_artwork = request.wants_artwork || value > 0;
+          }
+        }
       } else if (message.field() == EXT_SEND_COMMAND && message.is_bytes()) {
         ProtoReader command(message.data(), message.size());
         while (command.next()) {
@@ -277,24 +297,25 @@ static void write_player_path(ProtoWriter &w, uint32_t field, const NowPlaying &
 }
 
 /// Starts a ProtocolMessage after room for its length
-static void begin_message(ProtoWriter &w, uint32_t type, const char *reply_to) {
+static void begin_message(ProtoWriter &w, uint32_t type, const char *reply_to, const char *message_id) {
   w.varint(FIELD_TYPE, type);
   if (reply_to != nullptr && reply_to[0] != '\0')
     w.string(FIELD_IDENTIFIER, reply_to);
+  w.string(FIELD_UNIQUE_IDENTIFIER, message_id);
 }
 
-/// Puts the message's length in front of it
-static size_t finish_message(uint8_t *buffer, size_t size, ProtoWriter &w, const char *message_id) {
-  w.string(FIELD_UNIQUE_IDENTIFIER, message_id);
+/// Puts the message's length (with what follows it, ProtoWriter::external()) in front of it
+static size_t finish_message(uint8_t *buffer, size_t size, ProtoWriter &w) {
   const size_t length = w.length();
   if (length == 0)
     return 0;
-  const size_t prefix = varint_size(length);
+  const uint64_t whole = length + w.external_length();
+  const size_t prefix = varint_size(whole);
   if (prefix + length > size)
     return 0;
   std::memmove(buffer + prefix, buffer, length);
   size_t at = 0;
-  uint64_t value = length;
+  uint64_t value = whole;
   do {
     uint8_t byte = static_cast<uint8_t>(value & 0x7f);
     value >>= 7;
@@ -314,7 +335,7 @@ size_t write_device_info(uint8_t *buffer, size_t size, const char *reply_to, con
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_DEVICE_INFO, reply_to);
+  begin_message(w, MESSAGE_TYPE_DEVICE_INFO, reply_to, message_id);
   w.begin(EXT_DEVICE_INFO);
   w.string(1, info.unique_id);
   w.string(2, info.name);
@@ -336,14 +357,15 @@ size_t write_device_info(uint8_t *buffer, size_t size, const char *reply_to, con
   w.boolean(30, true);                    // isAirplayActive
   w.string(39, info.model);               // modelID
   w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
-size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id, const NowPlaying &now) {
+size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id, const NowPlaying &now,
+                   const Cover *cover) {
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_SET_STATE, reply_to);
+  begin_message(w, MESSAGE_TYPE_SET_STATE, reply_to, message_id);
   w.begin(EXT_SET_STATE);
   w.begin(1);  // NowPlayingInfo
   if (now.album != nullptr && now.album[0] != '\0')
@@ -368,9 +390,14 @@ size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const cha
   }
   w.end();
   w.string(5, MUSIC_APP_NAME);  // displayName
-  w.begin(3);                   // PlaybackQueue: the item that plays
+  w.varint(6, now.playing ? PLAYBACK_STATE_PLAYING : PLAYBACK_STATE_PAUSED);
+  w.begin(8);  // PlaybackQueueCapabilities
+  w.end();
+  write_player_path(w, 9, now);
+  // The queue last: the cover's bytes may follow it
+  w.begin(3);  // PlaybackQueue: the item that plays
   w.varint(1, 0);
-  w.begin(2);
+  w.begin(2);  // ContentItem
   w.string(1, CONTENT_ITEM_ID);
   w.begin(2);  // ContentItemMetadata
   if (now.title != nullptr && now.title[0] != '\0')
@@ -387,57 +414,64 @@ size_t write_state(uint8_t *buffer, size_t size, const char *reply_to, const cha
   w.boolean(27, true);  // isCurrentlyPlaying
   w.real32(39, now.playing ? 1.0f : 0.0f);
   w.string(44, CONTENT_ITEM_ID);  // contentIdentifier
+  if (cover != nullptr) {
+    w.boolean(19, true);         // artworkAvailable
+    w.string(31, cover->mime);   // artworkMIMEType
+    w.varint(77, cover->width);  // artworkDataWidth
+    w.varint(78, cover->height);
+    w.string(80, cover->identifier);  // artworkIdentifier
+  }
+  w.end();
+  if (cover != nullptr && cover->with_data) {
+    w.varint(13, cover->width);
+    w.varint(14, cover->height);
+    w.external(3, cover->size);  // artworkData
+  }
   w.end();
   w.end();
   w.end();
-  w.varint(6, now.playing ? PLAYBACK_STATE_PLAYING : PLAYBACK_STATE_PAUSED);
-  w.begin(8);  // PlaybackQueueCapabilities
-  w.end();
-  write_player_path(w, 9, now);
-  w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
 size_t write_now_playing_client(uint8_t *buffer, size_t size, const char *message_id) {
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_SET_NOW_PLAYING_CLIENT, nullptr);
+  begin_message(w, MESSAGE_TYPE_SET_NOW_PLAYING_CLIENT, nullptr, message_id);
   w.begin(EXT_SET_NOW_PLAYING_CLIENT);
   write_client(w, 1, false);
   w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
 size_t write_update_client(uint8_t *buffer, size_t size, const char *message_id) {
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_UPDATE_CLIENT, nullptr);
+  begin_message(w, MESSAGE_TYPE_UPDATE_CLIENT, nullptr, message_id);
   w.begin(EXT_UPDATE_CLIENT);
   write_client(w, 1, true);
   w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
 size_t write_player_properties(uint8_t *buffer, size_t size, const char *message_id, const NowPlaying &now) {
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_PLAYER_CLIENT_PROPERTIES, nullptr);
+  begin_message(w, MESSAGE_TYPE_PLAYER_CLIENT_PROPERTIES, nullptr, message_id);
   w.begin(EXT_PLAYER_CLIENT_PROPERTIES);
   write_player_path(w, 1, now, true);
   w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
 size_t write_reply(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id) {
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  w.varint(FIELD_TYPE, MESSAGE_TYPE_REPLY);
-  w.string(FIELD_IDENTIFIER, reply_to);
-  return finish_message(buffer, size, w, message_id);
+  begin_message(w, MESSAGE_TYPE_REPLY, reply_to, message_id);
+  return finish_message(buffer, size, w);
 }
 
 size_t write_command_result(uint8_t *buffer, size_t size, const char *reply_to, const char *message_id,
@@ -445,7 +479,7 @@ size_t write_command_result(uint8_t *buffer, size_t size, const char *reply_to, 
   if (size <= MAX_PREFIX)
     return 0;
   ProtoWriter w(buffer, size - MAX_PREFIX);
-  begin_message(w, MESSAGE_TYPE_SEND_COMMAND_RESULT, reply_to);
+  begin_message(w, MESSAGE_TYPE_SEND_COMMAND_RESULT, reply_to, message_id);
   w.begin(EXT_SEND_COMMAND_RESULT);
   w.varint(1, 0);  // sendError: none
   w.varint(2, 0);  // handlerReturnStatus: success
@@ -461,7 +495,7 @@ size_t write_command_result(uint8_t *buffer, size_t size, const char *reply_to, 
   w.string(4, "None");
   w.end();
   w.end();
-  return finish_message(buffer, size, w, message_id);
+  return finish_message(buffer, size, w);
 }
 
 }  // namespace mrp

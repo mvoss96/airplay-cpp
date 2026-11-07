@@ -215,6 +215,36 @@ static void test_mrp() {
   CHECK(length > 0 && mrp::parse(buffer, length, requests, 2) == 1);
   CHECK(requests[0].type == mrp::MESSAGE_TYPE_SEND_COMMAND_RESULT && std::strcmp(requests[0].identifier, "id-1") == 0);
   CHECK(mrp::write_state(buffer, 40, nullptr, "id", now) == 0);  // Does not fit
+  // A state with the cover: its bytes follow what is written, and the length in front counts them
+  const mrp::Cover cover{"image/jpeg", "c0ffee", 600, 400, 3000, true};
+  const size_t start = mrp::write_state(buffer, sizeof(buffer), "id-3", "id-4", now, &cover);
+  CHECK(start > 0 && start + cover.size > sizeof(buffer));
+  uint64_t message_length = 0;
+  for (size_t i = 0, shift = 0; i < 3; i++, shift += 7) {
+    message_length |= static_cast<uint64_t>(buffer[i] & 0x7f) << shift;
+    if ((buffer[i] & 0x80) == 0) {
+      CHECK(i + 1 + message_length == start + cover.size);
+      break;
+    }
+  }
+  CHECK(message_length > cover.size);
+}
+
+static void test_image_size() {
+  using namespace airplay;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  // PNG: signature and IHDR
+  const uint8_t png[24] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0,    13,
+                           'I',  'H', 'D', 'R', 0,    0,    0x02, 0x58, 0, 0, 0x01, 0x90};
+  CHECK(image_size(png, sizeof(png), &width, &height) && width == 600 && height == 400);
+  // JPEG: an APP0 segment, then the start of frame
+  const uint8_t jpeg[] = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 'J', 'F', 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01,
+                          0x2c, 0x02, 0x80, 0x03, 0,    0,    0,   0,   0,    0,    0,    0,    0,    0};
+  CHECK(image_size(jpeg, sizeof(jpeg), &width, &height) && width == 640 && height == 300);
+  CHECK(!image_size(jpeg, 10, &width, &height));  // Cut off before the frame
+  const uint8_t other[] = {'G', 'I', 'F', '8', '9', 'a', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  CHECK(!image_size(other, sizeof(other), &width, &height));
 }
 
 static void test_ptp() {
@@ -397,5 +427,6 @@ int main() {
   test_dacp();
   test_ptp();
   test_mrp();
+  test_image_size();
   return finish("test_util");
 }

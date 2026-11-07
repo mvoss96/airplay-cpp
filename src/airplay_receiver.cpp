@@ -496,6 +496,8 @@ void Receiver::connection_closed(uint8_t connection) {
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
+  if (connection == this->cover_send_connection_)
+    this->cover_send_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
     this->end_session_();
   this->connections_[connection].open = false;
@@ -511,6 +513,8 @@ void Receiver::close_connection_(uint8_t connection) {
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
+  if (connection == this->cover_send_connection_)
+    this->cover_send_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;
   this->transport_.close(connection);
 }
@@ -588,13 +592,13 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
       }
       const bool artwork = this->artwork_streaming_ && connection == this->session_owner_;
       if (artwork)
-        this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(buffer), drop);
+        this->artwork_data_(reinterpret_cast<const uint8_t *>(buffer), drop);
       std::memmove(buffer, buffer + drop, c.rx_length - drop);
       c.rx_length -= drop;
       c.discard_remaining -= drop;
       if (artwork && c.discard_remaining == 0) {
         this->end_artwork_(true);
-      } else if (artwork && this->artwork_paused_ == NO_CONNECTION &&
+      } else if (artwork && this->artwork_to_listener_ && this->artwork_paused_ == NO_CONNECTION &&
                  this->listener_->artwork_room() < ARTWORK_RESERVE) {
         // The listener works through the image; the rest waits in the sender's socket meanwhile
         this->artwork_paused_ = connection;
@@ -1187,26 +1191,67 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
   } else {
     body_length = 0;  // "image/none": the track has no cover art
   }
+  this->cover_complete_ = false;
   if (body_length == 0) {
     AIRPLAY_LOGD("No cover art");
     this->listener_->on_artwork_clear();
+    this->update_controllers_();
     return;
   }
   AIRPLAY_LOGD("Cover art: %s, %u bytes", content_type, static_cast<unsigned>(body_length));
-  if (!this->listener_->on_artwork_begin(format, body_length))
+  this->send_cover_piece_(true);  // A cover still on its way to a controller, before cover_ changes
+  // Kept for controllers of a sender that answers them none (macOS), which the receiver answers itself
+  this->cover_capture_ = this->config_.remote_control && this->config_.remote_cover_size >= body_length &&
+                         this->session_owner_ != NO_CONNECTION && this->connections_[this->session_owner_].sender_macos;
+  if (this->cover_capture_ && this->cover_ == nullptr) {
+    this->cover_ = static_cast<uint8_t *>(this->allocate_(this->config_.remote_cover_size));
+    this->cover_capture_ = this->cover_ != nullptr;
+    if (this->cover_ == nullptr)
+      AIRPLAY_LOGW("No room to keep the cover art for controllers");
+  }
+  this->cover_length_ = 0;
+  this->cover_expected_ = body_length;
+  this->cover_png_ = format == ArtworkFormat::PNG;
+  this->artwork_to_listener_ = this->listener_->on_artwork_begin(format, body_length);
+  if (!this->artwork_to_listener_ && !this->cover_capture_)
     return;
   if (body == nullptr) {
     this->artwork_streaming_ = true;  // The rest arrives through process_requests_()
     return;
   }
-  this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(body), body_length);
-  this->listener_->on_artwork_end(true);
+  this->artwork_data_(reinterpret_cast<const uint8_t *>(body), body_length);
+  this->end_artwork_(true);
+}
+
+void Receiver::artwork_data_(const uint8_t *data, size_t length) {
+  if (this->artwork_to_listener_)
+    this->listener_->on_artwork_data(data, length);
+  if (this->cover_capture_) {
+    const size_t take = std::min(length, this->cover_expected_ - this->cover_length_);
+    std::memcpy(this->cover_ + this->cover_length_, data, take);
+    this->cover_length_ += take;
+  }
 }
 
 void Receiver::end_artwork_(bool complete) {
   this->artwork_streaming_ = false;
   this->resume_artwork_();
-  this->listener_->on_artwork_end(complete);
+  if (this->artwork_to_listener_)
+    this->listener_->on_artwork_end(complete);
+  this->artwork_to_listener_ = false;
+  if (this->cover_capture_) {
+    this->cover_capture_ = false;
+    this->cover_complete_ = complete && this->cover_length_ == this->cover_expected_ &&
+                            image_size(this->cover_, this->cover_length_, &this->cover_width_, &this->cover_height_);
+    // Names the image for controllers, which ask again for a new one
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < this->cover_length_; i += 61)
+      hash = (hash ^ this->cover_[i]) * 16777619u;
+    this->cover_hash_ = hash ^ static_cast<uint32_t>(this->cover_length_);
+    if (this->cover_complete_)
+      AIRPLAY_LOGD("Cover art kept for controllers: %ux%u", this->cover_width_, this->cover_height_);
+    this->update_controllers_();
+  }
 }
 
 void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
@@ -1388,6 +1433,7 @@ void Receiver::end_session_(uint32_t keep_address) {
     this->listener_->on_metadata(Metadata{});
   if (this->listener_ != nullptr && this->config_.artwork)
     this->listener_->on_artwork_clear();
+  this->cover_complete_ = false;
   if (this->listener_ != nullptr && this->config_.progress)
     this->listener_->on_progress(Progress{});
   if (this->airplay_muted_) {
@@ -2178,6 +2224,7 @@ void Receiver::poll(int64_t now_us) {
   }
 
   this->poll_ms_ = now_ms;
+  this->send_cover_piece_(false);
   this->update_event_channel_ready_(now_ms);
   this->update_sender_address_();
   this->update_sender_name_();
