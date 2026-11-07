@@ -46,6 +46,8 @@ jobs:
           - sender: buffered
             network: pause
           - sender: buffered
+            network: macos-control
+          - sender: buffered
             network: second-session
           - sender: buffered
             network: handover
@@ -105,6 +107,7 @@ jobs:
           esac
           case "${{ matrix.network }}" in
             pause) export PAUSE=1 REMOTE_CONTROL=1 ;;
+            macos-control) export PAUSE=1 REMOTE_CONTROL=1 MACOS=1 ;;
             second-session) export SECOND_SESSION=1 ;;
             handover) export HANDOVER=1 ;;
             takeover) export TAKEOVER=1 ;;

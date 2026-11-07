@@ -6,6 +6,7 @@
 #include "airplay_curve25519.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
+#include "airplay_mrp.h"
 #include "airplay_ptp.h"
 #include "airplay_types.h"
 
@@ -318,6 +319,8 @@ class Receiver {
     bool audio_data{false};      // A sender's buffered audio connection
     bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
     bool homekit_controller{false};
+    bool sender_macos{false};     // Its session SETUP named macOS: it answers no remote control
+    bool remote_answered{false};  // A controller the receiver answers itself (its sender is macOS)
     // Between pair-verify M1 and M3, per connection as several devices of a Home verify at once: the receiver's and
     // the controller's ephemeral public keys and their shared secret
     bool verify_pending{false};
@@ -458,6 +461,17 @@ class Receiver {
   /// @param body nullptr to send only the header: the body of the given length follows on *to_connection
   bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length,
                            uint8_t *to_connection = nullptr);
+  // A controller of a sender that answers no remote control (macOS): the receiver answers it itself, as the playing
+  // device, from what the stream tells (now playing, progress, playing or paused), and passes its commands on
+  /// @return true if the message was answered here instead of relayed
+  bool answer_controller_(Connection &controller, uint32_t stream_id, const uint8_t *data, size_t length, bool plist);
+  /// Sends one MediaRemote message (in mrp_buffer_) on a controller's stream
+  bool send_to_controller_(const Connection &controller, uint32_t stream_id, size_t length);
+  /// What plays now, for answering controllers (it points into the receiver's own copies)
+  mrp::NowPlaying now_playing_info_(uint32_t now_ms) const;
+  /// Tells the controllers that are answered here what plays now
+  void update_controllers_();
+  void make_message_id_(char *id);
   /// A controller's stream ends (all of its streams with 0): the sender hears of it
   void end_relay_(uint8_t connection, uint32_t stream_id = 0);
   void end_relay_stream_(const Connection &c, uint32_t stream);
@@ -606,6 +620,13 @@ class Receiver {
   char group_leader_[2]{"0"};
   bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
   uint32_t relay_next_stream_{1};
+  // For answering controllers: the track and its progress as the sender last told them, and room for a message
+  Metadata now_playing_{};
+  uint32_t progress_position_ms_{0};
+  uint32_t progress_duration_ms_{0};
+  uint32_t progress_at_ms_{0};
+  // Room for the longest titles; it goes into body_buffer_ in a property list of about 50 bytes
+  uint8_t mrp_buffer_[AIRPLAY2_BODY_SIZE - 64];
   uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
   uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
   uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response

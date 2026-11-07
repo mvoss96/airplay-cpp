@@ -404,6 +404,9 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     }
     const bool to_sender = from == controller->peer.address;
     const uint32_t to = to_sender ? sender : controller->peer.address;
+    if (to_sender && data != nullptr && this->connections_[this->session_owner_].sender_macos &&
+        this->answer_controller_(*controller, stream_id, data, body_length, plist))
+      return true;
     if (data == nullptr) {
       // Too large for the buffer (now playing details with cover art): the header now, the body as it comes
       uint8_t target = NO_CONNECTION;
@@ -1081,6 +1084,10 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     size_t name_length = 0;
     if (reader.get_string(reader.get(root, "name"), &name, &name_length))
       copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(name), name_length);
+    const char *os_name = nullptr;
+    size_t os_name_length = 0;
+    c.sender_macos = reader.get_string(reader.get(root, "osName"), &os_name, &os_name_length) && os_name_length == 5 &&
+                     std::memcmp(os_name, "macOS", 5) == 0;
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     if (this->session_owner_ != NO_CONNECTION && this->session_owner_ != connection && this->udp_open_ &&
@@ -1410,6 +1417,151 @@ void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char
   const size_t length = create.finish();
   if (length == 0 || !this->send_event_request_(this->connections_[this->session_owner_].peer.address, 0, body, length))
     AIRPLAY_LOGW("Could not tell the sender of remote control stream %" PRIu32, stream_id);
+}
+
+// ===== Controllers answered here =====
+
+void Receiver::make_message_id_(char *id) {
+  uint8_t bytes[16];
+  this->config_.random(bytes, sizeof(bytes));
+  bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x40);
+  bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
+  std::snprintf(id, 37, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", bytes[0], bytes[1],
+                bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15]);
+}
+
+mrp::NowPlaying Receiver::now_playing_info_(uint32_t now_ms) const {
+  mrp::NowPlaying now{};
+  now.title = this->now_playing_.title;
+  now.artist = this->now_playing_.artist;
+  now.album = this->now_playing_.album;
+  now.sender = this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].sender_name : "";
+  now.playing = this->session_state_ == SessionState::PLAYING;
+  if (this->progress_duration_ms_ != 0) {
+    uint32_t position = this->progress_position_ms_;
+    if (now.playing)
+      position += now_ms - this->progress_at_ms_;
+    position = std::min(position, this->progress_duration_ms_);
+    now.duration_s = this->progress_duration_ms_ / 1000.0;
+    now.elapsed_s = position / 1000.0;
+  }
+  return now;
+}
+
+bool Receiver::send_to_controller_(const Connection &controller, uint32_t stream_id, size_t length) {
+  if (length == 0) {
+    AIRPLAY_LOGW("A remote control message for stream %" PRIu32 " does not fit", stream_id);
+    return false;
+  }
+  PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  writer.begin_dict(1);
+  writer.key("params");
+  writer.begin_dict(1);
+  writer.key("data");
+  writer.data(this->mrp_buffer_, length);
+  const size_t body_length = writer.finish();
+  return body_length > 0 &&
+         this->send_event_request_(controller.peer.address, stream_id, this->body_buffer_, body_length);
+}
+
+bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, const uint8_t *data, size_t length,
+                                  bool plist) {
+  const uint8_t *messages = data;
+  size_t messages_length = length;
+  PlistReader reader;
+  if (plist && (!reader.parse(data, length) ||
+                !reader.get_data(reader.get(reader.get(reader.root(), "params"), "data"), &messages, &messages_length)))
+    return false;
+  mrp::Request requests[4];
+  const size_t count = mrp::parse(messages, messages_length, requests, 4);
+  if (count == 0)
+    return false;
+  controller.remote_answered = true;
+  const uint32_t now_ms = this->poll_ms_;
+  const mrp::NowPlaying now = this->now_playing_info_(now_ms);
+  char id[37];
+  for (size_t i = 0; i < count; i++) {
+    const mrp::Request &request = requests[i];
+    AIRPLAY_LOGD("Remote control stream %" PRIu32 ": message %" PRIu32 " answered here", stream_id, request.type);
+    switch (request.type) {
+      case mrp::MESSAGE_TYPE_DEVICE_INFO: {
+        char mac[18];
+        const uint8_t *m = this->config_.mac;
+        std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+        const mrp::DeviceInfo info{this->pairing_id_, this->config_.name, this->config_.model, mac};
+        this->make_message_id_(id);
+        this->send_to_controller_(
+            controller, stream_id,
+            mrp::write_device_info(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id, info));
+        this->make_message_id_(id);
+        this->send_to_controller_(controller, stream_id,
+                                  mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), nullptr, id, now));
+        break;
+      }
+      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG:
+      case mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST:
+        this->make_message_id_(id);
+        this->send_to_controller_(
+            controller, stream_id,
+            mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_),
+                             request.type == mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST ? request.identifier : nullptr,
+                             id, now));
+        break;
+      case mrp::MESSAGE_TYPE_SEND_COMMAND: {
+        bool known = true;
+        SenderCommand command = SenderCommand::SENDER_COMMAND_PLAY;
+        switch (request.command) {
+          case mrp::COMMAND_PLAY:
+            break;
+          case mrp::COMMAND_PAUSE:
+          case mrp::COMMAND_STOP:
+            command = SenderCommand::SENDER_COMMAND_PAUSE;
+            break;
+          case mrp::COMMAND_TOGGLE_PLAY_PAUSE:
+            command = SenderCommand::SENDER_COMMAND_PLAY_PAUSE;
+            break;
+          case mrp::COMMAND_NEXT_TRACK:
+            command = SenderCommand::SENDER_COMMAND_NEXT;
+            break;
+          case mrp::COMMAND_PREVIOUS_TRACK:
+            command = SenderCommand::SENDER_COMMAND_PREVIOUS;
+            break;
+          default:
+            known = false;
+        }
+        const bool passed = known && this->request_sender_command(command);
+        AIRPLAY_LOGI("Remote control stream %" PRIu32 ": command %" PRIu32 " %s", stream_id, request.command,
+                     passed  ? "passed on to the sender"
+                     : known ? "not passed on, the sender does not answer"
+                             : "not supported");
+        this->make_message_id_(id);
+        this->send_to_controller_(controller, stream_id,
+                                  mrp::write_command_result(this->mrp_buffer_, sizeof(this->mrp_buffer_),
+                                                            request.identifier, id, request.command_id, now));
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  controller.relayed_to_sender++;
+  return true;
+}
+
+void Receiver::update_controllers_() {
+  if (this->session_owner_ == NO_CONNECTION || !this->connections_[this->session_owner_].sender_macos)
+    return;
+  const uint32_t now_ms = this->poll_ms_;
+  const mrp::NowPlaying now = this->now_playing_info_(now_ms);
+  char id[37];
+  for (Connection &c : this->connections_) {
+    if (!c.open || !c.remote_answered || c.relay_latest == 0)
+      continue;
+    this->make_message_id_(id);
+    this->send_to_controller_(c, c.relay_latest,
+                              mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), nullptr, id, now));
+  }
 }
 
 void Receiver::end_relay_(uint8_t connection, uint32_t stream_id) {

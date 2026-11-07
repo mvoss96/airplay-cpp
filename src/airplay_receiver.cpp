@@ -426,6 +426,8 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.remote_control = false;
   c.homekit_controller = false;
+  c.sender_macos = false;
+  c.remote_answered = false;
   c.verify_pending = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
@@ -1126,6 +1128,8 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
       }
     }
     AIRPLAY_LOGD("Now playing: %s - %s", metadata.artist, metadata.title);
+    this->now_playing_ = metadata;
+    this->update_controllers_();
     if (this->listener_ != nullptr)
       this->listener_->on_metadata(metadata);
     return;
@@ -1234,6 +1238,10 @@ void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
   AIRPLAY_LOGD("Progress: %" PRIu32 ":%02" PRIu32 " of %" PRIu32 ":%02" PRIu32 " (%" PRIu32 "/%" PRIu32 "/%" PRIu32 ")",
                progress.position_ms / 60000, progress.position_ms / 1000 % 60, progress.duration_ms / 60000,
                progress.duration_ms / 1000 % 60, start, current, finish);
+  this->progress_position_ms_ = progress.position_ms;
+  this->progress_duration_ms_ = progress.duration_ms;
+  this->progress_at_ms_ = now_ms;
+  this->update_controllers_();
   if (this->listener_ != nullptr)
     this->listener_->on_progress(progress);
 }
@@ -1396,6 +1404,7 @@ void Receiver::set_session_state_(SessionState state) {
   this->session_state_ = state;
   this->update_sender_address_();
   this->update_sender_name_();
+  this->update_controllers_();
   if (this->listener_ != nullptr)
     this->listener_->on_session_state(state);
 }

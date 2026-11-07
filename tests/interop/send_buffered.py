@@ -115,6 +115,8 @@ async def main():
         FRAMES_PER_PACKET = 352
     pause = "--pause" in sys.argv
     remote_control = "--remote-control" in sys.argv
+    # As macOS: it answers no remote control, so the receiver answers a controller itself
+    macos = "--macos" in sys.argv
     second_session = "--second-session" in sys.argv or "--handover" in sys.argv
     handover = "--handover" in sys.argv
     takeover = "--takeover-and-back" in sys.argv
@@ -134,7 +136,8 @@ async def main():
             "SETUP",
             {"deviceID": "AA:BB:CC:DD:EE:FF" if source == "127.0.0.1" else "AA:BB:CC:DD:EE:00",
              "sessionUUID": str(uuid.uuid4()).upper(), "timingPort": session_timing_port or timing_port,
-             "timingProtocol": "NTP", "name": "buffered test", "model": "iPhone17,3",
+             "timingProtocol": "NTP", "name": "buffered test", "model": "Mac17,8" if macos else "iPhone17,3",
+             "osName": "macOS" if macos else "iPhone OS",
              # As iOS sends it: the group it plays the receiver in
              "groupUUID": "2F41DCA0-C513-4478-97E6-12AA296E0B08", "groupContainsGroupLeader": False},
         )
@@ -265,6 +268,38 @@ async def main():
                                     body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         assert await received(event_reader), "the sender heard nothing of the end"
 
+    async def answered_remote_control(control_rtsp, control_reader):
+        """As an iPad's Home app tile while a Mac plays: the receiver answers its MediaRemote messages and passes
+        its commands on to the sender"""
+        from pyatv.protocols.mrp import messages, protobuf
+        from pyatv.support.variant import write_variant
+
+        def mrp(*protos):
+            data = b"".join(write_variant(len(p.SerializeToString())) + p.SerializeToString() for p in protos)
+            return plistlib.dumps({"params": {"data": data}}, fmt=plistlib.FMT_BINARY)
+
+        reply = await exchange(control_rtsp, "SETUP", {"streams": [{
+            "type": 130, "controlType": 1, "clientUUID": str(uuid.uuid4()).upper(),
+            "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
+        stream_id = reply["streams"][0]["streamID"]
+        assert await received(event_reader), "the sender heard nothing of the controller"
+        info = messages.create(protobuf.DEVICE_INFO_MESSAGE, identifier=str(uuid.uuid4()).upper())
+        protobuf.extract_inner(info).name = "iPad"
+        for body in (mrp(info), mrp(messages.set_connection_state(), messages.client_updates_config()),
+                     mrp(messages.playback_queue_request(0))):
+            response = await control_rtsp.exchange("POST", uri="/command",
+                                                   content_type="application/x-apple-binary-plist",
+                                                   headers={"X-Apple-StreamID": stream_id}, body=body)
+            assert response.code == 200
+        assert await received(control_reader) > 300, "the controller got no answer"
+        pause = messages.command(2)  # Pause
+        response = await control_rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
+                                               headers={"X-Apple-StreamID": stream_id}, body=mrp(pause))
+        assert response.code == 200
+        assert await received(control_reader), "the command got no result"
+        await control_rtsp.exchange("TEARDOWN", content_type="application/x-apple-binary-plist",
+                                    body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+
     # Some audio ahead, then playback starts half a second from now while the rest follows as the buffer drains
     ahead = 0 if paced else min(20, len(frames))
     for i in range(ahead):
@@ -332,7 +367,10 @@ async def main():
             assert "eventPort" in reply
             control_reader, _ = await asyncio.open_connection(host, reply["eventPort"], local_addr=("127.0.0.2", 0))
             await exchange(control_rtsp, "RECORD")  # As the Home app does when it adds the receiver
-            await relay_remote_control(control_rtsp, control_reader)
+            if macos:
+                await answered_remote_control(control_rtsp, control_reader)
+            else:
+                await relay_remote_control(control_rtsp, control_reader)
         await send(i)
         i += 1
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE
