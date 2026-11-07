@@ -292,6 +292,20 @@ async def main():
                                                    headers={"X-Apple-StreamID": stream_id}, body=body)
             assert response.code == 200
         assert await received(control_reader) > 300, "the controller got no answer"
+        # A second controller (another iPad) at the same time: both stay connected
+        _, second = await loop.create_connection(HttpConnection, host, port, local_addr=("127.0.0.3", 0))
+        second_rtsp = RtspSession(second)
+        await verify_connection(TRANSIENT_CREDENTIALS, second)
+        reply = await exchange(second_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
+        second_reader, _ = await asyncio.open_connection(host, reply["eventPort"], local_addr=("127.0.0.3", 0))
+        reply = await exchange(second_rtsp, "SETUP", {"streams": [{
+            "type": 130, "controlType": 1, "clientUUID": str(uuid.uuid4()).upper(),
+            "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
+        second_id = reply["streams"][0]["streamID"]
+        response = await second_rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
+                                              headers={"X-Apple-StreamID": second_id}, body=mrp(info))
+        assert response.code == 200
+        assert await received(second_reader), "the second controller got no answer"
         pause = messages.command(2)  # Pause
         response = await control_rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
                                                headers={"X-Apple-StreamID": stream_id}, body=mrp(pause))

@@ -24,7 +24,7 @@ namespace airplay {
 /// in a loop on one thread (e.g. a FreeRTOS task with a priority above the network stack's lowest).
 class SocketRunner final : public Transport {
  public:
-  SocketRunner() = default;
+  SocketRunner();
   ~SocketRunner() override;
   SocketRunner(const SocketRunner &) = delete;
   SocketRunner &operator=(const SocketRunner &) = delete;
@@ -80,8 +80,7 @@ class SocketRunner final : public Transport {
   int listen_fd_{-1};
   uint16_t port_{0};
   uint16_t udp_base_port_{0};
-  int connection_fds_[Receiver::MAX_CONNECTIONS]{-1, -1, -1, -1, -1, -1};
-  static_assert(Receiver::MAX_CONNECTIONS == 6, "Initialize every connection_fds_ entry to -1");
+  int connection_fds_[Receiver::MAX_CONNECTIONS];  // -1 when free, set in the constructor
   bool receive_paused_[Receiver::MAX_CONNECTIONS]{};
   std::atomic<uint32_t> loops_{0};
   std::atomic<uint32_t> wait_us_{0};

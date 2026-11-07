@@ -312,8 +312,8 @@ bool Receiver::begin() {
       static_cast<int16_t *>(std::malloc((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
   // One extra byte per connection so that headers and body can be null terminated in place. The extra headers of a
   // response follow; kept off the stack, because pairing needs much of it.
-  this->rtsp_buffers_ =
-      static_cast<char *>(this->allocate_(MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1) + EXTRA_HEADERS_SIZE));
+  const size_t connections = this->connection_limit();
+  this->rtsp_buffers_ = static_cast<char *>(this->allocate_(connections * (RTSP_BUFFER_SIZE + 1) + EXTRA_HEADERS_SIZE));
   if (this->slots_ == nullptr || this->packet_buffer_ == nullptr || this->output_buffer_ == nullptr ||
       this->rtsp_buffers_ == nullptr) {
     AIRPLAY_LOGE("Failed to allocate buffers");
@@ -327,16 +327,16 @@ bool Receiver::begin() {
     this->rtsp_buffers_ = nullptr;
     return false;
   }
-  this->extra_headers_ = this->rtsp_buffers_ + MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1);
+  this->extra_headers_ = this->rtsp_buffers_ + connections * (RTSP_BUFFER_SIZE + 1);
   for (uint32_t i = 0; i < this->slot_count_; i++) {
     this->slots_[i].valid = false;
     this->slots_[i].missing_since_ms = 0;
   }
-  for (size_t i = 0; i < MAX_CONNECTIONS; i++)
+  for (size_t i = 0; i < connections; i++)
     this->connections_[i].buffer = &this->rtsp_buffers_[i * (RTSP_BUFFER_SIZE + 1)];
 
   if (this->airplay2_) {
-    this->frames_ = static_cast<uint8_t *>(this->allocate_(MAX_CONNECTIONS * HAP_FRAME_SIZE));
+    this->frames_ = static_cast<uint8_t *>(this->allocate_(connections * HAP_FRAME_SIZE));
     this->send_buffer_ = static_cast<uint8_t *>(this->allocate_(HAP_FRAME_SIZE));
     this->body_buffer_ = static_cast<uint8_t *>(this->allocate_(AIRPLAY2_BODY_SIZE));
     void *srp = this->allocate_(sizeof(SrpServer));
@@ -349,7 +349,7 @@ bool Receiver::begin() {
       AIRPLAY_LOGW("Failed to allocate the AirPlay 2 buffers; only AirPlay 1 is offered");
       this->airplay2_ = false;
     } else {
-      for (size_t i = 0; i < MAX_CONNECTIONS; i++)
+      for (size_t i = 0; i < connections; i++)
         this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
     }
   }
@@ -405,7 +405,7 @@ void Receiver::notify_played(uint32_t frames, int64_t timestamp_us) {
 // ===== Connections =====
 
 void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const Endpoint &local) {
-  if (connection >= MAX_CONNECTIONS || this->rtsp_buffers_ == nullptr)
+  if (connection >= this->connection_limit() || this->rtsp_buffers_ == nullptr)
     return;
   Connection &c = this->connections_[connection];
   if (c.open)

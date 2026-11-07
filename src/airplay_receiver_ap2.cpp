@@ -1365,9 +1365,11 @@ void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char
   Connection &c = this->connections_[connection];
   // While a sender has a session, paused too: the controller offers to play again
   const bool session = this->session_owner_ != NO_CONNECTION;
-  if (!c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !session) {
+  if (!this->config_.remote_control || !c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !session) {
     AIRPLAY_LOGD("Remote control stream (control type %" PRId64 ") refused%s", control_type,
-                 session ? "" : ": no sender has a session");
+                 !this->config_.remote_control ? ": remote control is off"
+                 : session                     ? ""
+                                               : ": no sender has a session");
     response.status = 400;
     response.status_text = "Bad Request";
     return;

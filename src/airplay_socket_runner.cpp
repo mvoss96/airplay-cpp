@@ -233,6 +233,11 @@ static int open_udp_socket(uint16_t *port, uint16_t *next_port) {
   return -1;
 }
 
+SocketRunner::SocketRunner() {
+  for (int &fd : this->connection_fds_)
+    fd = -1;
+}
+
 SocketRunner::~SocketRunner() { this->end(); }
 
 bool SocketRunner::begin(Receiver &receiver, uint16_t port) {
@@ -373,7 +378,8 @@ void SocketRunner::accept_connection_() {
     return;
 
   int slot = -1;
-  for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
+  const uint8_t limit = this->receiver_->connection_limit();
+  for (uint8_t i = 0; i < limit; i++) {
     if (this->connection_fds_[i] < 0) {
       slot = i;
       break;
@@ -381,7 +387,7 @@ void SocketRunner::accept_connection_() {
   }
   if (slot < 0) {
     // All slots are taken: drop the connection that is not playing
-    for (uint8_t i = 0; i < Receiver::MAX_CONNECTIONS; i++) {
+    for (uint8_t i = 0; i < limit; i++) {
       if (!this->receiver_->is_session_connection(i)) {
         close_fd(&this->connection_fds_[i]);
         this->receiver_->connection_closed(i);

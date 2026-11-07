@@ -152,6 +152,10 @@ struct ReceiverConfig {
   bool artwork{false};
   /// Advertise and accept the track position (Listener::on_progress)
   bool progress{false};
+  /// Let controllers (the Home app's tile on an iPad, Control Center) control the AirPlay 2 sender through the
+  /// receiver: relayed to senders that answer (iOS), answered by the receiver for those that do not (macOS). Takes
+  /// four more connections (Receiver::connection_limit()).
+  bool remote_control{true};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
   /// Also offer AirPlay 2 (transient pairing, realtime audio with NTP timing). Needs `random`. Not offered when a
@@ -198,8 +202,10 @@ struct ReceiverStats {
 class Receiver {
  public:
   /// An AirPlay 2 sender's session (RTSP, event and buffered audio connections) and its second session (RTSP and
-  /// event), or a second sender taking over, plus one for short requests such as GET /info
-  static constexpr uint8_t MAX_CONNECTIONS = 6;
+  /// event), or a second sender taking over, plus one for short requests such as GET /info: 6. Controllers
+  /// (ReceiverConfig::remote_control) take two each, so with remote control 10 (connection_limit()).
+  static constexpr uint8_t MAX_CONNECTIONS = 10;
+  static constexpr uint8_t BASE_CONNECTIONS = 6;
   static constexpr uint16_t DEFAULT_PORT = 5000;
 
   Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
@@ -223,6 +229,10 @@ class Receiver {
   void poll(int64_t now_us);
 
   bool is_session_owner(uint8_t connection) const { return this->session_owner_ == connection; }
+  /// Connections the transport may use at once: BASE_CONNECTIONS, MAX_CONNECTIONS with remote control
+  uint8_t connection_limit() const {
+    return this->config_.remote_control && this->config_.airplay2 ? MAX_CONNECTIONS : BASE_CONNECTIONS;
+  }
   /// @brief Whether a connection belongs to the playing sender: its RTSP, event or buffered audio connection.
   bool is_session_connection(uint8_t connection) const;
   bool needs_fast_polling() const {
