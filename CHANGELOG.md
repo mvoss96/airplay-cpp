@@ -6,6 +6,10 @@
   Assistant are refused, as by a HomePod. `HomeKitPairings::access_control` holds the level (`ACCESS_CONTROL_OFF`,
   `_NETWORK`, `_HOME`) in the byte that held the bool, so stored pairings stay valid.
 - Several devices can pair-verify at once; before, the first one failed when the Home app changed a setting
+- macOS controls the volume (both ways): feature bit 45, which no other receiver announces, is no longer set.
+  /info also announces `volumeControlType` 3, as shairport-sync does.
+- Refused senders get 403 Forbidden; a pairing error made Music Assistant ask for a password
+- An event connection that answers late (macOS) is used again
 - PTP on Zephyr (`CONFIG_ZVFS_POLL_MAX` 8 or more); the Zephyr example offers AirPlay 2 with PTP
 
 ## v0.5.0

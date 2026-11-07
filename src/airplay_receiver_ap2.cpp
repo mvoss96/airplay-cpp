@@ -22,12 +22,12 @@
 namespace airplay {
 
 // Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), FairPlay (14), audio formats
-// (18-20, 22), unified advertiser info (30), control channel encryption (38), buffered audio (40), NTP timing (45),
+// (18-20, 22), unified advertiser info (30), control channel encryption (38), buffered audio (40),
 // HomeKit pairing and peer management (46, 47) and transient pairing (48), and cover art, progress and text in
 // the AirPlay 1 way (15-17). iOS streams only to receivers with
 // FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
 // of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
-static constexpr uint64_t DEFAULT_FEATURES = 0x1E140405FCA00ULL;
+static constexpr uint64_t DEFAULT_FEATURES = 0x1C140405FCA00ULL;
 /// PTP timing (41), with ReceiverConfig::ptp. macOS only streams to receivers with it, and then only with PTP.
 static constexpr uint64_t FEATURE_PTP = 1ULL << 41;
 /// Status flags: an audio receiver
