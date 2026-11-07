@@ -92,6 +92,8 @@ class PtpClocks {
                      int8_t log_interval) const;
   Clock *find_(uint64_t id, uint32_t address, int64_t now_us);
   void add_sample_(Clock &clock, int64_t sample, int64_t now_us);
+  /// Whether another clock's latest sample is as far below its estimate as `change`: a delay in the receiver
+  bool others_late_(const Clock &clock, int64_t change, int64_t now_us) const;
   static int64_t best_recent_(const Clock &clock, uint32_t samples);
   static int64_t middle_recent_(const Clock &clock);  // The middle of the last three samples
   static int64_t delay_ns_(const Clock &clock);

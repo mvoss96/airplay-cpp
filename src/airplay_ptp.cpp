@@ -43,6 +43,8 @@ static constexpr uint32_t JUMP_SAMPLES = 3;
 static constexpr int64_t RISE_NS = 2000000;
 static constexpr uint32_t RISE_CONFIRMATIONS = 3;  // middle_recent_() takes the middle of three
 static constexpr uint32_t SETTLE_SAMPLES = 8;
+/// Another clock's sample this recent tells whether the receiver read messages late, as all clocks then seem set back
+static constexpr int64_t LATE_CHECK_US = 1000000;
 
 static uint64_t read_be(const uint8_t *data, size_t bytes) {
   uint64_t value = 0;
@@ -209,7 +211,14 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
     // so far below that no delay explains them: start over from them
     if (sample < clock.estimate - STEP_NS) {
       clock.below++;
-      if (clock.below >= STEP_SAMPLES || (clock.below >= JUMP_SAMPLES && sample < clock.estimate - JUMP_NS)) {
+      const bool step =
+          clock.below >= STEP_SAMPLES || (clock.below >= JUMP_SAMPLES && sample < clock.estimate - JUMP_NS);
+      if (step && this->others_late_(clock, best_recent_(clock, clock.below) - clock.estimate, now_us)) {
+        // Every clock seems set back by as much at once: the receiver read their messages late, as it was busy
+        AIRPLAY_LOGD("PTP messages read %" PRId64 " ms late: the receiver was busy, no clock jumped",
+                     (clock.estimate - best_recent_(clock, clock.below)) / 1000000);
+        clock.below = 0;
+      } else if (step) {
         AIRPLAY_LOGD("PTP clock %016" PRIx64 " jumped by %" PRId64 " ms", clock.id,
                      (best_recent_(clock, clock.below) - clock.estimate) / 1000000);
         set_estimate_(clock, best_recent_(clock, clock.below));
@@ -222,6 +231,19 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
   }
   clock.count++;
   clock.last_sample_us = now_us;
+}
+
+bool PtpClocks::others_late_(const Clock &clock, int64_t change, int64_t now_us) const {
+  const int64_t margin = std::max<int64_t>(STEP_NS, (change < 0 ? -change : change) / 4);
+  for (const Clock &other : this->clocks_) {
+    if (&other == &clock || other.last_seen_us == 0 || other.count < SETTLE_SAMPLES ||
+        now_us - other.last_sample_us > LATE_CHECK_US)
+      continue;
+    const int64_t deviation = other.samples[(other.count + WINDOW - 1) % WINDOW] - other.estimate;
+    if (deviation < -STEP_NS && deviation > change - margin && deviation < change + margin)
+      return true;
+  }
+  return false;
 }
 
 int64_t PtpClocks::middle_recent_(const Clock &clock) {

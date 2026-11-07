@@ -150,6 +150,45 @@ static std::vector<uint8_t> ptp_message(uint8_t type, uint64_t clock, uint16_t s
   return m;
 }
 
+/// Messages of two clocks read late together (the receiver was busy) move neither; one clock set back moves only it
+static void test_ptp_busy_receiver() {
+  using airplay::PtpClocks;
+  PtpClocks clocks;
+  const uint64_t a = 0x1111111111111111ULL;
+  const uint64_t b = 0x2222222222222222ULL;
+  const int64_t offset_a = 7000LL * 1000000000LL;
+  const int64_t offset_b = 9000LL * 1000000000LL;
+  int64_t now_us = 1000000;
+  uint16_t seq = 0;
+  auto sync = [&](uint64_t clock, int64_t offset, int64_t late_us, int64_t set_back_ns) {
+    const int64_t sent_ns = now_us * 1000 + offset - set_back_ns;
+    clocks.handle(false, ptp_message(0x0, clock, seq, true, 0).data(), 44, 0x0100000a, now_us + 1000 + late_us);
+    clocks.handle(true, ptp_message(0x8, clock, seq, false, sent_ns).data(), 44, 0x0100000a, now_us + 1100 + late_us);
+  };
+  auto run = [&](int64_t seconds, int64_t late_us, int64_t set_back_a_ns) {
+    for (int64_t i = 0; i < seconds * 8; i++, seq++, now_us += 125000) {
+      sync(a, offset_a, late_us, set_back_a_ns);
+      sync(b, offset_b, late_us, 0);
+    }
+  };
+  int64_t found_a = 0;
+  int64_t found_b = 0;
+  run(3, 0, 0);
+  CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
+  const int64_t before_a = found_a;
+  const int64_t before_b = found_b;
+  // 12 s in which the receiver reads everything 900 ms late
+  run(12, 900000, 0);
+  CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
+  CHECK(found_a > before_a - 5000000 && found_b > before_b - 5000000);
+  run(2, 0, 0);
+  // Clock a alone is set back by 500 ms: it follows after a while
+  run(12, 0, 500000000);
+  CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
+  CHECK(found_a < before_a - 450000000 && found_a > before_a - 550000000);
+  CHECK(found_b > before_b - 5000000);
+}
+
 static void test_ptp() {
   using airplay::PtpClocks;
   PtpClocks clocks;
@@ -329,5 +368,6 @@ int main() {
   test_dmap();
   test_dacp();
   test_ptp();
+  test_ptp_busy_receiver();
   return finish("test_util");
 }
