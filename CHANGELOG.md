@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0
 
 - HomeKit access "Only people sharing this home": devices that are not the Home's, AirPlay 1 senders and Music
   Assistant are refused, as by a HomePod. `HomeKitPairings::access_control` holds the level (`ACCESS_CONTROL_OFF`,
