@@ -29,6 +29,9 @@ class Transport {
   virtual bool send(uint8_t connection, const uint8_t *data, size_t length) = 0;
   /// Closes a connection on behalf of the receiver. Do not call Receiver::connection_closed() for it.
   virtual void close(uint8_t connection) = 0;
+  /// Whether send() would take some data now without waiting; checked before data that can wait (a cover for a
+  /// controller)
+  virtual bool can_send(uint8_t /*connection*/) { return true; }
   /// Opens the three UDP sockets of a session on free ports. Fills `ports`, indexed by UdpChannel.
   virtual bool open_udp(uint16_t *ports) = 0;
   virtual void close_udp() = 0;
@@ -338,6 +341,8 @@ class Receiver {
     bool homekit_controller{false};
     bool sender_answers_remote{false};  // Its session SETUP named iOS, which answers controllers itself
     bool remote_answered{false};        // A controller the receiver answers itself (its sender is macOS)
+    uint32_t cover_wanted_stream{0};    // Asked for the cover while another controller got it: answered after
+    char cover_wanted_reply[48]{};      // The identifier of that request
     // Between pair-verify M1 and M3, per connection as several devices of a Home verify at once: the receiver's and
     // the controller's ephemeral public keys and their shared secret
     bool verify_pending{false};
@@ -663,6 +668,8 @@ class Receiver {
   uint8_t cover_send_end_[64];
   size_t cover_send_end_length_{0};
   bool controllers_stale_{false};  // A state for controllers waits for a cover to go through
+  uint32_t cover_send_ms_{0};      // When the last piece went
+  void send_waiting_cover_();
   bool send_cover_state_(Connection &controller, uint32_t stream_id, const char *reply_to);
   void send_cover_piece_(bool all);
   uint32_t progress_position_ms_{0};

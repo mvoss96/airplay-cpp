@@ -491,6 +491,13 @@ bool SocketRunner::send(uint8_t connection, const uint8_t *data, size_t length) 
   return true;
 }
 
+bool SocketRunner::can_send(uint8_t connection) {
+  if (connection >= Receiver::MAX_CONNECTIONS || this->connection_fds_[connection] < 0)
+    return false;
+  bool writable = false;
+  return net::wait(&this->connection_fds_[connection], 1, 0, &writable, true) && writable;
+}
+
 void SocketRunner::close(uint8_t connection) {
   if (connection < Receiver::MAX_CONNECTIONS)
     close_fd(&this->connection_fds_[connection]);

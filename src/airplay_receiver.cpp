@@ -430,6 +430,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.homekit_controller = false;
   c.sender_answers_remote = false;
   c.remote_answered = false;
+  c.cover_wanted_stream = 0;
   c.verify_pending = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
@@ -1447,10 +1448,10 @@ void Receiver::end_session_(uint32_t keep_address) {
     this->listener_->on_metadata(Metadata{});
   if (this->listener_ != nullptr && this->config_.artwork)
     this->listener_->on_artwork_clear();
-  // The kept cover goes: its memory is free while nothing plays
-  if (this->cover_send_connection_ != NO_CONNECTION && !this->connections_[this->cover_send_connection_].open)
-    this->cover_send_connection_ = NO_CONNECTION;
-  this->send_cover_piece_(true);
+  // The kept cover goes: its memory is free while nothing plays. Its controllers were closed above.
+  this->cover_send_connection_ = NO_CONNECTION;
+  for (Connection &c : this->connections_)
+    c.cover_wanted_stream = 0;
   this->cover_complete_ = false;
   for (uint8_t *&chunk : this->cover_chunks_) {
     this->free_(chunk);
@@ -2248,6 +2249,8 @@ void Receiver::poll(int64_t now_us) {
 
   this->poll_ms_ = now_ms;
   this->send_cover_piece_(false);
+  if (this->cover_send_connection_ == NO_CONNECTION)
+    this->send_waiting_cover_();
   if (this->controllers_stale_ && this->cover_send_connection_ == NO_CONNECTION) {
     this->controllers_stale_ = false;
     this->update_controllers_();

@@ -62,6 +62,7 @@ class SocketRunner final : public Transport {
   // Transport
   bool send(uint8_t connection, const uint8_t *data, size_t length) override;
   void close(uint8_t connection) override;
+  bool can_send(uint8_t connection) override;
   void pause_receiving(uint8_t connection, bool paused) override;
   bool open_udp(uint16_t *ports) override;
   void close_udp() override;

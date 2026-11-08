@@ -1553,6 +1553,12 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
         break;
       }
       case mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST:
+        if (request.wants_artwork && cover_known && this->cover_send_connection_ != NO_CONNECTION) {
+          // One cover at a time: this one is answered once the other is through
+          controller.cover_wanted_stream = stream_id;
+          std::snprintf(controller.cover_wanted_reply, sizeof(controller.cover_wanted_reply), "%s", request.identifier);
+          break;
+        }
         if (request.wants_artwork && this->send_cover_state_(controller, stream_id, request.identifier))
           break;
         this->make_message_id_(id);
@@ -1660,28 +1666,61 @@ bool Receiver::send_cover_state_(Connection &controller, uint32_t stream_id, con
                static_cast<unsigned>(this->cover_length_));
   this->cover_send_connection_ = connection;
   this->cover_send_offset_ = 0;
+  this->cover_send_ms_ = this->poll_ms_;
   return true;
 }
 
 void Receiver::send_cover_piece_(bool all) {
-  static constexpr size_t PIECE = 4096;  // Within one piece of the cover
+  // A frame at a time, paced: what the network stack holds until the controller takes it is internal RAM, which
+  // is short on an ESP32, and a full send buffer would hold up the audio
+  static constexpr size_t PIECE = HAP_FRAME_DATA_SIZE;  // Within one chunk of the cover
   static_assert(COVER_CHUNK_SIZE % PIECE == 0);
+  static constexpr uint32_t PIECE_INTERVAL_MS = 25;  // About 40 KB/s
+  static constexpr uint32_t MAX_PIECES = 4;
   const uint8_t connection = this->cover_send_connection_;
   if (connection == NO_CONNECTION)
     return;
+  uint32_t pieces = MAX_PIECES;
+  if (!all) {
+    pieces = std::min(MAX_PIECES, (this->poll_ms_ - this->cover_send_ms_) / PIECE_INTERVAL_MS);
+    if (pieces == 0)
+      return;
+    this->cover_send_ms_ = this->poll_ms_;
+  }
   bool ok = this->connections_[connection].open;
-  do {
+  while (ok && this->cover_send_offset_ < this->cover_length_) {
+    if (!all && (pieces == 0 || !this->transport_.can_send(connection)))
+      return;
+    pieces--;
     const size_t length = std::min(PIECE, this->cover_length_ - this->cover_send_offset_);
     const size_t offset = this->cover_send_offset_;
-    ok = ok &&
-         this->send_(connection, this->cover_chunks_[offset / COVER_CHUNK_SIZE] + offset % COVER_CHUNK_SIZE, length);
+    ok = this->send_(connection, this->cover_chunks_[offset / COVER_CHUNK_SIZE] + offset % COVER_CHUNK_SIZE, length);
     this->cover_send_offset_ += length;
-  } while (ok && all && this->cover_send_offset_ < this->cover_length_);
-  if (ok && this->cover_send_offset_ < this->cover_length_)
-    return;
+  }
   if (ok)
     this->send_(connection, this->cover_send_end_, this->cover_send_end_length_);
   this->cover_send_connection_ = NO_CONNECTION;
+}
+
+void Receiver::send_waiting_cover_() {
+  for (Connection &c : this->connections_) {
+    if (!c.open || c.cover_wanted_stream == 0)
+      continue;
+    const uint32_t stream_id = c.cover_wanted_stream;
+    c.cover_wanted_stream = 0;
+    if (this->send_cover_state_(c, stream_id, c.cover_wanted_reply))
+      return;
+    // The cover went in the meantime: the state without it
+    mrp::Cover cover{};
+    char cover_id[12];
+    const bool cover_known = this->cover_info_(&cover, cover_id, false);
+    char id[37];
+    this->make_message_id_(id);
+    this->send_to_controller_(
+        c, stream_id,
+        mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), c.cover_wanted_reply, id,
+                         this->now_playing_info_(this->poll_ms_), cover_known ? &cover : nullptr));
+  }
 }
 
 void Receiver::update_controllers_() {

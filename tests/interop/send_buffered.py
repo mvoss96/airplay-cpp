@@ -309,11 +309,29 @@ async def main():
                                     body=plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         assert await received(event_reader), "the sender heard nothing of the end"
 
+    async def cover_from(reader):
+        """The content item with artwork of the next state that has one"""
+        from pyatv.protocols.mrp import protobuf
+        from pyatv.support.variant import read_variant
+
+        while True:
+            body = await asyncio.wait_for(reader.request(), 8)
+            data = plistlib.loads(body)["params"]["data"]
+            while data:
+                length, data = read_variant(data)
+                message = protobuf.ProtocolMessage()
+                message.ParseFromString(data[:length])
+                data = data[length:]
+                if message.type == protobuf.ProtocolMessage.SET_STATE_MESSAGE:
+                    items = protobuf.extract_inner(message).playbackQueue.contentItems
+                    if items and items[0].artworkData:
+                        return items[0]
+
     async def answered_remote_control(control_rtsp, control_reader):
         """As an iPad's Home app tile while a Mac plays: the receiver answers its MediaRemote messages and passes
         its commands on to the sender"""
         from pyatv.protocols.mrp import messages, protobuf
-        from pyatv.support.variant import read_variant, write_variant
+        from pyatv.support.variant import write_variant
 
         def mrp(*protos):
             data = b"".join(write_variant(len(p.SerializeToString())) + p.SerializeToString() for p in protos)
@@ -337,27 +355,16 @@ async def main():
                                                headers={"X-Apple-StreamID": stream_id},
                                                body=mrp(messages.playback_queue_request(0, 600, 600)))
         assert response.code == 200
-        cover = None
-        while cover is None:
-            body = await asyncio.wait_for(control_reader.request(), 5)
-            data = plistlib.loads(body)["params"]["data"]
-            while data:
-                length, data = read_variant(data)
-                message = protobuf.ProtocolMessage()
-                message.ParseFromString(data[:length])
-                data = data[length:]
-                if message.type == protobuf.ProtocolMessage.SET_STATE_MESSAGE:
-                    items = protobuf.extract_inner(message).playbackQueue.contentItems
-                    if items and items[0].artworkData:
-                        cover = items[0]
+        cover = await cover_from(control_reader)
         assert cover.artworkData == COVER, "the cover the controller got is not the one the Mac sent"
         assert cover.metadata.artworkMIMEType == "image/jpeg" and cover.metadata.artworkAvailable
         # A second controller (another iPad) at the same time: both stay connected
         _, second = await loop.create_connection(HttpConnection, host, port, local_addr=("127.0.0.3", 0))
         second_rtsp = RtspSession(second)
-        await verify_connection(TRANSIENT_CREDENTIALS, second)
+        second_verifier = await verify_connection(TRANSIENT_CREDENTIALS, second)
         reply = await exchange(second_rtsp, "SETUP", {"timingProtocol": "None", "isRemoteControlOnly": True})
         second_reader, _ = await asyncio.open_connection(host, reply["eventPort"], local_addr=("127.0.0.3", 0))
+        second_reader = EventReader(second_reader, second_verifier)
         reply = await exchange(second_rtsp, "SETUP", {"streams": [{
             "type": 130, "controlType": 1, "clientUUID": str(uuid.uuid4()).upper(),
             "clientTypeUUID": "1910A70F-DBC0-4242-AF95-115DB30604E1"}]})
@@ -366,6 +373,15 @@ async def main():
                                               headers={"X-Apple-StreamID": second_id}, body=mrp(info))
         assert response.code == 200
         assert await received(second_reader), "the second controller got no answer"
+        # Both ask for the cover at once: the second gets it after the first
+        for rtsp_session, stream in ((control_rtsp, stream_id), (second_rtsp, second_id)):
+            response = await rtsp_session.exchange("POST", uri="/command",
+                                                   content_type="application/x-apple-binary-plist",
+                                                   headers={"X-Apple-StreamID": stream},
+                                                   body=mrp(messages.playback_queue_request(0, 600, 600)))
+            assert response.code == 200
+        assert (await cover_from(control_reader)).artworkData == COVER
+        assert (await cover_from(second_reader)).artworkData == COVER, "the second controller got no cover"
         pause = messages.command(2)  # Pause
         response = await control_rtsp.exchange("POST", uri="/command", content_type="application/x-apple-binary-plist",
                                                headers={"X-Apple-StreamID": stream_id}, body=mrp(pause))
