@@ -401,6 +401,7 @@ async def main():
     start = time.time() + lead
     i = ahead
     resumed = False
+    control_task = None
     while i < len(frames):
         if (ma_resume or ma_pause) and not resumed and i == len(frames) // 2:
             resumed = True
@@ -463,11 +464,14 @@ async def main():
             control_reader = EventReader(control_reader, verifier)
             await exchange(control_rtsp, "RECORD")  # As the Home app does when it adds the receiver
             if macos:
-                await answered_remote_control(control_rtsp, control_reader)
+                # Alongside the audio: the covers take a while
+                control_task = asyncio.create_task(answered_remote_control(control_rtsp, control_reader))
             else:
                 await relay_remote_control(control_rtsp, control_reader)
         await send(i)
         i += 1
+    if control_task is not None:
+        await control_task
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE
     if pause:
         # Pause in the middle and continue where it stopped
