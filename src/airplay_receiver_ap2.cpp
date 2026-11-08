@@ -1696,6 +1696,12 @@ void Receiver::update_controllers_() {
   for (Connection &c : this->connections_) {
     if (!c.open || !c.remote_answered || c.relay_latest == 0)
       continue;
+    if (this->cover_send_connection_ != NO_CONNECTION &&
+        this->connections_[this->cover_send_connection_].peer.address == c.peer.address) {
+      // Sent once its cover is through: sending now would push all of the cover out at once
+      this->controllers_stale_ = true;
+      continue;
+    }
     this->make_message_id_(id);
     this->send_to_controller_(c, c.relay_latest,
                               mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), nullptr, id, now,

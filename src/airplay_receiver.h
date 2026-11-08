@@ -662,6 +662,7 @@ class Receiver {
   size_t cover_send_offset_{0};
   uint8_t cover_send_end_[64];
   size_t cover_send_end_length_{0};
+  bool controllers_stale_{false};  // A state for controllers waits for a cover to go through
   bool send_cover_state_(Connection &controller, uint32_t stream_id, const char *reply_to);
   void send_cover_piece_(bool all);
   uint32_t progress_position_ms_{0};

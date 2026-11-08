@@ -2240,6 +2240,10 @@ void Receiver::poll(int64_t now_us) {
 
   this->poll_ms_ = now_ms;
   this->send_cover_piece_(false);
+  if (this->controllers_stale_ && this->cover_send_connection_ == NO_CONNECTION) {
+    this->controllers_stale_ = false;
+    this->update_controllers_();
+  }
   static constexpr uint32_t EXPECTED_STATE_MS = 2000;
   if (this->expected_playing_ >= 0 && now_ms - this->expected_at_ms_ >= EXPECTED_STATE_MS) {
     this->expected_playing_ = -1;  // The sender did not follow: the controllers see how it is
