@@ -1657,14 +1657,17 @@ bool Receiver::send_cover_state_(Connection &controller, uint32_t stream_id, con
 }
 
 void Receiver::send_cover_piece_(bool all) {
-  static constexpr size_t PIECE = 4096;
+  static constexpr size_t PIECE = 4096;  // Within one piece of the cover
+  static_assert(COVER_CHUNK_SIZE % PIECE == 0);
   const uint8_t connection = this->cover_send_connection_;
   if (connection == NO_CONNECTION)
     return;
   bool ok = this->connections_[connection].open;
   do {
     const size_t length = std::min(PIECE, this->cover_length_ - this->cover_send_offset_);
-    ok = ok && this->send_(connection, this->cover_ + this->cover_send_offset_, length);
+    const size_t offset = this->cover_send_offset_;
+    ok = ok &&
+         this->send_(connection, this->cover_chunks_[offset / COVER_CHUNK_SIZE] + offset % COVER_CHUNK_SIZE, length);
     this->cover_send_offset_ += length;
   } while (ok && all && this->cover_send_offset_ < this->cover_length_);
   if (ok && this->cover_send_offset_ < this->cover_length_)

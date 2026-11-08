@@ -263,7 +263,8 @@ Receiver::~Receiver() {
   this->free_(this->buffered_storage_);
   this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
-  this->free_(this->cover_);
+  for (uint8_t *chunk : this->cover_chunks_)
+    this->free_(chunk);
   this->free_(this->slots_);
   std::free(this->benchmark_input_);
   std::free(this->benchmark_output_);
@@ -1200,20 +1201,20 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
     return;
   }
   AIRPLAY_LOGD("Cover art: %s, %u bytes", content_type, static_cast<unsigned>(body_length));
-  this->send_cover_piece_(true);  // A cover still on its way to a controller, before cover_ changes
+  this->send_cover_piece_(true);  // A cover still on its way to a controller, before the kept one changes
   // Kept for controllers of a sender that answers them none (macOS), which the receiver answers itself
-  this->cover_capture_ = this->config_.remote_control && this->config_.remote_cover_size >= body_length &&
+  this->cover_capture_ = this->config_.remote_control &&
+                         std::min(this->config_.remote_cover_size, MAX_COVER_SIZE) >= body_length &&
                          this->session_owner_ != NO_CONNECTION && this->connections_[this->session_owner_].sender_macos;
-  if (this->cover_capture_ && this->cover_capacity_ < body_length) {
-    // As large as this cover (a little more, for the next): memory may not have room for the largest
-    static constexpr size_t STEP = 16 * 1024;
-    const size_t capacity = std::min(this->config_.remote_cover_size, (body_length + STEP - 1) / STEP * STEP);
-    this->free_(this->cover_);
-    this->cover_ = static_cast<uint8_t *>(this->allocate_(capacity));
-    this->cover_capacity_ = this->cover_ != nullptr ? capacity : 0;
-    this->cover_capture_ = this->cover_ != nullptr;
-    if (this->cover_ == nullptr)
-      AIRPLAY_LOGW("No room to keep the cover art for controllers (%u bytes)", static_cast<unsigned>(capacity));
+  // In pieces, kept for the next cover: memory may have no room for a large one at once
+  for (size_t i = 0; this->cover_capture_ && i * COVER_CHUNK_SIZE < body_length; i++) {
+    if (this->cover_chunks_[i] == nullptr)
+      this->cover_chunks_[i] = static_cast<uint8_t *>(this->allocate_(COVER_CHUNK_SIZE));
+    if (this->cover_chunks_[i] == nullptr) {
+      this->cover_capture_ = false;
+      AIRPLAY_LOGW("No room to keep the cover art for controllers (%u of %u bytes)",
+                   static_cast<unsigned>(i * COVER_CHUNK_SIZE), static_cast<unsigned>(body_length));
+    }
   }
   this->cover_length_ = 0;
   this->cover_expected_ = body_length;
@@ -1233,9 +1234,15 @@ void Receiver::artwork_data_(const uint8_t *data, size_t length) {
   if (this->artwork_to_listener_)
     this->listener_->on_artwork_data(data, length);
   if (this->cover_capture_) {
-    const size_t take = std::min(length, this->cover_expected_ - this->cover_length_);
-    std::memcpy(this->cover_ + this->cover_length_, data, take);
-    this->cover_length_ += take;
+    size_t take = std::min(length, this->cover_expected_ - this->cover_length_);
+    while (take > 0) {
+      const size_t offset = this->cover_length_ % COVER_CHUNK_SIZE;
+      const size_t piece = std::min(take, COVER_CHUNK_SIZE - offset);
+      std::memcpy(this->cover_chunks_[this->cover_length_ / COVER_CHUNK_SIZE] + offset, data, piece);
+      this->cover_length_ += piece;
+      data += piece;
+      take -= piece;
+    }
   }
 }
 
@@ -1248,11 +1255,12 @@ void Receiver::end_artwork_(bool complete) {
   if (this->cover_capture_) {
     this->cover_capture_ = false;
     this->cover_complete_ = complete && this->cover_length_ == this->cover_expected_ &&
-                            image_size(this->cover_, this->cover_length_, &this->cover_width_, &this->cover_height_);
+                            image_size(this->cover_chunks_[0], std::min(this->cover_length_, COVER_CHUNK_SIZE),
+                                       &this->cover_width_, &this->cover_height_);
     // Names the image for controllers, which ask again for a new one
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < this->cover_length_; i += 61)
-      hash = (hash ^ this->cover_[i]) * 16777619u;
+      hash = (hash ^ this->cover_chunks_[i / COVER_CHUNK_SIZE][i % COVER_CHUNK_SIZE]) * 16777619u;
     this->cover_hash_ = hash ^ static_cast<uint32_t>(this->cover_length_);
     if (this->cover_complete_)
       AIRPLAY_LOGD("Cover art kept for controllers: %ux%u", this->cover_width_, this->cover_height_);

@@ -157,8 +157,8 @@ struct ReceiverConfig {
   /// four more connections (Receiver::connection_limit()).
   bool remote_control{true};
   /// With remote control and artwork: the receiver keeps the cover of a sender that answers no remote control
-  /// (macOS) for the controllers, up to this size in `allocate` memory (as large as the largest cover so far). 0 for
-  /// none.
+  /// (macOS) for the controllers, up to this size (at most 256 KB) in `allocate` memory, in pieces of 8 KB that are
+  /// kept for the next cover. 0 for none.
   size_t remote_cover_size{256 * 1024};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
@@ -637,16 +637,17 @@ class Receiver {
   // For answering controllers: the track and its progress as the sender last told them, and room for a message
   Metadata now_playing_{};
   // The cover kept for controllers (ReceiverConfig::remote_cover_size)
-  uint8_t *cover_{nullptr};
+  static constexpr size_t COVER_CHUNK_SIZE = 8 * 1024;
+  static constexpr size_t MAX_COVER_SIZE = 32 * COVER_CHUNK_SIZE;
+  uint8_t *cover_chunks_[MAX_COVER_SIZE / COVER_CHUNK_SIZE]{};
   size_t cover_length_{0};
-  size_t cover_capacity_{0};
   size_t cover_expected_{0};
   uint32_t cover_hash_{0};
   uint16_t cover_width_{0};
   uint16_t cover_height_{0};
   bool cover_png_{false};
   bool cover_capture_{false};   // The cover that arrives is kept
-  bool cover_complete_{false};  // cover_ holds a whole cover
+  bool cover_complete_{false};  // cover_chunks_ hold a whole cover
   bool artwork_to_listener_{false};
   void artwork_data_(const uint8_t *data, size_t length);
   /// The cover for a controller's state, if one is kept
