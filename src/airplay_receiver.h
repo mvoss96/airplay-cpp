@@ -662,6 +662,10 @@ class Receiver {
   uint32_t progress_position_ms_{0};
   uint32_t progress_duration_ms_{0};
   uint32_t progress_at_ms_{0};
+  // After a play or pause from a controller: what the controllers are shown until the sender's state follows (a Mac
+  // fades out first), and since when. -1 for none.
+  int8_t expected_playing_{-1};
+  uint32_t expected_at_ms_{0};
   // Room for the longest titles; it goes into body_buffer_ in a property list of about 50 bytes
   uint8_t mrp_buffer_[AIRPLAY2_BODY_SIZE - 64];
   uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame

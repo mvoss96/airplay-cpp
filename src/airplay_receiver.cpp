@@ -1454,6 +1454,7 @@ void Receiver::set_session_state_(SessionState state) {
   if (this->session_state_ == state)
     return;
   this->session_state_ = state;
+  this->expected_playing_ = -1;
   this->update_sender_address_();
   this->update_sender_name_();
   this->update_controllers_();
@@ -2231,6 +2232,11 @@ void Receiver::poll(int64_t now_us) {
 
   this->poll_ms_ = now_ms;
   this->send_cover_piece_(false);
+  static constexpr uint32_t EXPECTED_STATE_MS = 2000;
+  if (this->expected_playing_ >= 0 && now_ms - this->expected_at_ms_ >= EXPECTED_STATE_MS) {
+    this->expected_playing_ = -1;  // The sender did not follow: the controllers see how it is
+    this->update_controllers_();
+  }
   this->update_event_channel_ready_(now_ms);
   this->update_sender_address_();
   this->update_sender_name_();

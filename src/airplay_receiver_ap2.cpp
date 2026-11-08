@@ -1452,7 +1452,8 @@ mrp::NowPlaying Receiver::now_playing_info_(uint32_t now_ms) const {
   now.artist = this->now_playing_.artist;
   now.album = this->now_playing_.album;
   now.sender = this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].sender_name : "";
-  now.playing = this->session_state_ == SessionState::PLAYING;
+  now.playing =
+      this->expected_playing_ >= 0 ? this->expected_playing_ == 1 : this->session_state_ == SessionState::PLAYING;
   if (this->progress_duration_ms_ != 0) {
     uint32_t position = this->progress_position_ms_;
     if (now.playing)
@@ -1498,6 +1499,7 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
   mrp::Cover cover{};
   char cover_id[12];
   const bool cover_known = this->cover_info_(&cover, cover_id, false);
+  bool pending_update = false;
   char id[37];
   for (size_t i = 0; i < count; i++) {
     const mrp::Request &request = requests[i];
@@ -1583,6 +1585,16 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
         this->send_to_controller_(controller, stream_id,
                                   mrp::write_command_result(this->mrp_buffer_, sizeof(this->mrp_buffer_),
                                                             request.identifier, id, request.command_id, now));
+        if (passed && command != SenderCommand::SENDER_COMMAND_NEXT &&
+            command != SenderCommand::SENDER_COMMAND_PREVIOUS) {
+          // The controllers show the new state at once, not only once the sender has faded out
+          this->expected_playing_ = command == SenderCommand::SENDER_COMMAND_PLAY    ? 1
+                                    : command == SenderCommand::SENDER_COMMAND_PAUSE ? 0
+                                    : now.playing                                    ? 0
+                                                                                     : 1;
+          this->expected_at_ms_ = now_ms;
+          pending_update = true;
+        }
         break;
       }
       default:
@@ -1590,6 +1602,8 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
     }
   }
   controller.relayed_to_sender++;
+  if (pending_update)
+    this->update_controllers_();
   return true;
 }
 
