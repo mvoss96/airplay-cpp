@@ -263,6 +263,7 @@ Receiver::~Receiver() {
   this->free_(this->buffered_storage_);
   this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
+  this->free_(this->cover_);
   this->free_(this->slots_);
   std::free(this->benchmark_input_);
   std::free(this->benchmark_output_);
@@ -1203,11 +1204,16 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
   // Kept for controllers of a sender that answers them none (macOS), which the receiver answers itself
   this->cover_capture_ = this->config_.remote_control && this->config_.remote_cover_size >= body_length &&
                          this->session_owner_ != NO_CONNECTION && this->connections_[this->session_owner_].sender_macos;
-  if (this->cover_capture_ && this->cover_ == nullptr) {
-    this->cover_ = static_cast<uint8_t *>(this->allocate_(this->config_.remote_cover_size));
+  if (this->cover_capture_ && this->cover_capacity_ < body_length) {
+    // As large as this cover (a little more, for the next): memory may not have room for the largest
+    static constexpr size_t STEP = 16 * 1024;
+    const size_t capacity = std::min(this->config_.remote_cover_size, (body_length + STEP - 1) / STEP * STEP);
+    this->free_(this->cover_);
+    this->cover_ = static_cast<uint8_t *>(this->allocate_(capacity));
+    this->cover_capacity_ = this->cover_ != nullptr ? capacity : 0;
     this->cover_capture_ = this->cover_ != nullptr;
     if (this->cover_ == nullptr)
-      AIRPLAY_LOGW("No room to keep the cover art for controllers");
+      AIRPLAY_LOGW("No room to keep the cover art for controllers (%u bytes)", static_cast<unsigned>(capacity));
   }
   this->cover_length_ = 0;
   this->cover_expected_ = body_length;

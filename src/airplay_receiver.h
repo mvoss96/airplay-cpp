@@ -157,7 +157,7 @@ struct ReceiverConfig {
   /// four more connections (Receiver::connection_limit()).
   bool remote_control{true};
   /// With remote control and artwork: the receiver keeps the cover of a sender that answers no remote control
-  /// (macOS) for the controllers, up to this size in `allocate` memory (allocated with the first such cover). 0 for
+  /// (macOS) for the controllers, up to this size in `allocate` memory (as large as the largest cover so far). 0 for
   /// none.
   size_t remote_cover_size{256 * 1024};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
@@ -639,6 +639,7 @@ class Receiver {
   // The cover kept for controllers (ReceiverConfig::remote_cover_size)
   uint8_t *cover_{nullptr};
   size_t cover_length_{0};
+  size_t cover_capacity_{0};
   size_t cover_expected_{0};
   uint32_t cover_hash_{0};
   uint16_t cover_width_{0};
