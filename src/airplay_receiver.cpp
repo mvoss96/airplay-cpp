@@ -1447,7 +1447,15 @@ void Receiver::end_session_(uint32_t keep_address) {
     this->listener_->on_metadata(Metadata{});
   if (this->listener_ != nullptr && this->config_.artwork)
     this->listener_->on_artwork_clear();
+  // The kept cover goes: its memory is free while nothing plays
+  if (this->cover_send_connection_ != NO_CONNECTION && !this->connections_[this->cover_send_connection_].open)
+    this->cover_send_connection_ = NO_CONNECTION;
+  this->send_cover_piece_(true);
   this->cover_complete_ = false;
+  for (uint8_t *&chunk : this->cover_chunks_) {
+    this->free_(chunk);
+    chunk = nullptr;
+  }
   if (this->listener_ != nullptr && this->config_.progress)
     this->listener_->on_progress(Progress{});
   if (this->airplay_muted_) {
