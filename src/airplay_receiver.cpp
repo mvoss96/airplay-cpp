@@ -428,7 +428,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.remote_control = false;
   c.homekit_controller = false;
-  c.sender_macos = false;
+  c.sender_answers_remote = false;
   c.remote_answered = false;
   c.verify_pending = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
@@ -1202,10 +1202,10 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
   }
   AIRPLAY_LOGD("Cover art: %s, %u bytes", content_type, static_cast<unsigned>(body_length));
   this->send_cover_piece_(true);  // A cover still on its way to a controller, before the kept one changes
-  // Kept for controllers of a sender that answers them none (macOS), which the receiver answers itself
-  this->cover_capture_ = this->config_.remote_control &&
-                         std::min(this->config_.remote_cover_size, MAX_COVER_SIZE) >= body_length &&
-                         this->session_owner_ != NO_CONNECTION && this->connections_[this->session_owner_].sender_macos;
+  // Kept for controllers of a sender that answers them none (macOS, Music Assistant), which the receiver answers
+  this->cover_capture_ =
+      this->config_.remote_control && std::min(this->config_.remote_cover_size, MAX_COVER_SIZE) >= body_length &&
+      this->session_owner_ != NO_CONNECTION && !this->connections_[this->session_owner_].sender_answers_remote;
   // In pieces, kept for the next cover: memory may have no room for a large one at once
   for (size_t i = 0; this->cover_capture_ && i * COVER_CHUNK_SIZE < body_length; i++) {
     if (this->cover_chunks_[i] == nullptr)

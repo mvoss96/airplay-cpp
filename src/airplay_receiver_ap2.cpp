@@ -404,7 +404,7 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     }
     const bool to_sender = from == controller->peer.address;
     const uint32_t to = to_sender ? sender : controller->peer.address;
-    if (to_sender && data != nullptr && this->connections_[this->session_owner_].sender_macos &&
+    if (to_sender && data != nullptr && !this->connections_[this->session_owner_].sender_answers_remote &&
         this->answer_controller_(*controller, stream_id, data, body_length, plist))
       return true;
     if (data == nullptr) {
@@ -1086,8 +1086,14 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(name), name_length);
     const char *os_name = nullptr;
     size_t os_name_length = 0;
-    c.sender_macos = reader.get_string(reader.get(root, "osName"), &os_name, &os_name_length) && os_name_length == 5 &&
-                     std::memcmp(os_name, "macOS", 5) == 0;
+    // Only iOS answers the controllers' messages; for others (macOS, Music Assistant) the receiver does
+    c.sender_answers_remote = false;
+    if (reader.get_string(reader.get(root, "osName"), &os_name, &os_name_length)) {
+      for (const char *answering : {"iPhone OS", "iPadOS", "iOS"}) {
+        c.sender_answers_remote |=
+            os_name_length == std::strlen(answering) && std::memcmp(os_name, answering, os_name_length) == 0;
+      }
+    }
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     if (this->session_owner_ != NO_CONNECTION && this->session_owner_ != connection && this->udp_open_ &&
@@ -1576,7 +1582,8 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
           default:
             known = false;
         }
-        const bool passed = known && this->request_sender_command(command);
+        const bool passed = known && (this->request_sender_command(command) ||
+                                      (this->listener_ != nullptr && this->listener_->on_sender_command(command)));
         AIRPLAY_LOGI("Remote control stream %" PRIu32 ": command %" PRIu32 " %s", stream_id, request.command,
                      passed  ? "passed on to the sender"
                      : known ? "not passed on, the sender does not answer"
@@ -1678,7 +1685,7 @@ void Receiver::send_cover_piece_(bool all) {
 }
 
 void Receiver::update_controllers_() {
-  if (this->session_owner_ == NO_CONNECTION || !this->connections_[this->session_owner_].sender_macos)
+  if (this->session_owner_ == NO_CONNECTION || this->connections_[this->session_owner_].sender_answers_remote)
     return;
   const uint32_t now_ms = this->poll_ms_;
   const mrp::NowPlaying now = this->now_playing_info_(now_ms);

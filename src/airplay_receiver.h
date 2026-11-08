@@ -116,6 +116,9 @@ class Listener {
   /// request_sender_command() fail from now on, and what was sent there last went nowhere. Remote control (DACP)
   /// reaches such senders.
   virtual void on_event_channel_silent() {}
+  /// A controller (the Home app's tile) asks for a command that the sender cannot take on its event connection
+  /// (Music Assistant): passed on another way, e.g. remote control (DACP). @return true if passed on
+  virtual bool on_sender_command(SenderCommand /*command*/) { return false; }
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
   virtual void on_sender_name(const char * /*name*/) {}
@@ -153,12 +156,12 @@ struct ReceiverConfig {
   /// Advertise and accept the track position (Listener::on_progress)
   bool progress{false};
   /// Let controllers (the Home app's tile on an iPad, Control Center) control the AirPlay 2 sender through the
-  /// receiver: relayed to senders that answer (iOS), answered by the receiver for those that do not (macOS). Takes
-  /// four more connections (Receiver::connection_limit()).
+  /// receiver: relayed to senders that answer (iOS), answered by the receiver for others (macOS, Music Assistant).
+  /// Takes four more connections (Receiver::connection_limit()).
   bool remote_control{true};
   /// With remote control and artwork: the receiver keeps the cover of a sender that answers no remote control
-  /// (macOS) for the controllers, up to this size (at most 256 KB) in `allocate` memory, in pieces of 8 KB that are
-  /// kept for the next cover. 0 for none.
+  /// (macOS, Music Assistant) for the controllers, up to this size (at most 256 KB) in `allocate` memory, in pieces of
+  /// 8 KB that are kept for the next cover. 0 for none.
   size_t remote_cover_size{256 * 1024};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
@@ -333,8 +336,8 @@ class Receiver {
     bool audio_data{false};      // A sender's buffered audio connection
     bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
     bool homekit_controller{false};
-    bool sender_macos{false};     // Its session SETUP named macOS: it answers no remote control
-    bool remote_answered{false};  // A controller the receiver answers itself (its sender is macOS)
+    bool sender_answers_remote{false};  // Its session SETUP named iOS, which answers controllers itself
+    bool remote_answered{false};        // A controller the receiver answers itself (its sender is macOS)
     // Between pair-verify M1 and M3, per connection as several devices of a Home verify at once: the receiver's and
     // the controller's ephemeral public keys and their shared secret
     bool verify_pending{false};
@@ -475,8 +478,9 @@ class Receiver {
   /// @param body nullptr to send only the header: the body of the given length follows on *to_connection
   bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length,
                            uint8_t *to_connection = nullptr);
-  // A controller of a sender that answers no remote control (macOS): the receiver answers it itself, as the playing
-  // device, from what the stream tells (now playing, progress, playing or paused), and passes its commands on
+  // A controller of a sender that answers no remote control (macOS, Music Assistant): the receiver answers it itself,
+  // as the playing device, from what the stream tells (now playing, progress, playing or paused), and passes its
+  // commands on
   /// @return true if the message was answered here instead of relayed
   bool answer_controller_(Connection &controller, uint32_t stream_id, const uint8_t *data, size_t length, bool plist);
   /// Sends one MediaRemote message (in mrp_buffer_) on a controller's stream
