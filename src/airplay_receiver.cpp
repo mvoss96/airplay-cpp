@@ -263,6 +263,8 @@ Receiver::~Receiver() {
   this->free_(this->buffered_storage_);
   this->free_(this->aac_samples_);
   this->free_(this->body_buffer_);
+  for (uint8_t *chunk : this->cover_chunks_)
+    this->free_(chunk);
   this->free_(this->slots_);
   std::free(this->benchmark_input_);
   std::free(this->benchmark_output_);
@@ -312,8 +314,8 @@ bool Receiver::begin() {
       static_cast<int16_t *>(std::malloc((FRAMES_PER_PACKET + MAX_TRIM_FRAMES) * NUM_CHANNELS * sizeof(int16_t)));
   // One extra byte per connection so that headers and body can be null terminated in place. The extra headers of a
   // response follow; kept off the stack, because pairing needs much of it.
-  this->rtsp_buffers_ =
-      static_cast<char *>(this->allocate_(MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1) + EXTRA_HEADERS_SIZE));
+  const size_t connections = this->connection_limit();
+  this->rtsp_buffers_ = static_cast<char *>(this->allocate_(connections * (RTSP_BUFFER_SIZE + 1) + EXTRA_HEADERS_SIZE));
   if (this->slots_ == nullptr || this->packet_buffer_ == nullptr || this->output_buffer_ == nullptr ||
       this->rtsp_buffers_ == nullptr) {
     AIRPLAY_LOGE("Failed to allocate buffers");
@@ -327,16 +329,16 @@ bool Receiver::begin() {
     this->rtsp_buffers_ = nullptr;
     return false;
   }
-  this->extra_headers_ = this->rtsp_buffers_ + MAX_CONNECTIONS * (RTSP_BUFFER_SIZE + 1);
+  this->extra_headers_ = this->rtsp_buffers_ + connections * (RTSP_BUFFER_SIZE + 1);
   for (uint32_t i = 0; i < this->slot_count_; i++) {
     this->slots_[i].valid = false;
     this->slots_[i].missing_since_ms = 0;
   }
-  for (size_t i = 0; i < MAX_CONNECTIONS; i++)
+  for (size_t i = 0; i < connections; i++)
     this->connections_[i].buffer = &this->rtsp_buffers_[i * (RTSP_BUFFER_SIZE + 1)];
 
   if (this->airplay2_) {
-    this->frames_ = static_cast<uint8_t *>(this->allocate_(MAX_CONNECTIONS * HAP_FRAME_SIZE));
+    this->frames_ = static_cast<uint8_t *>(this->allocate_(connections * HAP_FRAME_SIZE));
     this->send_buffer_ = static_cast<uint8_t *>(this->allocate_(HAP_FRAME_SIZE));
     this->body_buffer_ = static_cast<uint8_t *>(this->allocate_(AIRPLAY2_BODY_SIZE));
     void *srp = this->allocate_(sizeof(SrpServer));
@@ -349,7 +351,7 @@ bool Receiver::begin() {
       AIRPLAY_LOGW("Failed to allocate the AirPlay 2 buffers; only AirPlay 1 is offered");
       this->airplay2_ = false;
     } else {
-      for (size_t i = 0; i < MAX_CONNECTIONS; i++)
+      for (size_t i = 0; i < connections; i++)
         this->connections_[i].frame = &this->frames_[i * HAP_FRAME_SIZE];
     }
   }
@@ -405,7 +407,7 @@ void Receiver::notify_played(uint32_t frames, int64_t timestamp_us) {
 // ===== Connections =====
 
 void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const Endpoint &local) {
-  if (connection >= MAX_CONNECTIONS || this->rtsp_buffers_ == nullptr)
+  if (connection >= this->connection_limit() || this->rtsp_buffers_ == nullptr)
     return;
   Connection &c = this->connections_[connection];
   if (c.open)
@@ -426,6 +428,9 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.audio_data = false;
   c.remote_control = false;
   c.homekit_controller = false;
+  c.sender_answers_remote = false;
+  c.remote_answered = false;
+  c.cover_wanted_stream = 0;
   c.verify_pending = false;
   std::fill(std::begin(c.relay_streams), std::end(c.relay_streams), 0);
   c.relay_latest = 0;
@@ -494,6 +499,8 @@ void Receiver::connection_closed(uint8_t connection) {
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
+  if (connection == this->cover_send_connection_)
+    this->cover_send_connection_ = NO_CONNECTION;
   if (connection == this->session_owner_ && !this->promote_pending_session_(connection))
     this->end_session_();
   this->connections_[connection].open = false;
@@ -509,6 +516,8 @@ void Receiver::close_connection_(uint8_t connection) {
     this->pairing_connection_ = NO_CONNECTION;
   if (connection == this->data_connection_)
     this->data_connection_ = NO_CONNECTION;
+  if (connection == this->cover_send_connection_)
+    this->cover_send_connection_ = NO_CONNECTION;
   this->connections_[connection].open = false;
   this->transport_.close(connection);
 }
@@ -586,13 +595,13 @@ void Receiver::process_requests_(uint8_t connection, int64_t now_us) {
       }
       const bool artwork = this->artwork_streaming_ && connection == this->session_owner_;
       if (artwork)
-        this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(buffer), drop);
+        this->artwork_data_(reinterpret_cast<const uint8_t *>(buffer), drop);
       std::memmove(buffer, buffer + drop, c.rx_length - drop);
       c.rx_length -= drop;
       c.discard_remaining -= drop;
       if (artwork && c.discard_remaining == 0) {
         this->end_artwork_(true);
-      } else if (artwork && this->artwork_paused_ == NO_CONNECTION &&
+      } else if (artwork && this->artwork_to_listener_ && this->artwork_paused_ == NO_CONNECTION &&
                  this->listener_->artwork_room() < ARTWORK_RESERVE) {
         // The listener works through the image; the rest waits in the sender's socket meanwhile
         this->artwork_paused_ = connection;
@@ -1126,6 +1135,8 @@ void Receiver::handle_set_parameter_(const char *content_type, const char *body,
       }
     }
     AIRPLAY_LOGD("Now playing: %s - %s", metadata.artist, metadata.title);
+    this->now_playing_ = metadata;
+    this->update_controllers_();
     if (this->listener_ != nullptr)
       this->listener_->on_metadata(metadata);
     return;
@@ -1183,26 +1194,79 @@ void Receiver::begin_artwork_(const char *content_type, const char *body, size_t
   } else {
     body_length = 0;  // "image/none": the track has no cover art
   }
+  this->cover_complete_ = false;
   if (body_length == 0) {
     AIRPLAY_LOGD("No cover art");
     this->listener_->on_artwork_clear();
+    this->update_controllers_();
     return;
   }
   AIRPLAY_LOGD("Cover art: %s, %u bytes", content_type, static_cast<unsigned>(body_length));
-  if (!this->listener_->on_artwork_begin(format, body_length))
+  this->send_cover_piece_(true);  // A cover still on its way to a controller, before the kept one changes
+  // Kept for controllers of a sender that answers them none (macOS, Music Assistant), which the receiver answers
+  this->cover_capture_ =
+      this->config_.remote_control && std::min(this->config_.remote_cover_size, MAX_COVER_SIZE) >= body_length &&
+      this->session_owner_ != NO_CONNECTION && !this->connections_[this->session_owner_].sender_answers_remote;
+  // In pieces, kept for the next cover: memory may have no room for a large one at once
+  for (size_t i = 0; this->cover_capture_ && i * COVER_CHUNK_SIZE < body_length; i++) {
+    if (this->cover_chunks_[i] == nullptr)
+      this->cover_chunks_[i] = static_cast<uint8_t *>(this->allocate_(COVER_CHUNK_SIZE));
+    if (this->cover_chunks_[i] == nullptr) {
+      this->cover_capture_ = false;
+      AIRPLAY_LOGW("No room to keep the cover art for controllers (%u of %u bytes)",
+                   static_cast<unsigned>(i * COVER_CHUNK_SIZE), static_cast<unsigned>(body_length));
+    }
+  }
+  this->cover_length_ = 0;
+  this->cover_expected_ = body_length;
+  this->cover_png_ = format == ArtworkFormat::PNG;
+  this->artwork_to_listener_ = this->listener_->on_artwork_begin(format, body_length);
+  if (!this->artwork_to_listener_ && !this->cover_capture_)
     return;
   if (body == nullptr) {
     this->artwork_streaming_ = true;  // The rest arrives through process_requests_()
     return;
   }
-  this->listener_->on_artwork_data(reinterpret_cast<const uint8_t *>(body), body_length);
-  this->listener_->on_artwork_end(true);
+  this->artwork_data_(reinterpret_cast<const uint8_t *>(body), body_length);
+  this->end_artwork_(true);
+}
+
+void Receiver::artwork_data_(const uint8_t *data, size_t length) {
+  if (this->artwork_to_listener_)
+    this->listener_->on_artwork_data(data, length);
+  if (this->cover_capture_) {
+    size_t take = std::min(length, this->cover_expected_ - this->cover_length_);
+    while (take > 0) {
+      const size_t offset = this->cover_length_ % COVER_CHUNK_SIZE;
+      const size_t piece = std::min(take, COVER_CHUNK_SIZE - offset);
+      std::memcpy(this->cover_chunks_[this->cover_length_ / COVER_CHUNK_SIZE] + offset, data, piece);
+      this->cover_length_ += piece;
+      data += piece;
+      take -= piece;
+    }
+  }
 }
 
 void Receiver::end_artwork_(bool complete) {
   this->artwork_streaming_ = false;
   this->resume_artwork_();
-  this->listener_->on_artwork_end(complete);
+  if (this->artwork_to_listener_)
+    this->listener_->on_artwork_end(complete);
+  this->artwork_to_listener_ = false;
+  if (this->cover_capture_) {
+    this->cover_capture_ = false;
+    this->cover_complete_ = complete && this->cover_length_ == this->cover_expected_ &&
+                            image_size(this->cover_chunks_[0], std::min(this->cover_length_, COVER_CHUNK_SIZE),
+                                       &this->cover_width_, &this->cover_height_);
+    // Names the image for controllers, which ask again for a new one
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < this->cover_length_; i += 61)
+      hash = (hash ^ this->cover_chunks_[i / COVER_CHUNK_SIZE][i % COVER_CHUNK_SIZE]) * 16777619u;
+    this->cover_hash_ = hash ^ static_cast<uint32_t>(this->cover_length_);
+    if (this->cover_complete_)
+      AIRPLAY_LOGD("Cover art kept for controllers: %ux%u", this->cover_width_, this->cover_height_);
+    this->update_controllers_();
+  }
 }
 
 void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
@@ -1234,6 +1298,10 @@ void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
   AIRPLAY_LOGD("Progress: %" PRIu32 ":%02" PRIu32 " of %" PRIu32 ":%02" PRIu32 " (%" PRIu32 "/%" PRIu32 "/%" PRIu32 ")",
                progress.position_ms / 60000, progress.position_ms / 1000 % 60, progress.duration_ms / 60000,
                progress.duration_ms / 1000 % 60, start, current, finish);
+  this->progress_position_ms_ = progress.position_ms;
+  this->progress_duration_ms_ = progress.duration_ms;
+  this->progress_at_ms_ = now_ms;
+  this->update_controllers_();
   if (this->listener_ != nullptr)
     this->listener_->on_progress(progress);
 }
@@ -1380,6 +1448,15 @@ void Receiver::end_session_(uint32_t keep_address) {
     this->listener_->on_metadata(Metadata{});
   if (this->listener_ != nullptr && this->config_.artwork)
     this->listener_->on_artwork_clear();
+  // The kept cover goes: its memory is free while nothing plays. Its controllers were closed above.
+  this->cover_send_connection_ = NO_CONNECTION;
+  for (Connection &c : this->connections_)
+    c.cover_wanted_stream = 0;
+  this->cover_complete_ = false;
+  for (uint8_t *&chunk : this->cover_chunks_) {
+    this->free_(chunk);
+    chunk = nullptr;
+  }
   if (this->listener_ != nullptr && this->config_.progress)
     this->listener_->on_progress(Progress{});
   if (this->airplay_muted_) {
@@ -1394,8 +1471,10 @@ void Receiver::set_session_state_(SessionState state) {
   if (this->session_state_ == state)
     return;
   this->session_state_ = state;
+  this->expected_playing_ = -1;
   this->update_sender_address_();
   this->update_sender_name_();
+  this->update_controllers_();
   if (this->listener_ != nullptr)
     this->listener_->on_session_state(state);
 }
@@ -2169,6 +2248,18 @@ void Receiver::poll(int64_t now_us) {
   }
 
   this->poll_ms_ = now_ms;
+  this->send_cover_piece_(false);
+  if (this->cover_send_connection_ == NO_CONNECTION)
+    this->send_waiting_cover_();
+  if (this->controllers_stale_ && this->cover_send_connection_ == NO_CONNECTION) {
+    this->controllers_stale_ = false;
+    this->update_controllers_();
+  }
+  static constexpr uint32_t EXPECTED_STATE_MS = 2000;
+  if (this->expected_playing_ >= 0 && now_ms - this->expected_at_ms_ >= EXPECTED_STATE_MS) {
+    this->expected_playing_ = -1;  // The sender did not follow: the controllers see how it is
+    this->update_controllers_();
+  }
   this->update_event_channel_ready_(now_ms);
   this->update_sender_address_();
   this->update_sender_name_();

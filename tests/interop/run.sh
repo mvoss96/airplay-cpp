@@ -17,7 +17,8 @@
 #   sender on the event connection.
 # buffered: AirPlay 2 buffered audio (AAC over TCP), as iOS streams most apps; the receiver needs an AAC decoder
 #   (the POSIX example with FAAD2). Its output is compared with ffmpeg's decoding of the same file. PAUSE=1 pauses
-#   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does; SECOND_SESSION=1
+#   in the middle; REMOTE_CONTROL=1 opens a second session only for remote control, as iOS does (with MACOS=1 the
+#   sender is macOS, whose controller the receiver answers itself); SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
 #   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
@@ -78,7 +79,7 @@ if [ "$SENDER" = buffered ]; then
     INPUT=signal.aac
   fi
   python3 "$HERE/send_buffered.py" 127.0.0.1 5000 $INPUT $([ "$PAUSE" = 1 ] && echo --pause) \
-    $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
+    $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$MACOS" = 1 ] && echo --macos) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
     $([ "$HANDOVER" = 1 ] && echo --handover) $([ "$TAKEOVER" = 1 ] && echo --takeover-and-back) ||
     echo "The sender failed"
   sleep 1
@@ -120,11 +121,24 @@ if [ "$SENDER" = buffered ]; then
   # The sender's group is announced while it plays (status flag bit 11), and the receiver's own afterwards
   grep -q "Group 2F41DCA0-C513-4478-97E6-12AA296E0B08 (gcgl 0)" receiver.log
   grep -q "Status flags 0x804" receiver.log
-  if [ "$REMOTE_CONTROL" = 1 ]; then
+  if [ "$REMOTE_CONTROL" = 1 ] && [ "$MACOS" != 1 ]; then
     # A controller's remote control stream was relayed to the sender, and ended
     grep -q "Remote control stream 1 for controller" receiver.log
     grep -q "Remote control stream 2 of 127.0.0.2 ended" receiver.log
     grep -q "Remote control stream 1 of 127.0.0.2 ended" receiver.log
+  fi
+  if [ "$MACOS" = 1 ]; then
+    # A controller of a Mac is answered by the receiver, and its pause goes to the sender
+    grep -q "Remote control stream 1: message 15 answered here" receiver.log
+    grep -q "Remote control stream 1: message 32 answered here" receiver.log
+    grep -q "Cover art kept for controllers: 600x600" receiver.log
+    grep -q "Remote control stream 1: cover art follows" receiver.log
+    # A second controller at the same time does not push the first one out: its pause still arrives afterwards
+    awk '/controller .* at 127.0.0.3/ { second = NR } /Remote control stream 1: command 2/ { command = NR }
+         /Connection closed \(127.0.0.2/ && !closed { closed = NR }
+         END { exit !(second && command > second && (!closed || closed > command)) }' receiver.log
+    # The test sender does not answer on its event connection, so the pause stays with the receiver
+    grep -q "Remote control stream 1: command 2 not passed on, the sender does not answer" receiver.log
   fi
   if [ "$TAKEOVER" = 1 ]; then
     # The test sender reads its event connection but never answers, as Music Assistant

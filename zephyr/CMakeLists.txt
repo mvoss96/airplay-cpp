@@ -12,6 +12,7 @@ if(CONFIG_AIRPLAY_CPP)
     ${AIRPLAY_DIR}/src/airplay_hap_crypto.cpp
     ${AIRPLAY_DIR}/src/airplay_key.cpp
     ${AIRPLAY_DIR}/src/airplay_log.cpp
+    ${AIRPLAY_DIR}/src/airplay_mrp.cpp
     ${AIRPLAY_DIR}/src/airplay_monocypher.cpp
     ${AIRPLAY_DIR}/src/airplay_monocypher_ed25519.cpp
     ${AIRPLAY_DIR}/src/airplay_packet_queue.cpp

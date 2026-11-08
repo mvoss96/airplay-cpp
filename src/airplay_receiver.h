@@ -6,6 +6,7 @@
 #include "airplay_curve25519.h"
 #include "airplay_hap_crypto.h"
 #include "airplay_packet_queue.h"
+#include "airplay_mrp.h"
 #include "airplay_ptp.h"
 #include "airplay_types.h"
 
@@ -28,6 +29,9 @@ class Transport {
   virtual bool send(uint8_t connection, const uint8_t *data, size_t length) = 0;
   /// Closes a connection on behalf of the receiver. Do not call Receiver::connection_closed() for it.
   virtual void close(uint8_t connection) = 0;
+  /// Whether send() would take some data now without waiting; checked before data that can wait (a cover for a
+  /// controller)
+  virtual bool can_send(uint8_t /*connection*/) { return true; }
   /// Opens the three UDP sockets of a session on free ports. Fills `ports`, indexed by UdpChannel.
   virtual bool open_udp(uint16_t *ports) = 0;
   virtual void close_udp() = 0;
@@ -115,6 +119,9 @@ class Listener {
   /// request_sender_command() fail from now on, and what was sent there last went nowhere. Remote control (DACP)
   /// reaches such senders.
   virtual void on_event_channel_silent() {}
+  /// A controller (the Home app's tile) asks for a command that the sender cannot take on its event connection
+  /// (Music Assistant): passed on another way, e.g. remote control (DACP). @return true if passed on
+  virtual bool on_sender_command(SenderCommand /*command*/) { return false; }
   /// Name of the device that owns the session, as it calls itself (e.g. "Kitchen iPad"); empty when the sender
   /// sends none or no session is active. UTF-8, at most SENDER_NAME_SIZE - 1 bytes.
   virtual void on_sender_name(const char * /*name*/) {}
@@ -151,6 +158,14 @@ struct ReceiverConfig {
   bool artwork{false};
   /// Advertise and accept the track position (Listener::on_progress)
   bool progress{false};
+  /// Let controllers (the Home app's tile on an iPad, Control Center) control the AirPlay 2 sender through the
+  /// receiver: relayed to senders that answer (iOS), answered by the receiver for others (macOS, Music Assistant).
+  /// Takes four more connections (Receiver::connection_limit()).
+  bool remote_control{true};
+  /// With remote control and artwork: the receiver keeps the cover of a sender that answers no remote control
+  /// (macOS, Music Assistant) for the controllers, up to this size (at most 256 KB) in `allocate` memory, in pieces of
+  /// 8 KB that are kept for the next cover. 0 for none.
+  size_t remote_cover_size{256 * 1024};
   /// Password senders must enter (RTSP Digest authentication); none when null. Must stay valid.
   const char *password{nullptr};
   /// Also offer AirPlay 2 (transient pairing, realtime audio with NTP timing). Needs `random`. Not offered when a
@@ -197,8 +212,10 @@ struct ReceiverStats {
 class Receiver {
  public:
   /// An AirPlay 2 sender's session (RTSP, event and buffered audio connections) and its second session (RTSP and
-  /// event), or a second sender taking over, plus one for short requests such as GET /info
-  static constexpr uint8_t MAX_CONNECTIONS = 6;
+  /// event), or a second sender taking over, plus one for short requests such as GET /info: 6. Controllers
+  /// (ReceiverConfig::remote_control) take two each, so with remote control 10 (connection_limit()).
+  static constexpr uint8_t MAX_CONNECTIONS = 10;
+  static constexpr uint8_t BASE_CONNECTIONS = 6;
   static constexpr uint16_t DEFAULT_PORT = 5000;
 
   Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &transport, AudioSink &sink,
@@ -222,6 +239,10 @@ class Receiver {
   void poll(int64_t now_us);
 
   bool is_session_owner(uint8_t connection) const { return this->session_owner_ == connection; }
+  /// Connections the transport may use at once: BASE_CONNECTIONS, MAX_CONNECTIONS with remote control
+  uint8_t connection_limit() const {
+    return this->config_.remote_control && this->config_.airplay2 ? MAX_CONNECTIONS : BASE_CONNECTIONS;
+  }
   /// @brief Whether a connection belongs to the playing sender: its RTSP, event or buffered audio connection.
   bool is_session_connection(uint8_t connection) const;
   bool needs_fast_polling() const {
@@ -318,6 +339,10 @@ class Receiver {
     bool audio_data{false};      // A sender's buffered audio connection
     bool remote_control{false};  // Its session only controls playback (iOS, the Home app): no audio
     bool homekit_controller{false};
+    bool sender_answers_remote{false};  // Its session SETUP named iOS, which answers controllers itself
+    bool remote_answered{false};        // A controller the receiver answers itself (its sender is macOS)
+    uint32_t cover_wanted_stream{0};    // Asked for the cover while another controller got it: answered after
+    char cover_wanted_reply[48]{};      // The identifier of that request
     // Between pair-verify M1 and M3, per connection as several devices of a Home verify at once: the receiver's and
     // the controller's ephemeral public keys and their shared secret
     bool verify_pending{false};
@@ -458,6 +483,18 @@ class Receiver {
   /// @param body nullptr to send only the header: the body of the given length follows on *to_connection
   bool send_event_request_(uint32_t address, uint32_t stream_id, const uint8_t *body, size_t length,
                            uint8_t *to_connection = nullptr);
+  // A controller of a sender that answers no remote control (macOS, Music Assistant): the receiver answers it itself,
+  // as the playing device, from what the stream tells (now playing, progress, playing or paused), and passes its
+  // commands on
+  /// @return true if the message was answered here instead of relayed
+  bool answer_controller_(Connection &controller, uint32_t stream_id, const uint8_t *data, size_t length, bool plist);
+  /// Sends one MediaRemote message (in mrp_buffer_) on a controller's stream
+  bool send_to_controller_(const Connection &controller, uint32_t stream_id, size_t length);
+  /// What plays now, for answering controllers (it points into the receiver's own copies)
+  mrp::NowPlaying now_playing_info_(uint32_t now_ms) const;
+  /// Tells the controllers that are answered here what plays now
+  void update_controllers_();
+  void make_message_id_(char *id);
   /// A controller's stream ends (all of its streams with 0): the sender hears of it
   void end_relay_(uint8_t connection, uint32_t stream_id = 0);
   void end_relay_stream_(const Connection &c, uint32_t stream);
@@ -606,6 +643,44 @@ class Receiver {
   char group_leader_[2]{"0"};
   bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
   uint32_t relay_next_stream_{1};
+  // For answering controllers: the track and its progress as the sender last told them, and room for a message
+  Metadata now_playing_{};
+  // The cover kept for controllers (ReceiverConfig::remote_cover_size)
+  static constexpr size_t COVER_CHUNK_SIZE = 8 * 1024;
+  static constexpr size_t MAX_COVER_SIZE = 32 * COVER_CHUNK_SIZE;
+  uint8_t *cover_chunks_[MAX_COVER_SIZE / COVER_CHUNK_SIZE]{};
+  size_t cover_length_{0};
+  size_t cover_expected_{0};
+  uint32_t cover_hash_{0};
+  uint16_t cover_width_{0};
+  uint16_t cover_height_{0};
+  bool cover_png_{false};
+  bool cover_capture_{false};   // The cover that arrives is kept
+  bool cover_complete_{false};  // cover_chunks_ hold a whole cover
+  bool artwork_to_listener_{false};
+  void artwork_data_(const uint8_t *data, size_t length);
+  /// The cover for a controller's state, if one is kept
+  bool cover_info_(mrp::Cover *cover, char *identifier, bool with_data) const;
+  // A state with the cover to a controller, sent a piece per poll as it is large: the header and the start go at
+  // once, the cover and the end of the property list after
+  uint8_t cover_send_connection_{0xff};
+  size_t cover_send_offset_{0};
+  uint8_t cover_send_end_[64];
+  size_t cover_send_end_length_{0};
+  bool controllers_stale_{false};  // A state for controllers waits for a cover to go through
+  uint32_t cover_send_ms_{0};      // When the last piece went
+  void send_waiting_cover_();
+  bool send_cover_state_(Connection &controller, uint32_t stream_id, const char *reply_to);
+  void send_cover_piece_(bool all);
+  uint32_t progress_position_ms_{0};
+  uint32_t progress_duration_ms_{0};
+  uint32_t progress_at_ms_{0};
+  // After a play or pause from a controller: what the controllers are shown until the sender's state follows (a Mac
+  // fades out first), and since when. -1 for none.
+  int8_t expected_playing_{-1};
+  uint32_t expected_at_ms_{0};
+  // Room for the longest titles; it goes into body_buffer_ in a property list of about 50 bytes
+  uint8_t mrp_buffer_[AIRPLAY2_BODY_SIZE - 64];
   uint8_t *frames_{nullptr};           // Per connection: an incoming encrypted frame
   uint8_t *send_buffer_{nullptr};      // An outgoing encrypted frame
   uint8_t *body_buffer_{nullptr};      // Body of an AirPlay 2 response

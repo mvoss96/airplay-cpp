@@ -35,4 +35,7 @@ bool equals_ignore_case(const char *a, const char *b, size_t length);
 /// @return true if the header was found
 bool get_header(const char *block, size_t block_length, const char *name, char *value, size_t value_size);
 
+/// The size of a JPEG or PNG image, from its header; false if it is neither or cut off before the size
+bool image_size(const uint8_t *data, size_t length, uint16_t *width, uint16_t *height);
+
 }  // namespace airplay

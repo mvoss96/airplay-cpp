@@ -16,6 +16,7 @@ set(AIRPLAY_SOURCES
     src/airplay_hap_crypto.cpp
     src/airplay_key.cpp
     src/airplay_log.cpp
+    src/airplay_mrp.cpp
     src/airplay_monocypher.cpp
     src/airplay_monocypher_ed25519.cpp
     src/airplay_packet_queue.cpp

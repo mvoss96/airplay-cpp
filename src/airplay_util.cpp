@@ -239,4 +239,38 @@ bool get_header(const char *block, size_t block_length, const char *name, char *
   return false;
 }
 
+bool image_size(const uint8_t *data, size_t length, uint16_t *width, uint16_t *height) {
+  auto be16 = [&](size_t at) { return static_cast<uint16_t>(data[at] << 8 | data[at + 1]); };
+  static constexpr uint8_t PNG_SIGNATURE[] = {0x89, 'P', 'N', 'G'};
+  if (length >= 24 && std::memcmp(data, PNG_SIGNATURE, sizeof(PNG_SIGNATURE)) == 0) {
+    // The IHDR chunk comes first: 32-bit width and height
+    if (be16(16) != 0 || be16(20) != 0)
+      return false;
+    *width = be16(18);
+    *height = be16(22);
+    return true;
+  }
+  if (length < 4 || data[0] != 0xff || data[1] != 0xd8)
+    return false;
+  // JPEG: the segments up to the start of frame, which holds the size
+  size_t at = 2;
+  while (at + 9 <= length) {
+    if (data[at] != 0xff)
+      return false;
+    const uint8_t marker = data[at + 1];
+    if (marker == 0xff) {
+      at++;  // Fill byte
+      continue;
+    }
+    const bool start_of_frame = marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
+    if (start_of_frame) {
+      *height = be16(at + 5);
+      *width = be16(at + 7);
+      return true;
+    }
+    at += 2 + be16(at + 2);
+  }
+  return false;
+}
+
 }  // namespace airplay

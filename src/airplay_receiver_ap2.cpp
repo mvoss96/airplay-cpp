@@ -404,6 +404,9 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     }
     const bool to_sender = from == controller->peer.address;
     const uint32_t to = to_sender ? sender : controller->peer.address;
+    if (to_sender && data != nullptr && !this->connections_[this->session_owner_].sender_answers_remote &&
+        this->answer_controller_(*controller, stream_id, data, body_length, plist))
+      return true;
     if (data == nullptr) {
       // Too large for the buffer (now playing details with cover art): the header now, the body as it comes
       uint8_t target = NO_CONNECTION;
@@ -1081,6 +1084,16 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     size_t name_length = 0;
     if (reader.get_string(reader.get(root, "name"), &name, &name_length))
       copy_utf8(c.sender_name, sizeof(c.sender_name), reinterpret_cast<const uint8_t *>(name), name_length);
+    const char *os_name = nullptr;
+    size_t os_name_length = 0;
+    // Only iOS answers the controllers' messages; for others (macOS, Music Assistant) the receiver does
+    c.sender_answers_remote = false;
+    if (reader.get_string(reader.get(root, "osName"), &os_name, &os_name_length)) {
+      for (const char *answering : {"iPhone OS", "iPadOS", "iOS"}) {
+        c.sender_answers_remote |=
+            os_name_length == std::strlen(answering) && std::memcmp(os_name, answering, os_name_length) == 0;
+      }
+    }
     int64_t timing_port = 0;
     reader.get_integer(reader.get(root, "timingPort"), &timing_port);
     if (this->session_owner_ != NO_CONNECTION && this->session_owner_ != connection && this->udp_open_ &&
@@ -1358,9 +1371,11 @@ void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char
   Connection &c = this->connections_[connection];
   // While a sender has a session, paused too: the controller offers to play again
   const bool session = this->session_owner_ != NO_CONNECTION;
-  if (!c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !session) {
+  if (!this->config_.remote_control || !c.remote_control || control_type != CONTROL_TYPE_MEDIA_REMOTE || !session) {
     AIRPLAY_LOGD("Remote control stream (control type %" PRId64 ") refused%s", control_type,
-                 session ? "" : ": no sender has a session");
+                 !this->config_.remote_control ? ": remote control is off"
+                 : session                     ? ""
+                                               : ": no sender has a session");
     response.status = 400;
     response.status_text = "Bad Request";
     return;
@@ -1412,6 +1427,327 @@ void Receiver::setup_relay_(uint8_t connection, int64_t control_type, const char
     AIRPLAY_LOGW("Could not tell the sender of remote control stream %" PRIu32, stream_id);
 }
 
+// ===== Controllers answered here =====
+
+void Receiver::make_message_id_(char *id) {
+  uint8_t bytes[16];
+  this->config_.random(bytes, sizeof(bytes));
+  bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x40);
+  bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
+  std::snprintf(id, 37, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", bytes[0], bytes[1],
+                bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15]);
+}
+
+bool Receiver::cover_info_(mrp::Cover *cover, char *identifier, bool with_data) const {
+  if (!this->cover_complete_)
+    return false;
+  std::snprintf(identifier, 12, "%08" PRIx32, this->cover_hash_);
+  *cover = mrp::Cover{this->cover_png_ ? "image/png" : "image/jpeg",
+                      identifier,
+                      this->cover_width_,
+                      this->cover_height_,
+                      this->cover_length_,
+                      with_data};
+  return true;
+}
+
+mrp::NowPlaying Receiver::now_playing_info_(uint32_t now_ms) const {
+  mrp::NowPlaying now{};
+  now.title = this->now_playing_.title;
+  now.artist = this->now_playing_.artist;
+  now.album = this->now_playing_.album;
+  now.sender = this->session_owner_ != NO_CONNECTION ? this->connections_[this->session_owner_].sender_name : "";
+  now.playing =
+      this->expected_playing_ >= 0 ? this->expected_playing_ == 1 : this->session_state_ == SessionState::PLAYING;
+  if (this->progress_duration_ms_ != 0) {
+    uint32_t position = this->progress_position_ms_;
+    if (now.playing)
+      position += now_ms - this->progress_at_ms_;
+    position = std::min(position, this->progress_duration_ms_);
+    now.duration_s = this->progress_duration_ms_ / 1000.0;
+    now.elapsed_s = position / 1000.0;
+  }
+  return now;
+}
+
+bool Receiver::send_to_controller_(const Connection &controller, uint32_t stream_id, size_t length) {
+  if (length == 0) {
+    AIRPLAY_LOGW("A remote control message for stream %" PRIu32 " does not fit", stream_id);
+    return false;
+  }
+  PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  writer.begin_dict(1);
+  writer.key("params");
+  writer.begin_dict(1);
+  writer.key("data");
+  writer.data(this->mrp_buffer_, length);
+  const size_t body_length = writer.finish();
+  return body_length > 0 &&
+         this->send_event_request_(controller.peer.address, stream_id, this->body_buffer_, body_length);
+}
+
+bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, const uint8_t *data, size_t length,
+                                  bool plist) {
+  const uint8_t *messages = data;
+  size_t messages_length = length;
+  PlistReader reader;
+  if (plist && (!reader.parse(data, length) ||
+                !reader.get_data(reader.get(reader.get(reader.root(), "params"), "data"), &messages, &messages_length)))
+    return false;
+  mrp::Request requests[4];
+  const size_t count = mrp::parse(messages, messages_length, requests, 4);
+  if (count == 0)
+    return false;
+  controller.remote_answered = true;
+  const uint32_t now_ms = this->poll_ms_;
+  const mrp::NowPlaying now = this->now_playing_info_(now_ms);
+  mrp::Cover cover{};
+  char cover_id[12];
+  const bool cover_known = this->cover_info_(&cover, cover_id, false);
+  bool pending_update = false;
+  char id[37];
+  for (size_t i = 0; i < count; i++) {
+    const mrp::Request &request = requests[i];
+    AIRPLAY_LOGD("Remote control stream %" PRIu32 ": message %" PRIu32 " answered here", stream_id, request.type);
+    switch (request.type) {
+      case mrp::MESSAGE_TYPE_DEVICE_INFO: {
+        char mac[18];
+        const uint8_t *m = this->config_.mac;
+        std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+        const mrp::DeviceInfo info{this->pairing_id_, this->config_.name, this->config_.model, mac};
+        this->make_message_id_(id);
+        this->send_to_controller_(
+            controller, stream_id,
+            mrp::write_device_info(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id, info));
+        break;
+      }
+      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG: {
+        // As iOS answers it: the app that plays and its state, then the confirmation the controller waits for
+        size_t used = 0;
+        bool fits = true;
+        auto add = [&](size_t length) {
+          fits = fits && length != 0;
+          used += length;
+        };
+        this->make_message_id_(id);
+        add(mrp::write_now_playing_client(this->mrp_buffer_, sizeof(this->mrp_buffer_), id));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_update_client(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_state(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, nullptr, id, now,
+                               cover_known ? &cover : nullptr));
+        this->make_message_id_(id);
+        if (fits)
+          add(mrp::write_player_properties(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id, now));
+        if (fits)
+          this->send_to_controller_(controller, stream_id, used);
+        else
+          AIRPLAY_LOGW("Remote control stream %" PRIu32 ": the now playing details do not fit", stream_id);
+        this->make_message_id_(id);
+        this->send_to_controller_(
+            controller, stream_id,
+            mrp::write_reply(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id));
+        break;
+      }
+      case mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST:
+        if (request.wants_artwork && cover_known && this->cover_send_connection_ != NO_CONNECTION) {
+          // One cover at a time: this one is answered once the other is through
+          controller.cover_wanted_stream = stream_id;
+          std::snprintf(controller.cover_wanted_reply, sizeof(controller.cover_wanted_reply), "%s", request.identifier);
+          break;
+        }
+        if (request.wants_artwork && this->send_cover_state_(controller, stream_id, request.identifier))
+          break;
+        this->make_message_id_(id);
+        this->send_to_controller_(controller, stream_id,
+                                  mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id,
+                                                   now, cover_known ? &cover : nullptr));
+        break;
+      case mrp::MESSAGE_TYPE_SEND_COMMAND: {
+        bool known = true;
+        SenderCommand command = SenderCommand::SENDER_COMMAND_PLAY;
+        switch (request.command) {
+          case mrp::COMMAND_PLAY:
+            break;
+          case mrp::COMMAND_PAUSE:
+          case mrp::COMMAND_STOP:
+            command = SenderCommand::SENDER_COMMAND_PAUSE;
+            break;
+          case mrp::COMMAND_TOGGLE_PLAY_PAUSE:
+            command = SenderCommand::SENDER_COMMAND_PLAY_PAUSE;
+            break;
+          case mrp::COMMAND_NEXT_TRACK:
+            command = SenderCommand::SENDER_COMMAND_NEXT;
+            break;
+          case mrp::COMMAND_PREVIOUS_TRACK:
+            command = SenderCommand::SENDER_COMMAND_PREVIOUS;
+            break;
+          default:
+            known = false;
+        }
+        const bool passed = known && (this->request_sender_command(command) ||
+                                      (this->listener_ != nullptr && this->listener_->on_sender_command(command)));
+        AIRPLAY_LOGI("Remote control stream %" PRIu32 ": command %" PRIu32 " %s", stream_id, request.command,
+                     passed  ? "passed on to the sender"
+                     : known ? "not passed on, the sender does not answer"
+                             : "not supported");
+        this->make_message_id_(id);
+        this->send_to_controller_(controller, stream_id,
+                                  mrp::write_command_result(this->mrp_buffer_, sizeof(this->mrp_buffer_),
+                                                            request.identifier, id, request.command_id, now));
+        if (passed && command != SenderCommand::SENDER_COMMAND_NEXT &&
+            command != SenderCommand::SENDER_COMMAND_PREVIOUS) {
+          // The controllers show the new state at once, not only once the sender has faded out
+          this->expected_playing_ = command == SenderCommand::SENDER_COMMAND_PLAY    ? 1
+                                    : command == SenderCommand::SENDER_COMMAND_PAUSE ? 0
+                                    : now.playing                                    ? 0
+                                                                                     : 1;
+          this->expected_at_ms_ = now_ms;
+          pending_update = true;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  controller.relayed_to_sender++;
+  if (pending_update)
+    this->update_controllers_();
+  return true;
+}
+
+bool Receiver::send_cover_state_(Connection &controller, uint32_t stream_id, const char *reply_to) {
+  if (this->cover_send_connection_ != NO_CONNECTION)
+    return false;
+  mrp::Cover cover{};
+  char cover_id[12];
+  if (!this->cover_info_(&cover, cover_id, true))
+    return false;
+  char id[37];
+  this->make_message_id_(id);
+  const size_t start = mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), reply_to, id,
+                                        this->now_playing_info_(this->poll_ms_), &cover);
+  if (start == 0)
+    return false;
+  // A binary property list {params: {data: <messages>}}, as iOS sends it, with the data's length known up front
+  const size_t data_length = start + this->cover_length_;
+  uint8_t head[40];
+  static constexpr uint8_t HEAD[] = {'b', 'p', 'l', 'i', 's',  't',  '0',  '0',  0xd1, 0x01, 0x02, 0x56, 'p',  'a',
+                                     'r', 'a', 'm', 's', 0xd1, 0x03, 0x04, 0x54, 'd',  'a',  't',  'a',  0x4f, 0x12};
+  std::memcpy(head, HEAD, sizeof(HEAD));
+  for (size_t i = 0; i < 4; i++)
+    head[sizeof(HEAD) + i] = static_cast<uint8_t>(data_length >> (24 - 8 * i));
+  const size_t head_length = sizeof(HEAD) + 4;
+  // The offsets of the five objects (4 bytes each), then the trailer
+  static constexpr uint32_t OFFSETS[] = {8, 11, 18, 21, 26};
+  const uint64_t table = head_length + data_length;
+  size_t end = 0;
+  for (const uint32_t offset : OFFSETS) {
+    for (size_t i = 0; i < 4; i++)
+      this->cover_send_end_[end++] = static_cast<uint8_t>(offset >> (24 - 8 * i));
+  }
+  std::memset(this->cover_send_end_ + end, 0, 32);
+  this->cover_send_end_[end + 6] = 4;   // Offset size
+  this->cover_send_end_[end + 7] = 1;   // Object reference size
+  this->cover_send_end_[end + 15] = 5;  // Objects
+  for (size_t i = 0; i < 8; i++)
+    this->cover_send_end_[end + 24 + i] = static_cast<uint8_t>(table >> (56 - 8 * i));
+  this->cover_send_end_length_ = end + 32;
+  uint8_t connection = NO_CONNECTION;
+  if (!this->send_event_request_(controller.peer.address, stream_id, nullptr,
+                                 head_length + data_length + this->cover_send_end_length_, &connection) ||
+      !this->send_(connection, head, head_length) || !this->send_(connection, this->mrp_buffer_, start))
+    return false;
+  AIRPLAY_LOGD("Remote control stream %" PRIu32 ": cover art follows, %u bytes", stream_id,
+               static_cast<unsigned>(this->cover_length_));
+  this->cover_send_connection_ = connection;
+  this->cover_send_offset_ = 0;
+  this->cover_send_ms_ = this->poll_ms_;
+  return true;
+}
+
+void Receiver::send_cover_piece_(bool all) {
+  // A frame at a time, paced: what the network stack holds until the controller takes it is internal RAM, which
+  // is short on an ESP32, and a full send buffer would hold up the audio
+  static constexpr size_t PIECE = HAP_FRAME_DATA_SIZE;  // Within one chunk of the cover
+  static_assert(COVER_CHUNK_SIZE % PIECE == 0);
+  static constexpr uint32_t PIECE_INTERVAL_MS = 25;  // About 40 KB/s
+  static constexpr uint32_t MAX_PIECES = 4;
+  const uint8_t connection = this->cover_send_connection_;
+  if (connection == NO_CONNECTION)
+    return;
+  uint32_t pieces = MAX_PIECES;
+  if (!all) {
+    pieces = std::min(MAX_PIECES, (this->poll_ms_ - this->cover_send_ms_) / PIECE_INTERVAL_MS);
+    if (pieces == 0)
+      return;
+    this->cover_send_ms_ = this->poll_ms_;
+  }
+  bool ok = this->connections_[connection].open;
+  while (ok && this->cover_send_offset_ < this->cover_length_) {
+    if (!all && (pieces == 0 || !this->transport_.can_send(connection)))
+      return;
+    pieces--;
+    const size_t length = std::min(PIECE, this->cover_length_ - this->cover_send_offset_);
+    const size_t offset = this->cover_send_offset_;
+    ok = this->send_(connection, this->cover_chunks_[offset / COVER_CHUNK_SIZE] + offset % COVER_CHUNK_SIZE, length);
+    this->cover_send_offset_ += length;
+  }
+  if (ok)
+    this->send_(connection, this->cover_send_end_, this->cover_send_end_length_);
+  this->cover_send_connection_ = NO_CONNECTION;
+}
+
+void Receiver::send_waiting_cover_() {
+  for (Connection &c : this->connections_) {
+    if (!c.open || c.cover_wanted_stream == 0)
+      continue;
+    const uint32_t stream_id = c.cover_wanted_stream;
+    c.cover_wanted_stream = 0;
+    if (this->send_cover_state_(c, stream_id, c.cover_wanted_reply))
+      return;
+    // The cover went in the meantime: the state without it
+    mrp::Cover cover{};
+    char cover_id[12];
+    const bool cover_known = this->cover_info_(&cover, cover_id, false);
+    char id[37];
+    this->make_message_id_(id);
+    this->send_to_controller_(
+        c, stream_id,
+        mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), c.cover_wanted_reply, id,
+                         this->now_playing_info_(this->poll_ms_), cover_known ? &cover : nullptr));
+  }
+}
+
+void Receiver::update_controllers_() {
+  if (this->session_owner_ == NO_CONNECTION || this->connections_[this->session_owner_].sender_answers_remote)
+    return;
+  const uint32_t now_ms = this->poll_ms_;
+  const mrp::NowPlaying now = this->now_playing_info_(now_ms);
+  mrp::Cover cover{};
+  char cover_id[12];
+  const bool cover_known = this->cover_info_(&cover, cover_id, false);
+  char id[37];
+  for (Connection &c : this->connections_) {
+    if (!c.open || !c.remote_answered || c.relay_latest == 0)
+      continue;
+    if (this->cover_send_connection_ != NO_CONNECTION &&
+        this->connections_[this->cover_send_connection_].peer.address == c.peer.address) {
+      // Sent once its cover is through: sending now would push all of the cover out at once
+      this->controllers_stale_ = true;
+      continue;
+    }
+    this->make_message_id_(id);
+    this->send_to_controller_(c, c.relay_latest,
+                              mrp::write_state(this->mrp_buffer_, sizeof(this->mrp_buffer_), nullptr, id, now,
+                                               cover_known ? &cover : nullptr));
+  }
+}
+
 void Receiver::end_relay_(uint8_t connection, uint32_t stream_id) {
   Connection &c = this->connections_[connection];
   bool ended = false;
@@ -1460,6 +1796,8 @@ bool Receiver::send_event_request_(uint32_t address, uint32_t stream_id, const u
     Connection &c = this->connections_[i];
     if (!c.open || !c.event_channel || !c.encrypted || c.peer.address != address)
       continue;
+    if (i == this->cover_send_connection_)
+      this->send_cover_piece_(true);  // The rest of the cover first: requests do not interleave
     char header[192];
     char stream_header[48] = "";
     if (stream_id != 0)
