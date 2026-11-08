@@ -470,8 +470,6 @@ async def main():
                 await relay_remote_control(control_rtsp, control_reader)
         await send(i)
         i += 1
-    if control_task is not None:
-        await control_task
     duration = len(frames) * FRAMES_PER_PACKET / SAMPLE_RATE
     if pause:
         # Pause in the middle and continue where it stopped
@@ -485,6 +483,8 @@ async def main():
                                                     "networkTimeFrac": fraction, "networkTimeTimelineID": 1})
         start += 1.3
     await asyncio.sleep(max(0, start + duration + 0.5 - time.time()))
+    if control_task is not None:
+        await control_task
     await exchange(rtsp, "TEARDOWN", {"streams": [{"type": 103}]})
     data.close()
     events.close()
