@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.0
+
+- The Home app's tile works while a Mac or Music Assistant plays: these senders do not answer it, so the receiver
+  answers it itself (title, progress, play/pause state and cover) and passes its commands on, on the event
+  connection or through `Listener::on_sender_command()` (DACP). It shows a play or pause at once.
+- `ReceiverConfig::remote_control` (on by default) turns the tile off; it takes four more connections
+  (`Receiver::connection_limit()`, at most `MAX_CONNECTIONS` 10). Several tiles can be open at once.
+- `ReceiverConfig::remote_cover_size` (256 KB): the cover kept for the tile, in pieces of 8 KB, sent paced so that
+  it neither holds up the audio nor fills the network stack's memory. `Transport::can_send()` tells whether a send
+  would wait.
+- PTP: messages read late by a busy receiver no longer count as a clock jump
+- A sender that stopped sending is no longer taken as resuming after a pause
 ## v0.6.0
 
 - HomeKit access "Only people sharing this home": devices that are not the Home's, AirPlay 1 senders and Music
