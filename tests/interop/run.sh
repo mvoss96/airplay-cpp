@@ -22,6 +22,8 @@
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
 #   HOME_PASSWORD=1 adds the receiver to a Home first and requires a password there, which the sender pairs with.
+#   LOST_EVENT_CONNECTION=1 first sets up a session without an event connection; a connection 6 s later must not be
+#   taken for one.
 #   LATE_ANCHOR=1 moves the anchor 4 s back for a while, as a misread clock did: the late audio is dropped, and
 #   playback must start again once the anchor is right.
 #   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.

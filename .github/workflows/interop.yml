@@ -52,6 +52,8 @@ jobs:
           - sender: buffered
             network: alac-late-anchor
           - sender: buffered
+            network: lost-event
+          - sender: buffered
             network: second-session
           - sender: buffered
             network: handover
@@ -114,6 +116,7 @@ jobs:
             macos-control) export PAUSE=1 REMOTE_CONTROL=1 MACOS=1 ;;
             home-password) export HOME_PASSWORD=1 ;;
             alac-late-anchor) export ALAC=1 LATE_ANCHOR=1 ;;
+            lost-event) export LOST_EVENT_CONNECTION=1 ;;
             second-session) export SECOND_SESSION=1 ;;
             handover) export HANDOVER=1 ;;
             takeover) export TAKEOVER=1 ;;

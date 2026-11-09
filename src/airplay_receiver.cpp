@@ -447,7 +447,13 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.group_id[0] = '\0';
   c.group_leader = false;
   c.frame_length = 0;
-  // An AirPlay 2 sender connects its event connection right after setting up its session
+  // An AirPlay 2 sender connects its event connection right after setting up its session. One that does not (it
+  // failed to read the answer) connects its next control connection instead: that is no event connection.
+  static constexpr uint32_t EVENT_CHANNEL_WAIT_MS = 5000;
+  if (this->event_channel_pending_ &&
+      (this->event_channel_source_ >= MAX_CONNECTIONS || !this->connections_[this->event_channel_source_].open ||
+       this->poll_ms_ - this->event_channel_since_ms_ > EVENT_CHANNEL_WAIT_MS))
+    this->event_channel_pending_ = false;
   if (this->event_channel_pending_ && this->event_channel_address_ == peer.address) {
     this->event_channel_pending_ = false;
     c.event_channel = true;

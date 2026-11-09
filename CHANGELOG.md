@@ -5,12 +5,15 @@
 - The Home app's "Require password": senders pair with it instead of the fixed PIN (status flag 0x80, `pw=true`),
   AirPlay 1 senders log in with it. It is kept in `HomeKitPairings::password`, which makes the stored pairings
   longer (applications that store them convert those of v0.7). Senders that paired with it (not transient) are
-  removed when it changes.
+  removed when it changes to another one.
 - Status flag 0x800 (remote control relay) whenever a session plays, not only in a sender's group: the iPhone that
   another sender (Music Assistant) displaced shows what plays then. A controller that only connects
   (SET_CONNECTION_STATE) gets the now playing details too.
 - A progress whose position lies far beyond the track's end (Music Assistant now and then) is ignored, instead of
   showing the track as finished
+- A sender that set up a session but never opened its event connection (Music Assistant after a failed read) had
+  its next connection taken for the event connection, and its requests went unanswered; that wait now ends
+  after 5 s
 - PTP: messages that arrive all at once after a stall of the receiver or the network are no clock jump
 - Buffered audio: after seconds of late audio while nothing plays, the jitter buffer starts over; before, the
   sender's connection was no longer read for the rest of the session

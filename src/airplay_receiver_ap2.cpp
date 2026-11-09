@@ -998,15 +998,16 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
   const char *password = nullptr;
   size_t password_length = 0;
   if (reader.get_string(reader.get(settings, "Password"), &password, &password_length)) {
-    // Empty when it is turned off. Pairings made with the old one go.
+    // Empty when it is turned off
     password_length = std::min(password_length, sizeof(this->homekit_.password) - 1);
     const bool changed = std::strncmp(this->homekit_.password, password, password_length) != 0 ||
                          this->homekit_.password[password_length] != '\0';
     std::memcpy(this->homekit_.password, password, password_length);
     this->homekit_.password[password_length] = '\0';
     if (changed) {
+      // A new password shuts out those that paired with the old one; without one, everybody may play anyway
       for (Controller &controller : this->homekit_.controllers) {
-        if ((controller.permissions & PERMISSION_WITH_PASSWORD) != 0)
+        if (password_length > 0 && (controller.permissions & PERMISSION_WITH_PASSWORD) != 0)
           controller = Controller{};
       }
       if (password_length > 0) {
@@ -1086,6 +1087,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
+      this->event_channel_since_ms_ = this->poll_ms_;
       writer.begin_dict(1);
       writer.key("eventPort");
       writer.integer(c.local.port);
@@ -1161,6 +1163,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
       this->event_channel_pending_ = true;
       this->event_channel_address_ = c.peer.address;
       this->event_channel_source_ = connection;
+      this->event_channel_since_ms_ = this->poll_ms_;
       c.pending_ptp = ptp;
       writer.begin_dict(ptp ? 3 : 2);
       writer.key("eventPort");
@@ -1190,6 +1193,7 @@ void Receiver::handle_airplay2_setup_(uint8_t connection, const char *request, s
     this->event_channel_pending_ = true;
     this->event_channel_address_ = c.peer.address;
     this->event_channel_source_ = connection;
+    this->event_channel_since_ms_ = this->poll_ms_;
     // The event connection uses the RTSP port; nothing is read from it
     writer.begin_dict(ptp ? 3 : 2);
     writer.key("eventPort");

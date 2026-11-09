@@ -249,6 +249,16 @@ async def main():
         assert await transient_pairs(HOME_PASSWORD), "did not pair with the password"
         hap_transient.TRANSIENT_PIN = HOME_PASSWORD  # What the sender pairs with from now on
 
+    if os.environ.get("LOST_EVENT_CONNECTION") == "1":
+        # A sender that set up a session but could not read the answer (Music Assistant once): it waits for it,
+        # then comes back on a new connection without an event connection, which must be answered as usual
+        _, lost = await loop.create_connection(HttpConnection, host, port)
+        await verify_connection(TRANSIENT_CREDENTIALS, lost)
+        await exchange(RtspSession(lost), "SETUP", {
+            "deviceID": "AA:BB:CC:DD:EE:FF", "sessionUUID": str(uuid.uuid4()).upper(), "timingPort": timing_port,
+            "timingProtocol": "NTP", "name": "lost", "model": "iPhone17,3", "osName": "iPhone OS"})
+        await asyncio.sleep(6)
+
     connection, rtsp, events, event_reader = await open_session()
     cipher, data = await open_stream(rtsp)
     ssrc = 0x12345678
@@ -543,6 +553,8 @@ async def main():
     events.close()
     await rtsp.exchange("TEARDOWN")
     connection.close()
+    if os.environ.get("LOST_EVENT_CONNECTION") == "1":
+        lost.close()
     if home_password:
         # Turned off again: the fixed PIN works again
         reply = await configure(home_credentials, {"Password": ""})

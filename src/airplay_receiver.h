@@ -700,6 +700,7 @@ class Receiver {
   bool event_channel_pending_{false};  // A sender is about to open its event connection, from this address:
   uint32_t event_channel_address_{0};
   uint8_t event_channel_source_{NO_CONNECTION};  // The connection that set up the session, with the event key
+  uint32_t event_channel_since_ms_{0};
   uint32_t event_cseq_{0};
   uint32_t last_sender_volume_ms_{0};
   uint32_t restarts_{0};           // Of playback in this session
