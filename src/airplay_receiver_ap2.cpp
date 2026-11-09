@@ -629,7 +629,9 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
     } else {
-      AIRPLAY_LOGW("Pairing failed%s", this->homekit_.password[0] != '\0' ? ": wrong password?" : "");
+      // A sender that pairs with a password (not transient) when none is set fails here too (Music Assistant)
+      AIRPLAY_LOGW("Pairing failed (%s)%s", this->pairing_transient_ ? "transient" : "with a PIN or password",
+                   this->homekit_.password[0] != '\0' ? ": wrong password?" : "");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     }
   } else if (state == 5 && connection == this->pairing_connection_ && !this->pairing_transient_) {

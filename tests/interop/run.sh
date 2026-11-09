@@ -126,7 +126,7 @@ if [ "$SENDER" = buffered ]; then
   if [ "$HOME_PASSWORD" = 1 ]; then
     # The Home app's password: required for pairing, announced (bit 7), never logged, then turned off again
     grep -q "Password required (6 characters)" receiver.log
-    grep -q "Pairing failed: wrong password?" receiver.log
+    grep -q "Pairing failed (transient): wrong password?" receiver.log
     grep -q "Password no longer required" receiver.log
     ! grep -q geheim receiver.log
   fi
