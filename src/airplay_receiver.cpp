@@ -853,12 +853,20 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     AIRPLAY_LOGW("Response too large");
     return false;
   }
+  // Header and body at once where they fit: a sender that reads the answer with a single read() (Music Assistant
+  // for pair-verify) otherwise gets only the header, and the body is taken for the start of the next answer
+  const size_t response_body_size = body_size;
+  if (body_size > 0 && body_size <= sizeof(response) - static_cast<size_t>(length)) {
+    std::memcpy(response + length, body_data, body_size);
+    length += static_cast<int>(body_size);
+    body_size = 0;
+  }
   if (!c.open || !this->send_(connection, reinterpret_cast<const uint8_t *>(response), static_cast<size_t>(length)) ||
       (body_size > 0 && !this->send_(connection, body_data, body_size))) {
     return false;
   }
   if (this->airplay2_)
-    AIRPLAY_LOGV("Response: %d %s (%u bytes)", status, status_text, static_cast<unsigned>(body_size));
+    AIRPLAY_LOGV("Response: %d %s (%u bytes)", status, status_text, static_cast<unsigned>(response_body_size));
   // After pair-setup everything that follows is encrypted, starting with the next request
   if (c.encrypt_after_response) {
     c.encrypt_after_response = false;

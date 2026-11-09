@@ -11,6 +11,9 @@
   (SET_CONNECTION_STATE) gets the now playing details too.
 - A progress whose position lies far beyond the track's end (Music Assistant now and then) is ignored, instead of
   showing the track as finished
+- An answer goes out in one piece where header and body fit in 1 KB: Music Assistant reads pair-verify answers
+  with a single read(), got only the header, and failed its pair-verify or took the body for the start of the
+  next, encrypted answer
 - A sender that set up a session but never opened its event connection (Music Assistant after a failed read) had
   its next connection taken for the event connection, and its requests went unanswered; that wait now ends
   after 5 s
