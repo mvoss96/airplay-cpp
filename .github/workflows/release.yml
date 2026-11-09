@@ -1,8 +1,8 @@
 name: Release
 
 # On a version tag, or started by hand with a version (which then creates the tag on the current main): verify the
-# version matches the manifests and has a CHANGELOG.md section, then publish a GitHub release with that section as
-# its notes.
+# version matches the manifests and src/airplay_version.h and has a CHANGELOG.md section, then publish a GitHub
+# release with that section as its notes.
 on:
   push:
     tags: ["v*"]
@@ -29,10 +29,12 @@ jobs:
           PROPS=$(grep '^version=' library.properties | cut -d= -f2)
           JSON=$(python3 -c "import json; print(json.load(open('library.json'))['version'])")
           IDF=$(grep '^version:' idf_component.yml | cut -d'"' -f2)
-          echo "tag=$TAG library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF"
+          HEADER=$(sed -n 's/^#define AIRPLAY_CPP_VERSION "\(.*\)"$/\1/p' src/airplay_version.h)
+          echo "tag=$TAG library.properties=$PROPS library.json=$JSON idf_component.yml=$IDF airplay_version.h=$HEADER"
           test "$TAG" = "$PROPS"
           test "$TAG" = "$JSON"
           test "$TAG" = "$IDF"
+          test "$TAG" = "$HEADER""
       - name: Extract release notes from CHANGELOG.md
         run: |
           awk -v tag="$VERSION" '
