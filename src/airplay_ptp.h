@@ -63,8 +63,9 @@ class PtpClocks {
     // The offset less the least delay: rises with every better sample, falls only as fast as clocks drift apart,
     // so that samples taken late while the receiver was busy do not move it
     int64_t estimate;
-    uint32_t below;  // Samples in a row far below the estimate: the clock was set back
-    uint32_t above;  // Samples in a row far above it: a jump that counts once it is confirmed
+    uint32_t below;          // Samples in a row far below the estimate: the clock was set back
+    int64_t below_since_us;  // When the first of them arrived
+    uint32_t above;          // Samples in a row far above it: a jump that counts once it is confirmed
     uint16_t sync_sequence;
     bool sync_pending;
     int64_t sync_received_ns;

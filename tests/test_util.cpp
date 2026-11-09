@@ -284,6 +284,34 @@ static void test_ptp_busy_receiver() {
   CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
   CHECK(found_a < before_a - 450000000 && found_a > before_a - 550000000);
   CHECK(found_b > before_b - 5000000);
+  int64_t last_jump = 0;
+  const uint32_t jumps_a = clocks.jumps(a, &last_jump);
+  const uint32_t jumps_b = clocks.jumps(b, &last_jump);
+  run(4, 0, 500000000);
+  CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
+  const int64_t steady_a = found_a;
+  const int64_t steady_b = found_b;
+  // The receiver (or the network) holds everything back for 4 s, then the messages arrive all at once, the oldest
+  // 4 s late: no clock jumped, in either direction
+  // (one clock's after the other's, as they come from different senders)
+  const int64_t stall_start_us = now_us;
+  const int64_t stall_end_us = now_us + 4000000;
+  const uint16_t stall_seq = seq;
+  for (int64_t i = 0; i < 32; i++, seq++, now_us += 125000)
+    sync(b, offset_b, stall_end_us + i * 1000 - now_us, 0);
+  now_us = stall_start_us;
+  seq = stall_seq;
+  for (int64_t i = 0; i < 32; i++, seq++, now_us += 125000)
+    sync(a, offset_a, stall_end_us + 40000 + i * 1000 - now_us, 500000000);
+  run(4, 0, 500000000);
+  CHECK(clocks.offset_ns(a, now_us, &found_a) && clocks.offset_ns(b, now_us, &found_b));
+  CHECK(found_a > steady_a - 5000000 && found_a < steady_a + 5000000);
+  CHECK(found_b > steady_b - 5000000 && found_b < steady_b + 5000000);
+  CHECK(clocks.jumps(a, &last_jump) == jumps_a && clocks.jumps(b, &last_jump) == jumps_b);
+  // A clock that really jumps back (a sender that slept) is still followed
+  run(4, 0, 3500000000LL);
+  CHECK(clocks.offset_ns(a, now_us, &found_a));
+  CHECK(found_a < steady_a - 2900000000LL && found_a > steady_a - 3100000000LL);
 }
 
 static void test_ptp() {
@@ -427,7 +455,7 @@ static void test_ptp() {
   CHECK(two.next_message(phone, message, now_us, &to, &general) == 44 && to == 0x5302a8c0u);  // Its Delay_Req
   CHECK(two.next_message(phone, message, now_us, &to, &general) == 0);                        // Nothing else to send
 
-  // A sender that slept comes back with its clock 332 s behind: three samples confirm the jump
+  // A sender that slept comes back with its clock 332 s behind: samples for a second confirm the jump
   PtpClocks sleeper;
   now_us = 40000000;
   auto sleeper_sync = [&](int64_t clock_offset) {
@@ -439,7 +467,7 @@ static void test_ptp() {
   };
   for (int i = 0; i < 16; i++)
     sleeper_sync(offset);
-  for (int i = 0; i < 3; i++)
+  for (int i = 0; i < 9; i++)
     sleeper_sync(offset - 332000000000LL);
   CHECK(sleeper.offset_ns(clock, now_us, &found) && std::llabs(found - (offset - 332000000000LL - 1000000)) < 100000);
   int64_t jump_ns = 0;
