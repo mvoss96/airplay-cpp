@@ -2162,10 +2162,14 @@ void Receiver::decode_buffered_audio_(int64_t now_us) {
     // follows goes on from there, rather than behind playback for the rest of the stream
     if (this->have_seq_ && static_cast<int16_t>(this->buffered_next_seq_ - this->next_seq_) < 0)
       this->buffered_next_seq_ = this->next_seq_;
-    // Room in the jitter buffer for the pieces of one packet
+    // Room in the jitter buffer for the pieces of one packet. An empty one starts over: late audio that was
+    // dropped moved past it while nothing played, and waiting would stop reading the sender for good.
     if (this->have_seq_ &&
-        static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_)
-      break;
+        static_cast<uint16_t>(this->buffered_next_seq_ - this->next_seq_) + pieces > this->slot_count_) {
+      if (this->buffered_packets_() > 0)
+        break;
+      this->reset_playback_();
+    }
     uint32_t rtp;
     uint32_t seq;
     const uint8_t *data;

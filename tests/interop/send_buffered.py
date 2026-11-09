@@ -438,6 +438,10 @@ async def main():
             continue
         if i == 100:
             await send(i, b"")  # As iOS sends after a flush: no audio, to be skipped
+        if os.environ.get("LATE_ANCHOR") == "1" and i in (200, 700):
+            # As the receiver took a stall for a clock jump: its anchor 4 s off for a while, then right again
+            due = start + i * FRAMES_PER_PACKET / SAMPLE_RATE - time.time()
+            await anchor(rtsp, i, due - 4 if i == 200 else due)
         if i == 140 and second_session:
             second_connection, second_rtsp, second_events, _ = await open_session()
             if handover:

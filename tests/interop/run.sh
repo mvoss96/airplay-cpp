@@ -21,6 +21,8 @@
 #   sender is macOS, whose controller the receiver answers itself); SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
+#   LATE_ANCHOR=1 moves the anchor 4 s back for a while, as a misread clock did: the late audio is dropped, and
+#   playback must start again once the anchor is right.
 #   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
 #   MA_RESUME=1 (with ALAC=1) also pauses and resumes halfway as Music Assistant does (with a flush); MA_PAUSE=1
 #   pauses for 11 s and resumes further on the timeline, without a flush.
@@ -121,6 +123,10 @@ if [ "$SENDER" = buffered ]; then
   # The sender's group is announced while it plays (status flag bit 11), and the receiver's own afterwards
   grep -q "Group 2F41DCA0-C513-4478-97E6-12AA296E0B08 (gcgl 0)" receiver.log
   grep -q "Status flags 0x804" receiver.log
+  if [ "$LATE_ANCHOR" = 1 ]; then
+    grep -q "Playback restarted" receiver.log
+    ! grep -q "not reading its connection" receiver.log
+  fi
   if [ "$REMOTE_CONTROL" = 1 ] && [ "$MACOS" != 1 ]; then
     # A controller's remote control stream was relayed to the sender, and ended
     grep -q "Remote control stream 1 for controller" receiver.log
