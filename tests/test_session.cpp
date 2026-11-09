@@ -778,6 +778,9 @@ static void test_progress() {
   CHECK(f.listener.progress_count == 9 && f.listener.progress.duration_ms == 50000);
   f.request(0, "SET_PARAMETER", "Content-Type: application/x-dmap-tagged\r\n", first);
   CHECK(f.listener.progress_count == 9);
+  // A position far beyond the end (Music Assistant, from another timeline) is no position at all
+  f.request(0, "SET_PARAMETER", "Content-Type: text/parameters\r\n", "progress: 1271849247/3473585847/1430609247");
+  CHECK(f.listener.progress_count == 9);
 
   f.request(0, "TEARDOWN");
   CHECK(f.listener.progress_count == 10 && f.listener.progress.duration_ms == 0);  // Cleared at the end

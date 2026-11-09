@@ -1283,6 +1283,12 @@ void Receiver::handle_progress_(const char *value, uint32_t now_ms) {
     return;
   const auto finish = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
   uint32_t duration = finish - start;
+  // Music Assistant sometimes sends a current position from another timeline, far outside start and end: no
+  // position at all rather than one at the end of the track
+  if (current - start > duration + SAMPLE_RATE) {
+    AIRPLAY_LOGD("Ignoring a progress outside its track (%" PRIu32 "/%" PRIu32 "/%" PRIu32 ")", start, current, finish);
+    return;
+  }
   if (duration == this->stale_progress_frames_) {
     AIRPLAY_LOGD("Ignoring the progress of the previous track");
     return;
