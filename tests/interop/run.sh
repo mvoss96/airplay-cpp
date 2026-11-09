@@ -21,6 +21,7 @@
 #   sender is macOS, whose controller the receiver answers itself); SECOND_SESSION=1
 #   sets up a second audio session without a stream, which must not stop playback; HANDOVER=1 lets it take over.
 #   TAKEOVER=1 lets another device take over for a while; the first sender must stay connected and take over again.
+#   HOME_PASSWORD=1 adds the receiver to a Home first and requires a password there, which the sender pairs with.
 #   ALAC=1 sends ALAC instead, timed as Music Assistant does when the receiver offers PTP.
 #   MA_RESUME=1 (with ALAC=1) also pauses and resumes halfway as Music Assistant does (with a flush); MA_PAUSE=1
 #   pauses for 11 s and resumes further on the timeline, without a flush.
@@ -80,7 +81,8 @@ if [ "$SENDER" = buffered ]; then
   fi
   python3 "$HERE/send_buffered.py" 127.0.0.1 5000 $INPUT $([ "$PAUSE" = 1 ] && echo --pause) \
     $([ "$REMOTE_CONTROL" = 1 ] && echo --remote-control) $([ "$MACOS" = 1 ] && echo --macos) $([ "$SECOND_SESSION" = 1 ] && echo --second-session) \
-    $([ "$HANDOVER" = 1 ] && echo --handover) $([ "$TAKEOVER" = 1 ] && echo --takeover-and-back) ||
+    $([ "$HANDOVER" = 1 ] && echo --handover) $([ "$TAKEOVER" = 1 ] && echo --takeover-and-back) \
+    $([ "$HOME_PASSWORD" = 1 ] && echo --home-password) ||
     echo "The sender failed"
   sleep 1
 elif [ "$SENDER" = pyatv ]; then
@@ -120,7 +122,14 @@ if [ "$SENDER" = buffered ]; then
   grep -q "Stream: $([ "$ALAC" = 1 ] && echo ALAC || echo AAC), AirPlay 2 buffered" receiver.log
   # The sender's group is announced while it plays (status flag bit 11), and the receiver's own afterwards
   grep -q "Group 2F41DCA0-C513-4478-97E6-12AA296E0B08 (gcgl 0)" receiver.log
-  grep -q "Status flags 0x804" receiver.log
+  grep -q "Status flags $([ "$HOME_PASSWORD" = 1 ] && echo 0xc84 || echo 0x804)" receiver.log
+  if [ "$HOME_PASSWORD" = 1 ]; then
+    # The Home app's password: required for pairing, announced (bit 7), never logged, then turned off again
+    grep -q "Password required (6 characters)" receiver.log
+    grep -q "Pairing failed: wrong password?" receiver.log
+    grep -q "Password no longer required" receiver.log
+    ! grep -q geheim receiver.log
+  fi
   if [ "$REMOTE_CONTROL" = 1 ] && [ "$MACOS" != 1 ]; then
     # A controller's remote control stream was relayed to the sender, and ended
     grep -q "Remote control stream 1 for controller" receiver.log

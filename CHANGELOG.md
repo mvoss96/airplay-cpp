@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.0
+
+- The Home app's "Require password": senders pair with it instead of the fixed PIN (status flag 0x80, `pw=true`),
+  AirPlay 1 senders log in with it. It is kept in `HomeKitPairings::password`, which makes the stored pairings
+  longer (applications that store them convert those of v0.7). Senders that paired with it (not transient) are
+  removed when it changes.
+
 ## v0.7.0
 
 - The Home app's tile works while a Mac or Music Assistant plays: these senders do not answer it, so the receiver

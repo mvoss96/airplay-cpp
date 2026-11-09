@@ -83,6 +83,10 @@ struct HomeKitPairings {
   enum AccessControl : uint8_t { ACCESS_CONTROL_OFF = 0, ACCESS_CONTROL_NETWORK = 1, ACCESS_CONTROL_HOME = 2 };
   uint8_t access_control;
   Controller controllers[MAX_CONTROLLERS];
+  /// "Require password" in the Home app (empty for none): senders pair with it instead of the fixed PIN, AirPlay 1
+  /// senders log in with it. Added in v0.8; stored pairings of v0.7 and before lack it (and are shorter).
+  static constexpr size_t PASSWORD_SIZE = 65;
+  char password[PASSWORD_SIZE];
 };
 
 /// Events of the receiver. Called on the thread that drives the receiver.
@@ -307,7 +311,7 @@ class Receiver {
   const HomeKitPairings &homekit_pairings() const { return this->homekit_; }
   /// Pairings stored before. Call before mDNS is set up from the TXT records: they hold the status flags.
   void set_homekit_pairings(const HomeKitPairings &pairings);
-  /// Status flags as in the TXT records, e.g. "0x4"
+  /// Status flags as in the TXT records, e.g. "0x4". 0x80 while a password is required.
   const char *status_flags() const { return this->status_flags_; }
 
  protected:
@@ -470,6 +474,13 @@ class Receiver {
   /// hears of it
   void homekit_changed_();
   void update_status_flags_();
+  int64_t status_flags_value_() const;
+  /// What AirPlay 1 senders log in with: config.password, else the Home app's; nullptr for none
+  const char *password_() const {
+    return this->config_.password != nullptr    ? this->config_.password
+           : this->homekit_.password[0] != '\0' ? this->homekit_.password
+                                                : nullptr;
+  }
   /// With access for people sharing the Home only, a connection that is not theirs is refused: logs why
   bool refuse_(uint8_t connection, const char *reason);
   /// Follows the group of the session that plays (polled: the session changes in many places)
@@ -637,7 +648,8 @@ class Receiver {
   // does not know: access is not restricted beyond what transient pairing allows.
   uint8_t accessory_secret_key_[ED25519_SECRET_KEY_SIZE]{};
   HomeKitPairings homekit_{};
-  char status_flags_[12]{"0x4"};  // In the TXT records
+  char status_flags_[12]{"0x4"};        // In the TXT records
+  char password_required_[6]{"false"};  // pw in the TXT records
   // The playing sender's group, as gid and gcgl in the TXT records; the receiver's own when not in one
   char group_id_[40]{};
   char group_leader_[2]{"0"};

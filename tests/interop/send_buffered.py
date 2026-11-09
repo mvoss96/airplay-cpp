@@ -84,6 +84,8 @@ def plist(value):
     return plistlib.dumps(value, fmt=plistlib.FMT_BINARY)
 
 
+HOME_PASSWORD = "geheim"
+
 # A JPEG's start (an APP0 segment, then the start of frame for 600x600) and filler, as a cover
 COVER = (bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x02, 0x58])
          + bytes(range(256)) * 160 + bytes([0xFF, 0xD9]))
@@ -161,6 +163,8 @@ async def main():
     second_session = "--second-session" in sys.argv or "--handover" in sys.argv
     handover = "--handover" in sys.argv
     takeover = "--takeover-and-back" in sys.argv
+    # The Home app adds the receiver and requires a password, which the sender then pairs with
+    home_password = "--home-password" in sys.argv
     frames = alac_packets(path) if alac else read_adts(path)
     loop = asyncio.get_running_loop()
 
@@ -199,6 +203,51 @@ async def main():
         print("buffer size", stream["streams"][0].get("audioBufferSize"))
         _, data = await asyncio.open_connection(host, stream["streams"][0]["dataPort"], local_addr=(source, 0))
         return ChaCha20Poly1305(key), data
+
+    async def transient_pairs(pin):
+        """Whether a transient pairing with this PIN gets the receiver's proof"""
+        from pyatv.auth import hap_tlv8
+        from pyatv.auth.hap_srp import SRPAuthHandler
+
+        _, pairing = await loop.create_connection(HttpConnection, host, port)
+        headers = {"X-Apple-HKP": 4, "Content-Type": "application/octet-stream"}
+        srp = SRPAuthHandler()
+        srp.initialize()
+        response = await pairing.post("/pair-setup", headers=headers, body=hap_tlv8.write_tlv({
+            hap_tlv8.TlvValue.Method: b"\x00", hap_tlv8.TlvValue.SeqNo: b"\x01", hap_tlv8.TlvValue.Flags: b"\x10"}))
+        reply = hap_tlv8.read_tlv(response.body)
+        srp.step1(pin)
+        public_key, proof = srp.step2(reply[hap_tlv8.TlvValue.PublicKey], reply[hap_tlv8.TlvValue.Salt])
+        response = await pairing.post("/pair-setup", headers=headers, body=hap_tlv8.write_tlv({
+            hap_tlv8.TlvValue.SeqNo: b"\x03", hap_tlv8.TlvValue.PublicKey: public_key,
+            hap_tlv8.TlvValue.Proof: proof}))
+        pairing.close()
+        return hap_tlv8.TlvValue.Error not in hap_tlv8.read_tlv(response.body)
+
+    async def configure(credentials, settings):
+        """As the Home app changes the speaker's access: on a connection verified with its HomeKit keys"""
+        _, home = await loop.create_connection(HttpConnection, host, port)
+        await verify_connection(credentials, home)
+        response = await home.post("/configure", body=plist({"ConfigurationDictionary": settings}),
+                                   headers={"Content-Type": "application/x-apple-binary-plist"})
+        home.close()
+        return plistlib.loads(response.body)
+
+    if home_password:
+        from pyatv.auth.hap_srp import SRPAuthHandler
+        from pyatv.protocols.airplay.auth import hap, hap_transient
+
+        _, home = await loop.create_connection(HttpConnection, host, port)
+        setup = hap.AirPlayHapPairSetupProcedure(home, SRPAuthHandler())
+        await setup.start_pairing()
+        home_credentials = await setup.finish_pairing("", 3939, None)
+        home.close()
+        reply = await configure(home_credentials, {"Enable_HK_Access_Control": True, "Access_Control_Level": 0,
+                                                   "Password": HOME_PASSWORD})
+        assert reply.get("Password") == HOME_PASSWORD, f"the password is not echoed: {reply}"
+        assert not await transient_pairs(3939), "paired without the password"
+        assert await transient_pairs(HOME_PASSWORD), "did not pair with the password"
+        hap_transient.TRANSIENT_PIN = HOME_PASSWORD  # What the sender pairs with from now on
 
     connection, rtsp, events, event_reader = await open_session()
     cipher, data = await open_stream(rtsp)
@@ -490,6 +539,11 @@ async def main():
     events.close()
     await rtsp.exchange("TEARDOWN")
     connection.close()
+    if home_password:
+        # Turned off again: the fixed PIN works again
+        reply = await configure(home_credentials, {"Password": ""})
+        assert "Password" not in reply, f"the password is still echoed: {reply}"
+        assert await transient_pairs(3939), "the fixed PIN does not pair again"
     timing.close()
     print("sent", len(frames), "packets")
 

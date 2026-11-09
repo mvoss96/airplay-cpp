@@ -228,7 +228,10 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
     this->txt_records_[this->txt_record_count_++] =
         std::strcmp(record.key, "sf") == 0 ? TxtRecord{record.key, this->status_flags_} : record;
   }
-  this->txt_records_[this->txt_record_count_++] = TxtRecord{"pw", config.password != nullptr ? "true" : "false"};
+  std::snprintf(this->password_required_, sizeof(this->password_required_), "%s",
+                config.password != nullptr ? "true" : "false");
+  // Changes with the Home app's password
+  this->txt_records_[this->txt_record_count_++] = TxtRecord{"pw", this->password_required_};
   this->txt_records_[this->txt_record_count_++] = TxtRecord{"am", config.model};
   // md: which details the receiver takes (0 = text, 1 = cover art, 2 = progress)
   size_t md_length = 0;
@@ -703,7 +706,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     airplay2 = true;
     status = airplay2_response.status;
     status_text = airplay2_response.status_text;
-  } else if (this->config_.password != nullptr && !c.authenticated && std::strcmp(method, "OPTIONS") != 0 &&
+  } else if (this->password_() != nullptr && !c.authenticated && !c.encrypted && std::strcmp(method, "OPTIONS") != 0 &&
              !this->check_authorization_(c, method, request, header_length)) {
     status = 401;
     status_text = "Unauthorized";
@@ -1346,7 +1349,8 @@ bool Receiver::check_authorization_(Connection &c, const char *method, const cha
   char ha1[MD5_SIZE * 2 + 1];
   char ha2[MD5_SIZE * 2 + 1];
   char expected[MD5_SIZE * 2 + 1];
-  int length = std::snprintf(text, sizeof(text), "%s:%s:%s", username, realm, this->config_.password);
+  const char *password = this->password_();
+  int length = std::snprintf(text, sizeof(text), "%s:%s:%s", username, realm, password != nullptr ? password : "");
   if (length <= 0 || static_cast<size_t>(length) >= sizeof(text))
     return false;
   md5_hex(text, length, ha1);

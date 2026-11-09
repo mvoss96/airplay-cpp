@@ -52,9 +52,13 @@ static constexpr uint8_t PAIRING_METHOD_ADD = 3;
 static constexpr uint8_t PAIRING_METHOD_REMOVE = 4;
 static constexpr uint8_t PAIRING_METHOD_LIST = 5;
 static constexpr uint8_t PERMISSION_ADMIN = 1;
+// Kept with a pairing made with the Home app's password, not passed on: such pairings go when the password changes
+static constexpr uint8_t PERMISSION_WITH_PASSWORD = 0x80;
 static constexpr uint8_t TLV_PERMISSIONS = 0x0b;
 static constexpr uint8_t TLV_SEPARATOR = 0xff;
 static constexpr uint8_t TLV_ERROR_MAX_PEERS = 0x04;
+/// Status flag: a password is required (the Home app's "Require password")
+static constexpr int64_t STATUS_FLAG_PASSWORD = 1 << 7;
 /// Status flag: set up for HomeKit access control through the Home app
 static constexpr int64_t STATUS_FLAG_HOMEKIT_ACCESS_CONTROL = 1 << 10;
 /// In a sender's group, as other AirPlay 2 speakers announce it while they play in one
@@ -588,7 +592,9 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
     uint8_t secret[SRP_SECRET_SIZE];
     this->config_.random(salt, sizeof(salt));
     this->config_.random(secret, sizeof(secret));
-    this->srp_->begin(PAIR_SETUP_USERNAME, PAIR_SETUP_PIN, salt, secret);
+    // With the Home app's password, senders enter it instead of the fixed PIN
+    const char *pin = this->homekit_.password[0] != '\0' ? this->homekit_.password : PAIR_SETUP_PIN;
+    this->srp_->begin(PAIR_SETUP_USERNAME, pin, salt, secret);
     std::memset(secret, 0, sizeof(secret));
     this->pairing_connection_ = connection;
     writer.add_byte(TLV_STATE, 2);
@@ -623,7 +629,7 @@ void Receiver::handle_pair_setup_(uint8_t connection, const uint8_t *body, size_
       c.encrypt_after_response = true;
       AIRPLAY_LOGD("Paired");
     } else {
-      AIRPLAY_LOGW("Pairing failed");
+      AIRPLAY_LOGW("Pairing failed%s", this->homekit_.password[0] != '\0' ? ": wrong password?" : "");
       writer.add_byte(TLV_ERROR, TLV_ERROR_AUTHENTICATION);
     }
   } else if (state == 5 && connection == this->pairing_connection_ && !this->pairing_transient_) {
@@ -677,7 +683,9 @@ bool Receiver::finish_pair_setup_(const uint8_t *body, size_t length, Tlv8Writer
   std::memcpy(info + CHACHA_KEY_SIZE + id_length, public_key, sizeof(public_key));
   if (!ed25519_verify(signature, public_key, info, CHACHA_KEY_SIZE + id_length + sizeof(public_key)))
     return false;
-  if (!this->add_controller_(id, id_length, public_key, PERMISSION_ADMIN))
+  // The Home app adding the receiver, or a sender that knows the password (no admin then)
+  const bool with_password = this->homekit_.password[0] != '\0';
+  if (!this->add_controller_(id, id_length, public_key, with_password ? PERMISSION_WITH_PASSWORD : PERMISSION_ADMIN))
     return false;
   this->homekit_changed_();
 
@@ -824,6 +832,11 @@ bool Receiver::add_controller_(const uint8_t *id, size_t length, const uint8_t *
     if (this->homekit_.controllers[i].id[0] == '\0')
       controller = &this->homekit_.controllers[i];
   }
+  // When full, a pairing made with the password makes room
+  for (size_t i = 0; controller == nullptr && i < HomeKitPairings::MAX_CONTROLLERS; i++) {
+    if ((this->homekit_.controllers[i].permissions & PERMISSION_WITH_PASSWORD) != 0)
+      controller = &this->homekit_.controllers[i];
+  }
   if (controller == nullptr)
     return false;
   std::memcpy(controller->id, id, length);
@@ -851,6 +864,7 @@ void Receiver::homekit_changed_() {
     if (!admin) {
       // Nobody left who could set it up again
       this->homekit_.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
+      this->homekit_.password[0] = '\0';
       AIRPLAY_LOGI("HomeKit access control disabled: no admin is paired");
     }
   }
@@ -859,14 +873,18 @@ void Receiver::homekit_changed_() {
     this->listener_->on_homekit_pairings(this->homekit_);
 }
 
+int64_t Receiver::status_flags_value_() const {
+  return STATUS_FLAGS |
+         (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL
+                                                                               : 0) |
+         (this->homekit_.password[0] != '\0' ? STATUS_FLAG_PASSWORD : 0) | (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0);
+}
+
 void Receiver::update_status_flags_() {
   char flags[sizeof(this->status_flags_)];
-  std::snprintf(flags, sizeof(flags), "0x%" PRIx64,
-                static_cast<uint64_t>(STATUS_FLAGS |
-                                      (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF
-                                           ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL
-                                           : 0) |
-                                      (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0)));
+  std::snprintf(flags, sizeof(flags), "0x%" PRIx64, static_cast<uint64_t>(this->status_flags_value_()));
+  std::snprintf(this->password_required_, sizeof(this->password_required_), "%s",
+                this->config_.password != nullptr || this->homekit_.password[0] != '\0' ? "true" : "false");
   if (std::strcmp(flags, this->status_flags_) == 0)
     return;
   std::memcpy(this->status_flags_, flags, sizeof(flags));
@@ -893,6 +911,7 @@ void Receiver::update_group_() {
 
 void Receiver::set_homekit_pairings(const HomeKitPairings &pairings) {
   this->homekit_ = pairings;
+  this->homekit_.password[sizeof(this->homekit_.password) - 1] = '\0';
   size_t paired = 0;
   for (Controller &controller : this->homekit_.controllers) {
     controller.id[sizeof(controller.id) - 1] = '\0';
@@ -920,6 +939,7 @@ void Receiver::handle_pairings_(const uint8_t *body, size_t length, Response &re
     size_t public_key_length = 0;
     uint8_t permissions = 0;
     tlv8_find(body, length, TLV_PERMISSIONS, &permissions, 1, &value_length);
+    permissions &= PERMISSION_ADMIN;
     if (!has_id || !tlv8_find(body, length, TLV_PUBLIC_KEY, public_key, sizeof(public_key), &public_key_length) ||
         public_key_length != sizeof(public_key)) {
       writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
@@ -946,7 +966,7 @@ void Receiver::handle_pairings_(const uint8_t *body, size_t length, Response &re
       first = false;
       writer.add(TLV_IDENTIFIER, reinterpret_cast<const uint8_t *>(controller.id), std::strlen(controller.id));
       writer.add(TLV_PUBLIC_KEY, controller.public_key, sizeof(controller.public_key));
-      writer.add_byte(TLV_PERMISSIONS, controller.permissions);
+      writer.add_byte(TLV_PERMISSIONS, controller.permissions & PERMISSION_ADMIN);
     }
   } else {
     writer.add_byte(TLV_ERROR, TLV_ERROR_UNKNOWN);
@@ -968,6 +988,28 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
   int64_t level = 0;
   const bool has_enable = reader.get_bool(reader.get(settings, "Enable_HK_Access_Control"), &enable);
   const bool has_level = reader.get_integer(reader.get(settings, "Access_Control_Level"), &level);
+  const char *password = nullptr;
+  size_t password_length = 0;
+  if (reader.get_string(reader.get(settings, "Password"), &password, &password_length)) {
+    // Empty when it is turned off. Pairings made with the old one go.
+    password_length = std::min(password_length, sizeof(this->homekit_.password) - 1);
+    const bool changed = std::strncmp(this->homekit_.password, password, password_length) != 0 ||
+                         this->homekit_.password[password_length] != '\0';
+    std::memcpy(this->homekit_.password, password, password_length);
+    this->homekit_.password[password_length] = '\0';
+    if (changed) {
+      for (Controller &controller : this->homekit_.controllers) {
+        if ((controller.permissions & PERMISSION_WITH_PASSWORD) != 0)
+          controller = Controller{};
+      }
+      if (password_length > 0) {
+        AIRPLAY_LOGI("Password required (%u characters)", static_cast<unsigned>(password_length));
+      } else {
+        AIRPLAY_LOGI("Password no longer required");
+      }
+      this->homekit_changed_();
+    }
+  }
   if (has_enable || has_level) {
     if (has_enable && !enable) {
       this->homekit_.access_control = HomeKitPairings::ACCESS_CONTROL_OFF;
@@ -980,8 +1022,9 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
   }
   // The receiver's identity and the access it has
   PlistWriter writer(this->body_buffer_, AIRPLAY2_BODY_SIZE);
+  const bool with_password = this->homekit_.password[0] != '\0';
   if (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF) {
-    writer.begin_dict(5);
+    writer.begin_dict(with_password ? 6 : 5);
     writer.key("Identifier");
     writer.string(this->pairing_id_);
     writer.key("Enable_HK_Access_Control");
@@ -992,6 +1035,11 @@ void Receiver::handle_configure_(const uint8_t *body, size_t length, Response &r
     writer.string(this->config_.name);
     writer.key("Access_Control_Level");
     writer.integer(this->homekit_.access_control == HomeKitPairings::ACCESS_CONTROL_HOME ? 1 : 0);
+    if (with_password) {
+      // Echoed like the level, which the Home app needs to turn it off again
+      writer.key("Password");
+      writer.string(this->homekit_.password);
+    }
   } else {
     writer.begin_dict(0);
   }
@@ -1882,10 +1930,7 @@ void Receiver::build_info_(Response &response) {
   writer.key("features");
   writer.integer(static_cast<int64_t>(this->airplay2_features_));
   writer.key("statusFlags");
-  writer.integer(
-      STATUS_FLAGS |
-      (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL : 0) |
-      (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0));
+  writer.integer(this->status_flags_value_());
   writer.key("gid");
   writer.string(this->group_id_);
   writer.key("model");

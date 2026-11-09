@@ -29,7 +29,8 @@ receiver can also control the sender: play, pause, next, previous and volume.
 The Home app can add the receiver. Its tile controls playback without Apple's MFi authentication, also from a
 device that is not playing (an iPad): the receiver relays remote control to the playing sender, as AirPlay 2
 speakers do. For senders that do not answer the tile (macOS, Music Assistant) the receiver answers it itself, with
-the title, progress and cover. With "Only people sharing this home", other devices are refused.
+the title, progress and cover. With "Only people sharing this home", other devices are refused; with "Require
+password", senders pair with that password.
 
 ## Usage
 
@@ -67,7 +68,7 @@ buffer.
 ## Limitations
 
 - Validated on real hardware only on the ESP32-S3; the other targets only in CI
-- A password works with AirPlay 1 only
+- `ReceiverConfig::password` turns AirPlay 2 off; AirPlay 2 takes the password set in the Home app
 
 ## Tests
 
