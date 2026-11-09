@@ -34,7 +34,7 @@ jobs:
           test "$TAG" = "$PROPS"
           test "$TAG" = "$JSON"
           test "$TAG" = "$IDF"
-          test "$TAG" = "$HEADER""
+          test "$TAG" = "$HEADER"
       - name: Extract release notes from CHANGELOG.md
         run: |
           awk -v tag="$VERSION" '
