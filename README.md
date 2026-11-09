@@ -60,7 +60,9 @@ dependencies:
 ## Memory
 
 On the ESP32, synchronized playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for buffered
-audio, so both need PSRAM. Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms buffer.
+audio, so both need PSRAM. While a Mac or Music Assistant plays, the cover for the Home app's tile is kept as well
+(its size, at most `ReceiverConfig::remote_cover_size`). Without PSRAM AirPlay 1 plays unsynchronized with a 500 ms
+buffer.
 
 ## Limitations
 
