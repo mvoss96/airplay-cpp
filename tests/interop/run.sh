@@ -122,7 +122,8 @@ cat receiver.log
 grep -q "Playback synchronized to the sender" receiver.log
 if [ "$SENDER" = buffered ]; then
   grep -q "Stream: $([ "$ALAC" = 1 ] && echo ALAC || echo AAC), AirPlay 2 buffered" receiver.log
-  # The sender's group is announced while it plays (status flag bit 11), and the receiver's own afterwards
+  # The sender's group is announced while it plays, and the receiver's own afterwards; status flag bit 11 (remote
+  # control relay) while a session plays
   grep -q "Group 2F41DCA0-C513-4478-97E6-12AA296E0B08 (gcgl 0)" receiver.log
   grep -q "Status flags $([ "$HOME_PASSWORD" = 1 ] && echo 0xc84 || echo 0x804)" receiver.log
   if [ "$HOME_PASSWORD" = 1 ]; then

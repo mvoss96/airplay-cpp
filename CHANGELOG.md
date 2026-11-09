@@ -6,6 +6,12 @@
   AirPlay 1 senders log in with it. It is kept in `HomeKitPairings::password`, which makes the stored pairings
   longer (applications that store them convert those of v0.7). Senders that paired with it (not transient) are
   removed when it changes.
+- Status flag 0x800 (remote control relay) whenever a session plays, not only in a sender's group: the iPhone that
+  another sender (Music Assistant) displaced shows what plays then. A controller that only connects
+  (SET_CONNECTION_STATE) gets the now playing details too.
+- PTP: messages that arrive all at once after a stall of the receiver or the network are no clock jump
+- Buffered audio: after seconds of late audio while nothing plays, the jitter buffer starts over; before, the
+  sender's connection was no longer read for the rest of the session
 
 ## v0.7.0
 

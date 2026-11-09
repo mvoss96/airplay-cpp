@@ -653,7 +653,7 @@ class Receiver {
   // The playing sender's group, as gid and gcgl in the TXT records; the receiver's own when not in one
   char group_id_[40]{};
   char group_leader_[2]{"0"};
-  bool in_group_{false};  // Status flag bit 11 while in a sender's group, as other AirPlay 2 speakers announce it
+  bool in_group_{false};  // In a sender's group (its gid and gcgl are announced)
   uint32_t relay_next_stream_{1};
   // For answering controllers: the track and its progress as the sender last told them, and room for a message
   Metadata now_playing_{};

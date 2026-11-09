@@ -61,8 +61,10 @@ static constexpr uint8_t TLV_ERROR_MAX_PEERS = 0x04;
 static constexpr int64_t STATUS_FLAG_PASSWORD = 1 << 7;
 /// Status flag: set up for HomeKit access control through the Home app
 static constexpr int64_t STATUS_FLAG_HOMEKIT_ACCESS_CONTROL = 1 << 10;
-/// In a sender's group, as other AirPlay 2 speakers announce it while they play in one
-static constexpr int64_t STATUS_FLAG_IN_GROUP = 1 << 11;
+/// Remote control relay: iOS connects to get what plays. Other AirPlay 2 speakers announce it while they play in a
+/// sender's group; the receiver does whenever a session plays (with remote control), so that the devices that do
+/// not play (also the one another sender displaced) show what plays.
+static constexpr int64_t STATUS_FLAG_REMOTE_CONTROL_RELAY = 1 << 11;
 /// Longest encrypted TLV of a pairing step: identifier, public key and signature, with the tag
 static constexpr size_t PAIRING_SUB_TLV_SIZE = 256;
 static constexpr char CONTROL_SALT[] = "Control-Salt";
@@ -879,7 +881,10 @@ int64_t Receiver::status_flags_value_() const {
   return STATUS_FLAGS |
          (this->homekit_.access_control != HomeKitPairings::ACCESS_CONTROL_OFF ? STATUS_FLAG_HOMEKIT_ACCESS_CONTROL
                                                                                : 0) |
-         (this->homekit_.password[0] != '\0' ? STATUS_FLAG_PASSWORD : 0) | (this->in_group_ ? STATUS_FLAG_IN_GROUP : 0);
+         (this->homekit_.password[0] != '\0' ? STATUS_FLAG_PASSWORD : 0) |
+         (this->in_group_ || (this->config_.remote_control && this->session_state_ != SessionState::NONE)
+              ? STATUS_FLAG_REMOTE_CONTROL_RELAY
+              : 0);
 }
 
 void Receiver::update_status_flags_() {
@@ -1557,6 +1562,32 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
   const bool cover_known = this->cover_info_(&cover, cover_id, false);
   bool pending_update = false;
   char id[37];
+  // The app that plays and its state, in one request
+  auto send_now_playing = [&]() {
+    size_t used = 0;
+    bool fits = true;
+    auto add = [&](size_t length) {
+      fits = fits && length != 0;
+      used += length;
+    };
+    this->make_message_id_(id);
+    add(mrp::write_now_playing_client(this->mrp_buffer_, sizeof(this->mrp_buffer_), id));
+    this->make_message_id_(id);
+    if (fits)
+      add(mrp::write_update_client(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id));
+    this->make_message_id_(id);
+    if (fits)
+      add(mrp::write_state(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, nullptr, id, now,
+                           cover_known ? &cover : nullptr));
+    this->make_message_id_(id);
+    if (fits)
+      add(mrp::write_player_properties(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id, now));
+    if (fits) {
+      this->send_to_controller_(controller, stream_id, used);
+    } else {
+      AIRPLAY_LOGW("Remote control stream %" PRIu32 ": the now playing details do not fit", stream_id);
+    }
+  };
   for (size_t i = 0; i < count; i++) {
     const mrp::Request &request = requests[i];
     AIRPLAY_LOGD("Remote control stream %" PRIu32 ": message %" PRIu32 " answered here", stream_id, request.type);
@@ -1572,36 +1603,18 @@ bool Receiver::answer_controller_(Connection &controller, uint32_t stream_id, co
             mrp::write_device_info(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id, info));
         break;
       }
-      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG: {
+      case mrp::MESSAGE_TYPE_SET_CONNECTION_STATE:
+        // A controller that connects (a Home hub for the tile) may ask for no updates: it gets the state anyway
+        send_now_playing();
+        break;
+      case mrp::MESSAGE_TYPE_CLIENT_UPDATES_CONFIG:
         // As iOS answers it: the app that plays and its state, then the confirmation the controller waits for
-        size_t used = 0;
-        bool fits = true;
-        auto add = [&](size_t length) {
-          fits = fits && length != 0;
-          used += length;
-        };
-        this->make_message_id_(id);
-        add(mrp::write_now_playing_client(this->mrp_buffer_, sizeof(this->mrp_buffer_), id));
-        this->make_message_id_(id);
-        if (fits)
-          add(mrp::write_update_client(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id));
-        this->make_message_id_(id);
-        if (fits)
-          add(mrp::write_state(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, nullptr, id, now,
-                               cover_known ? &cover : nullptr));
-        this->make_message_id_(id);
-        if (fits)
-          add(mrp::write_player_properties(this->mrp_buffer_ + used, sizeof(this->mrp_buffer_) - used, id, now));
-        if (fits)
-          this->send_to_controller_(controller, stream_id, used);
-        else
-          AIRPLAY_LOGW("Remote control stream %" PRIu32 ": the now playing details do not fit", stream_id);
+        send_now_playing();
         this->make_message_id_(id);
         this->send_to_controller_(
             controller, stream_id,
             mrp::write_reply(this->mrp_buffer_, sizeof(this->mrp_buffer_), request.identifier, id));
         break;
-      }
       case mrp::MESSAGE_TYPE_PLAYBACK_QUEUE_REQUEST:
         if (request.wants_artwork && cover_known && this->cover_send_connection_ != NO_CONNECTION) {
           // One cover at a time: this one is answered once the other is through

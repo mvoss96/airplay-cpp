@@ -1476,6 +1476,8 @@ void Receiver::set_session_state_(SessionState state) {
     return;
   this->session_state_ = state;
   this->expected_playing_ = -1;
+  if (this->airplay2_)
+    this->update_status_flags_();
   this->update_sender_address_();
   this->update_sender_name_();
   this->update_controllers_();
