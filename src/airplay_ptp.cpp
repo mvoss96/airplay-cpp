@@ -39,6 +39,10 @@ static constexpr uint32_t STEP_SAMPLES = 64;  // 8 s of Sync messages
 /// confirm it
 static constexpr int64_t JUMP_NS = 1000000000;
 static constexpr uint32_t JUMP_SAMPLES = 3;
+/// How long such samples must keep arriving: messages held back while the receiver or the network stalled arrive
+/// all at once, and far below the estimate
+static constexpr int64_t JUMP_CONFIRM_US = 1000000;
+static constexpr int64_t STEP_CONFIRM_US = 4000000;
 /// After the first second, a sample more than this above the estimate counts only when the next ones confirm it
 static constexpr int64_t RISE_NS = 2000000;
 static constexpr uint32_t RISE_CONFIRMATIONS = 3;  // middle_recent_() takes the middle of three
@@ -210,9 +214,12 @@ void PtpClocks::add_sample_(Clock &clock, int64_t sample, int64_t now_us) {
     // A clock that was set back sends samples far below the estimate for longer than the receiver is ever busy, or
     // so far below that no delay explains them: start over from them
     if (sample < clock.estimate - STEP_NS) {
-      clock.below++;
+      if (clock.below++ == 0)
+        clock.below_since_us = now_us;
+      const int64_t below_for_us = now_us - clock.below_since_us;
       const bool step =
-          clock.below >= STEP_SAMPLES || (clock.below >= JUMP_SAMPLES && sample < clock.estimate - JUMP_NS);
+          (clock.below >= STEP_SAMPLES && below_for_us >= STEP_CONFIRM_US) ||
+          (clock.below >= JUMP_SAMPLES && below_for_us >= JUMP_CONFIRM_US && sample < clock.estimate - JUMP_NS);
       if (step && this->others_late_(clock, best_recent_(clock, clock.below) - clock.estimate, now_us)) {
         // Every clock seems set back by as much at once: the receiver read their messages late, as it was busy
         AIRPLAY_LOGD("PTP messages read %" PRId64 " ms late: the receiver was busy, no clock jumped",
