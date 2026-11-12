@@ -211,7 +211,8 @@ BIN="$PREFIX/lib/airplay-cpp/airplay_receiver"
 WRAPPER="$DESTDIR$PREFIX/bin/airplay-receiver-run"
 
 step "Files"
-run install -d -m 0755 "$BIN_DIR" "$DESTDIR$PREFIX/bin" "$DESTDIR/etc/systemd/system" "$DESTDIR/etc/alsa/conf.d"
+run install -d -m 0755 "$BIN_DIR" "$DESTDIR$PREFIX/bin" "$DESTDIR/etc/default" \
+                          "$DESTDIR/etc/systemd/system" "$DESTDIR/etc/alsa/conf.d"
 
 place() {  # place MODE SOURCE TARGET
   if [ "$DRY_RUN" = 1 ]; then
