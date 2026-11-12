@@ -1,0 +1,24 @@
+[Unit]
+Description=AirPlay 1/2 receiver (airplay-cpp)
+Documentation=https://github.com/mvoss96/airplay-cpp/blob/main/docs/raspberry-pi.md
+After=network-online.target sound.target avahi-daemon.service
+Wants=network-online.target
+Requires=avahi-daemon.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+EnvironmentFile=-/etc/default/airplay-receiver
+ExecStart=@EXECUTABLE@
+# PTP uses UDP ports 319 and 320, below 1024
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# The installer and the runner are executed on Linux: keep their line endings LF,
+# also for checkouts on Windows.
+packaging/raspberry-pi/*.sh      text eol=lf
+packaging/raspberry-pi/airplay-receiver-run text eol=lf

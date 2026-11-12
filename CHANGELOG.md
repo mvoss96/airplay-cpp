@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Raspberry Pi: `packaging/raspberry-pi/install.sh` installs the POSIX example as a systemd service — build from
+  source, start at boot, mDNS announcement, headphone-jack volume from the sender. `docs/raspberry-pi.md` is the
+  guide. The wrapper starts `aplay` with a small ALSA buffer (100 ms instead of the 500 ms default): that buffer
+  is latency the receiver cannot see, and it made a Pi in an AirPlay 2 group play about half a second behind the
+  other speakers
+
 ## v0.8.0
 
 - The Home app's "Require password": senders pair with it instead of the fixed PIN (status flag 0x80, `pw=true`),

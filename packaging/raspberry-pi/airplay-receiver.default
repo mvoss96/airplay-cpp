@@ -1,0 +1,46 @@
+# Configuration of the airplay-cpp receiver on this Raspberry Pi.
+# The installer writes this file once and never touches it again, so edits
+# survive upgrades.
+#
+# After a change: sudo systemctl restart airplay-receiver
+
+# Name shown in the AirPlay list of iPhone, iPad, Mac and the Home app
+AIRPLAY_NAME=@NAME@
+
+# Fixed password (empty = none). Note: setting a password turns AirPlay 2 off
+# for senders that use it (a limitation of the library); AirPlay 2 itself uses
+# the Home app's password.
+AIRPLAY_PASSWORD=
+
+# Offer AirPlay 2 (needed for the Home app, iOS apps, Music Assistant)
+AIRPLAY2=1
+
+# PTP time base (UDP ports 319/320, the service unit grants the right).
+# Required for macOS senders and for staying in sync inside AirPlay 2 groups.
+AIRPLAY_PTP=1
+
+# ALSA output. "airplay" is the softvol control created by the installer
+# (/etc/alsa/conf.d/60-airplay-softvol.conf): headphone jack, volume from the
+# sender. For HDMI: plughw:CARD=vc4hdmi0,DEV=0 (no volume control).
+AIRPLAY_DEVICE=@DEVICE@
+
+# Apply the sender's volume to the ALSA control above
+AIRPLAY_VOLUME=@VOLUME@
+AIRPLAY_MIXER_CARD=@MIXER_CARD@
+AIRPLAY_MIXER_CONTROL=@MIXER_CONTROL@
+
+# Path of the receiver binary
+AIRPLAY_BINARY=@BINARY@
+
+# Extra arguments for the receiver (normally empty)
+AIRPLAY_EXTRA_ARGS=
+
+# ALSA output buffer in milliseconds. This buffer is latency the receiver does
+# not know about: with aplay's default of 500 ms the speaker plays about half a
+# second behind other speakers in an AirPlay 2 group. 100 ms is stable on a
+# Pi 4; 50 ms also worked, with less margin against dropouts.
+AIRPLAY_BUFFER_MS=100
+AIRPLAY_PERIOD_MS=20
+
+# 0 = off, 1 = one line per session, 2 = every packet
+AIRPLAY_DEBUG=1

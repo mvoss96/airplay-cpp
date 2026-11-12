@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Run the airplay-cpp POSIX example as a system service on a Raspberry Pi.
+
+Starts airplay_receiver, pipes its PCM output into ALSA, and announces the
+receiver on the network. The mDNS records come from the receiver itself (it
+prints the complete avahi-publish-service command line, with TXT records that
+match the running instance), so the announcement cannot drift from the binary.
+
+The volume the sender sets is applied to the ALSA softvol control, and the
+ALSA output buffer is kept small: that buffer is latency the receiver does not
+know about, and in an AirPlay 2 group it makes this speaker play late.
+
+Configuration: /etc/default/airplay-receiver
+"""
+
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+CONF_PATH = "/etc/default/airplay-receiver"
+
+DEFAULTS = {
+    "AIRPLAY_NAME": "AirPlay",
+    "AIRPLAY_PASSWORD": "",
+    "AIRPLAY2": "1",
+    "AIRPLAY_PTP": "1",
+    "AIRPLAY_DEVICE": "airplay",
+    "AIRPLAY_BINARY": "/usr/local/lib/airplay-cpp/airplay_receiver",
+    "AIRPLAY_OUTPUT_FORMAT": "cd",  # 44100 Hz, 16 bit, stereo
+    "AIRPLAY_EXTRA_ARGS": "",
+    "AIRPLAY_VOLUME": "1",
+    "AIRPLAY_MIXER_CARD": "0",
+    "AIRPLAY_MIXER_CONTROL": "AirPlay",
+    # An ALSA buffer larger than this only adds delay: aplay's default is 500 ms
+    "AIRPLAY_BUFFER_MS": "100",
+    "AIRPLAY_PERIOD_MS": "20",
+}
+
+CONF = dict(DEFAULTS)
+
+
+def load_conf(path=CONF_PATH):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            try:
+                parsed = shlex.split(value.strip(), comments=True)
+            except ValueError:
+                parsed = [value.strip()]
+            if key in CONF and parsed:
+                CONF[key] = parsed[0]
+
+
+def log(message):
+    print(message, flush=True)
+
+
+class Runner:
+    def __init__(self):
+        self.stopping = threading.Event()
+        self.publishers = []
+        self.publisher_lock = threading.Lock()
+        self.receiver = None
+        self.player = None
+        self.last_volume = 1.0
+        self.volume_enabled = CONF["AIRPLAY_VOLUME"] in ("1", "yes", "true")
+
+    # --- Volume ----------------------------------------------------------
+    def set_volume(self, level):
+        """Set the ALSA softvol control; the receiver reports 0..1."""
+        if not self.volume_enabled:
+            return
+        level = max(0.0, min(1.0, level))
+        percent = int(round(level * 99))
+        try:
+            subprocess.run(
+                ["amixer", "-q", "-c", CONF["AIRPLAY_MIXER_CARD"],
+                 "sset", CONF["AIRPLAY_MIXER_CONTROL"], "%d%%" % percent],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            log("Volume not set: %s" % error)
+
+    def set_start_volume(self):
+        """Open the output at full volume until the sender sends its own."""
+        time.sleep(1.0)
+        self.last_volume = 1.0
+        self.set_volume(1.0)
+
+    def handle_volume_line(self, line):
+        if line.startswith("Volume: ") and line.endswith("%"):
+            try:
+                level = float(line[len("Volume: "):-1]) / 100.0
+            except ValueError:
+                return
+            if level > 0.0:
+                self.last_volume = level
+            self.set_volume(level)
+        elif line == "Muted: yes":
+            self.set_volume(0.0)
+        elif line == "Muted: no":
+            self.set_volume(self.last_volume)
+
+    # --- mDNS ------------------------------------------------------------
+    def publish_from_line(self, line):
+        marker = "avahi-publish-service "
+        index = line.find(marker)
+        if index < 0:
+            return
+        try:
+            args = shlex.split(line[index + len(marker):])
+        except ValueError as error:
+            log("Cannot read the Avahi line: %s (%s)" % (line.strip(), error))
+            return
+        if not args:
+            return
+        try:
+            process = subprocess.Popen(["avahi-publish-service", *args])
+        except OSError as error:
+            log("avahi-publish-service failed: %s" % error)
+            return
+        with self.publisher_lock:
+            self.publishers.append(process)
+        log("Announced: %s %s %s (pid %d)" % (args[0], args[1], args[2], process.pid))
+
+    def read_stderr(self, stream):
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            log(line)
+            if "avahi-publish-service" in line:
+                self.publish_from_line(line)
+            self.handle_volume_line(line)
+
+    # --- Signals ---------------------------------------------------------
+    def handle_signal(self, signum, _frame):
+        log("Signal %d, stopping" % signum)
+        self.stopping.set()
+
+    # --- Start/stop ------------------------------------------------------
+    def start(self):
+        env = dict(os.environ)
+        env["AIRPLAY2"] = "1" if CONF["AIRPLAY2"] in ("1", "yes", "true") else "0"
+        env["AIRPLAY_PTP"] = "1" if CONF["AIRPLAY_PTP"] in ("1", "yes", "true") else "0"
+        if CONF["AIRPLAY_PASSWORD"]:
+            env["AIRPLAY_PASSWORD"] = CONF["AIRPLAY_PASSWORD"]
+        else:
+            env.pop("AIRPLAY_PASSWORD", None)
+
+        player_cmd = ["aplay", "-q", "-t", "raw", "-f", CONF["AIRPLAY_OUTPUT_FORMAT"],
+                      "-D", CONF["AIRPLAY_DEVICE"],
+                      "-B", str(int(CONF["AIRPLAY_BUFFER_MS"]) * 1000),
+                      "-F", str(int(CONF["AIRPLAY_PERIOD_MS"]) * 1000)]
+        self.player = subprocess.Popen(player_cmd, stdin=subprocess.PIPE)
+
+        receiver_cmd = [CONF["AIRPLAY_BINARY"], CONF["AIRPLAY_NAME"]]
+        receiver_cmd += shlex.split(CONF["AIRPLAY_EXTRA_ARGS"])
+        self.receiver = subprocess.Popen(
+            receiver_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=self.player.stdin,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        # Only the receiver writes into the pipe, otherwise aplay never sees an end.
+        self.player.stdin.close()
+        log("Receiver '%s' started (pid %d), output on %s" %
+            (CONF["AIRPLAY_NAME"], self.receiver.pid, CONF["AIRPLAY_DEVICE"]))
+        # The softvol control is created when the output is opened; start at full
+        # volume until the sender sends its own.
+        threading.Thread(target=self.set_start_volume, daemon=True).start()
+
+        threading.Thread(target=self.read_stderr, args=(self.receiver.stderr,), daemon=True).start()
+
+    def stop(self):
+        with self.publisher_lock:
+            for process in self.publishers:
+                if process.poll() is None:
+                    process.terminate()
+        if self.receiver is not None and self.receiver.poll() is None:
+            self.receiver.send_signal(signal.SIGINT)
+            try:
+                self.receiver.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.receiver.kill()
+        if self.player is not None:
+            try:
+                self.player.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.player.kill()
+        with self.publisher_lock:
+            for process in self.publishers:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+    def wait(self):
+        while not self.stopping.is_set():
+            if self.receiver.poll() is not None:
+                log("Receiver exited (code %s)" % self.receiver.returncode)
+                return self.receiver.returncode
+            if self.player.poll() is not None:
+                log("aplay exited (code %s), starting over" % self.player.returncode)
+                return 1
+            time.sleep(0.5)
+        return 0
+
+
+def main():
+    load_conf()
+    runner = Runner()
+    signal.signal(signal.SIGTERM, runner.handle_signal)
+    signal.signal(signal.SIGINT, runner.handle_signal)
+    runner.start()
+    try:
+        code = runner.wait()
+    finally:
+        runner.stop()
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()
