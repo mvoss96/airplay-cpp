@@ -197,6 +197,9 @@ v0.8.0:
 - restart of the process (`kill -9`) and of the service: mDNS re-announced,
   playback recovers on the next connect
 - headphone jack with the softvol control, sender volume applied
+- the installer through the documented `curl … | sudo bash` path on a clean
+  state, and after a reboot: the service came up on its own, receiver and both
+  mDNS records were back, port 5000 open
+- uninstall followed by install: only the configuration and the source stay
 
-Not covered yet: a multi-hour soak and a reboot of the Pi. The service is
-enabled at boot; the first boot is checked by hand.
+Not covered yet: a multi-hour soak.
