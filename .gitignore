@@ -1,5 +1,5 @@
 # Build output directories
-build/
+build*/
 out/
 
 # CMake generated files
