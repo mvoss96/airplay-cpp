@@ -36,3 +36,9 @@ build.ninja
 *.gcno
 *.profraw
 *.profdata
+
+# Python, for the interop tests (pyatv)
+.venv/
+venv/
+__pycache__/
+*.pyc
