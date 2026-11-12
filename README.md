@@ -7,7 +7,8 @@ Targets:
 - **ESP-IDF** (5, 6): ESP32 with Wi-Fi, runs on an ESP32-S3; also as an ESPHome component,
   [esphome-airplay](https://github.com/mvoss96/esphome-airplay)
 - **Arduino ESP32** (core 3): example built in CI
-- **Linux**: all interop tests run here
+- **Linux**: all interop tests run here; on a Raspberry Pi it installs as a
+  service, see [docs/raspberry-pi.md](docs/raspberry-pi.md)
 - **Zephyr**: built and streamed to in CI as `native_sim`, PTP included; not yet on a real board
 - **macOS**: POSIX example, not tested
 
@@ -58,6 +59,15 @@ dependencies:
     git: https://github.com/mvoss96/airplay-cpp.git
 ```
 
+On a Raspberry Pi, [packaging/raspberry-pi](packaging/raspberry-pi) installs the POSIX example as a service:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mvoss96/airplay-cpp/main/packaging/raspberry-pi/install.sh | sudo bash
+```
+
+It builds the source, starts the receiver at boot, announces it over mDNS and applies the sender's volume;
+[docs/raspberry-pi.md](docs/raspberry-pi.md) covers configuration, audio outputs and multi-room sync.
+
 ## Memory
 
 On the ESP32, synchronized playback buffers about 2.5 s of audio (460 KB), and AirPlay 2 adds 128 KB for buffered
@@ -67,7 +77,7 @@ buffer.
 
 ## Limitations
 
-- Validated on real hardware only on the ESP32-S3; the other targets only in CI
+- Validated on real hardware on the ESP32-S3 and on a Raspberry Pi 4; Arduino ESP32, Zephyr and macOS only in CI
 - `ReceiverConfig::password` turns AirPlay 2 off; AirPlay 2 takes the password set in the Home app
 
 ## Tests
