@@ -226,12 +226,12 @@ if [ "$SKIP_BUILD" = 0 ]; then
   place 0755 "$BINARY_SRC" "$DESTDIR$BIN"
 fi
 place 0755 "$ASSET_DIR/airplay-receiver-run" "$WRAPPER"
-say "  $BIN"
-say "  $WRAPPER"
+say "  $DESTDIR$BIN"
+say "  $DESTDIR$WRAPPER"
 
 if [ "$WANT_SOFTVOL" = 1 ]; then
   place 0644 "$ASSET_DIR/60-airplay-softvol.conf" "$DESTDIR$ALSA_CONF"
-  say "  $ALSA_CONF"
+  say "  $DESTDIR$ALSA_CONF"
 fi
 
 # The unit is generated: user, paths and the service user differ per machine.
@@ -245,10 +245,10 @@ if [ "$DRY_RUN" = 0 ]; then
 else
   say "   [dry-run] write $UNIT (User=$RUN_USER)"
 fi
-say "  $UNIT"
+say "  $DESTDIR$UNIT"
 
 if [ -f "$DESTDIR$CONF" ]; then
-  say "  $CONF kept (edit it to change the configuration)"
+  say "  $DESTDIR$CONF kept (edit it to change the configuration)"
 elif [ "$DRY_RUN" = 1 ]; then
   say "   [dry-run] write $CONF (name=$NAME, device=$DEVICE)"
 else
@@ -260,7 +260,7 @@ else
       -e "s|@BINARY@|$BIN|g" \
       "$ASSET_DIR/airplay-receiver.default" > "$DESTDIR$CONF"
   chmod 0644 "$DESTDIR$CONF"
-  say "  $CONF"
+  say "  $DESTDIR$CONF"
 fi
 
 # --- service ---------------------------------------------------------------
