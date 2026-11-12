@@ -113,7 +113,7 @@ else
   for asset in airplay-receiver-run airplay-receiver.service \
                airplay-receiver.default 60-airplay-softvol.conf; do
     curl -fsSL "$REPO_URL/raw/$REF/packaging/raspberry-pi/$asset" -o "$ASSET_DIR/$asset" ||
-      die "cannot download $asset from $REPO_URL ($REF)"
+      die "cannot download $asset from $REPO_URL ($REF); from a branch or tag, pass --ref <ref>"
   done
   say "downloaded 4 files into $ASSET_DIR"
 fi
