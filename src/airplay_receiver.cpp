@@ -1399,7 +1399,14 @@ bool Receiver::add_apple_response_(uint8_t connection, const char *challenge, ch
     return false;
   std::memcpy(data + length, &this->connections_[connection].local.address, 4);
   length += 4;
-  std::memcpy(data + length, this->config_.mac, sizeof(this->config_.mac));
+  // The Apple-Challenge only reaches the pure AirPlay 1 _raop service (iTunes); AirPlay 2 senders never send it.
+  // That service announces the MAC with the locally administered bit of the first octet flipped, and iTunes
+  // checks the signature against the announced MAC, so sign over the flipped MAC when iTunes support is on.
+  uint8_t mac[sizeof(this->config_.mac)];
+  std::memcpy(mac, this->config_.mac, sizeof(mac));
+  if (this->config_.itunes)
+    mac[0] ^= 0x02;
+  std::memcpy(data + length, mac, sizeof(mac));
 
   uint8_t signature[RSA_SIGNATURE_SIZE];
   if (!this->crypto_.sign_challenge(data, SIGNED_SIZE, signature))

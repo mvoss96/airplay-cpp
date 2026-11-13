@@ -147,6 +147,11 @@ struct ReceiverConfig {
   const char *model{"airplay-cpp"};
   /// MAC address of the network interface; part of the mDNS name and of the Apple-Challenge answer
   uint8_t mac[6]{};
+  /// For iTunes for Windows: the host announces a second, pure AirPlay 1 _raop service whose MAC has the locally
+  /// administered bit of the first octet flipped, so iTunes lists it apart from the AirPlay 2 service. iTunes
+  /// checks the Apple-Challenge signature against the announced MAC, so with this set the Apple-Response is signed
+  /// over that flipped MAC. AirPlay 2 senders (iPhone, Mac, the Home app) do not use the Apple-Challenge.
+  bool itunes{false};
   /// AirPlay 2: the receiver's HomeKit key and pairing identifier come from the MAC address and this number. A
   /// different number makes it a new accessory for the Home app (0: from the MAC address alone).
   uint32_t homekit_identity{0};
