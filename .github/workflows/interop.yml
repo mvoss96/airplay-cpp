@@ -21,7 +21,10 @@ jobs:
     # ChaCha20-Poly1305 audio), one of them in the order iOS uses, one after a HomeKit pairing as the Home app makes it. The buffered runs send AirPlay 2 buffered audio
     # (AAC over TCP, as iOS streams most apps; ALAC in the alac runs, as Music Assistant sends it and pauses it) and compare the
     # output with ffmpeg's decoding. pyatv is deliberately unpinned; srptools 2 changed an API pyatv 0.18 uses.
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, whose PipeWire RAOP sink intermittently drops the encrypted stream
+    # right after connecting ("Connection closed ... other"); 24.04 streams reliably. Reused by projects that pin
+    # this library (e.g. the ESPHome component), so the pin fixes their interop job too.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20  # A stuck job fails instead of running for hours
     strategy:
       fail-fast: false
