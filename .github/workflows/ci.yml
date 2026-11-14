@@ -38,7 +38,8 @@ jobs:
 
   mbedtls4:
     # mbedTLS 4 (as in ESP-IDF 6) has only the PSA crypto API: unit tests and the encrypted PipeWire stream
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: the Stream step runs the PipeWire interop, which flakes on 26.04 (as in the interop job)
+    runs-on: ubuntu-24.04
     env:
       MBEDTLS_VERSION: v4.0.0
     steps:
