@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.9.0
+
+- `ReceiverConfig::itunes`: the Apple-Challenge response is signed with the MAC whose first octet has the
+  locally-administered bit flipped. iTunes for Windows groups AirPlay speakers by the MAC in the `_raop` instance
+  name and verifies the Apple-Response signature against the announced MAC, so a receiver that wants iTunes to
+  reach it announces a second, pure AirPlay 1 `_raop` service under such a flipped MAC; this flag makes the one
+  receiver answer the challenge for that MAC too. Senders that pair (AirPlay 2) never send the Apple-Challenge and
+  are unaffected.
+
 ## v0.8.0
 
 - The Home app's "Require password": senders pair with it instead of the fixed PIN (status flag 0x80, `pw=true`),

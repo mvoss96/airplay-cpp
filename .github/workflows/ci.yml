@@ -98,7 +98,9 @@ jobs:
           ctest --test-dir build-cmake --output-on-failure
 
   format:
-    runs-on: ubuntu-latest
+    # Pin the image: ubuntu-latest's clang-format moves with the runner (24.04 ships 18, 26.04 ships 21) and the
+    # two disagree on formatting, so an unpinned job breaks on code it passed before.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: clang-format
