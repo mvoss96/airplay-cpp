@@ -8,6 +8,10 @@ namespace airplay {
 inline constexpr size_t RSA_SIGNATURE_SIZE = 256;
 inline constexpr size_t AES_KEY_SIZE = 16;
 inline constexpr size_t AES_BLOCK_SIZE = 16;
+inline constexpr size_t FAIRPLAY_SETUP_FIRST_SIZE = 16;  // The sender's first FairPlay setup message
+inline constexpr size_t FAIRPLAY_SETUP_P2_SIZE = 142;    // The first FairPlay setup reply (this receiver sends it)
+inline constexpr size_t FAIRPLAY_SETUP_P3_SIZE = 164;    // The second FairPlay setup message (the sender sends it)
+inline constexpr size_t FAIRPLAY_KEY_SIZE = 72;          // The decoded "fpaeskey" SDP attribute
 
 /// Private key of the AirPort Express (PEM, null terminated), published in 2011 and used by every open source
 /// AirPlay 1 receiver. Senders check the Apple-Challenge signature and encrypt the session key with it.
@@ -29,6 +33,20 @@ class Crypto {
   /// @brief Decrypts the session key from the "rsaaeskey" SDP attribute (RSA-OAEP with SHA-1).
   /// @param key Receives AES_KEY_SIZE bytes.
   virtual bool decrypt_session_key(const uint8_t *encrypted, size_t length, uint8_t *key) = 0;
+
+  /// @brief Recovers the AirPlay 1 audio key from iTunes's FairPlay "fpaeskey" SDP attribute (FairPlay v2),
+  /// using the two messages of the /fp-setup handshake. iTunes sends fpaeskey instead of
+  /// rsaaeskey when the receiver announces FairPlay (feature bit 14). The default returns false, so receivers that
+  /// do not implement it fall back to the rsaaeskey path.
+  /// @param p2 The FAIRPLAY_SETUP_P2_SIZE-byte setup reply this receiver sent (fairplay_setup_reply, sequence 2).
+  /// @param p3 The FAIRPLAY_SETUP_P3_SIZE-byte second setup message from the sender (sequence 3).
+  /// @param blob The FAIRPLAY_KEY_SIZE-byte decoded fpaeskey.
+  /// @param key Receives AES_KEY_SIZE bytes.
+  /// @return false when FairPlay is not supported or the key does not authenticate.
+  virtual bool decrypt_fairplay_key(const uint8_t * /*p2*/, const uint8_t * /*p3*/, const uint8_t * /*blob*/,
+                                    uint8_t * /*key*/) {
+    return false;
+  }
 
   /// @brief Sets the AES-128 key for decrypt_audio().
   virtual bool set_audio_key(const uint8_t *key) = 0;

@@ -380,6 +380,109 @@ static void test_fairplay_setup() {
 
   message[0] = 'X';
   CHECK(fairplay_setup_reply(message, 164, reply, sizeof(reply)) == 0);
+
+  // iTunes for Windows (AirPlay 1) sends FairPlay version 2: the same reply bodies, its version echoed
+  uint8_t v2[164] = {'F', 'P', 'L', 'Y', 2, 1, 1, 0, 0, 0, 0, 4, 2, 0, 1, 0xbb};
+  CHECK(fairplay_setup_reply(v2, 16, reply, sizeof(reply)) == 142);
+  CHECK(same(reply, "46504c5902010200000000820201cf32a257"));
+  v2[6] = 3;
+  for (size_t i = 144; i < 164; i++)
+    v2[i] = static_cast<uint8_t>(i);
+  CHECK(fairplay_setup_reply(v2, 164, reply, sizeof(reply)) == 32);
+  CHECK(same(reply, "46504c590201040000000014"));
+  CHECK(reply[12] == 144 && reply[31] == 163);
+}
+
+static void test_fairplay_key() {
+#ifdef AIRPLAY_HAS_MBEDTLS
+  // An iTunes FairPlay session: the receiver's setup reply, the sender's second setup message
+  // and its a=fpaeskey give this audio key
+  const std::vector<uint8_t> reply = hex(
+      "46504c5902010200000000820201cf32a25714b2524f8aa0ad7af164e37bcf4424e200047efc0ad67afcd95ded1c2730bb591b962ed63a9"
+      "c4ded88ba8fc78de64d91ccfd5c7b56da88e31f5cceafc7431995a01665a54e1939d25b94db64b9e45d8d063e1e6af07e9656162b0efa40"
+      "4275ea5a44d9591c7256b9fbe6513898b80227721988571650942ad946688a");
+  const std::vector<uint8_t> second = hex(
+      "46504c590201030000000098018f1a9c50a2b1a02325ec8e046547d1c18f3daf2808117aa3d8fc1a96bdfe68c3d25180f8536161439026e"
+      "5865c06a43f701762be9745a8cbdf81df3f67705aa13493489bfe9e235e26c6b7b18c97d02b8e2912fb39eff643b2b832b8819103b5fdc3"
+      "cbd806e47f4fc2d42b607270ec497c0c73fae9842af6e3d71245a2c5c27e69972a6d4867913cdf0b69f1c2491f5de54a6a6cb55e14");
+  const std::vector<uint8_t> blob = hex(
+      "46504c59010201000000003c00000000bcb464d6e39a9582900f566ccea7d1b9000000100ed6a4cbb73dbcd4afe8a76236167ca510cbf00"
+      "6af22fc5289fbfdc2bb423fd2cc48b82c");
+  CHECK(reply.size() == FAIRPLAY_SETUP_P2_SIZE && second.size() == FAIRPLAY_SETUP_P3_SIZE &&
+        blob.size() == FAIRPLAY_KEY_SIZE);
+  // The reply is the one fairplay_setup_reply() gives for its first message (version 2, mode 1)
+  const uint8_t first[FAIRPLAY_SETUP_FIRST_SIZE] = {'F', 'P', 'L', 'Y', 2, 1, 1, 0, 0, 0, 0, 4, 2, 0, 1, 0xbb};
+  uint8_t made[FAIRPLAY_SETUP_REPLY_SIZE];
+  CHECK(fairplay_setup_reply(first, sizeof(first), made, sizeof(made)) == sizeof(made) &&
+        std::memcmp(made, reply.data(), sizeof(made)) == 0);
+  MbedtlsCrypto crypto;
+  CHECK(crypto.init());
+  uint8_t key[AES_KEY_SIZE];
+  CHECK(crypto.decrypt_fairplay_key(reply.data(), second.data(), blob.data(), key));
+  CHECK(same(key, "de19c9c675978ff4b788d26d7bbd0e3f"));
+  // A wrong authentication tag is refused
+  std::vector<uint8_t> tampered = blob;
+  tampered[36] ^= 0x01;
+  CHECK(!crypto.decrypt_fairplay_key(reply.data(), second.data(), tampered.data(), key));
+  // Sessions in the other modes, each with its own AES key and IV
+  struct Session {
+    const char *reply;
+    const char *second;
+    const char *blob;
+    const char *key;
+  };
+  static const Session SESSIONS[] = {
+      {"46504c59020102000000008202000f9f3f9e0a2521dbdf312ab2bfb29e8d232b6376a8c818701d22ae93d82737feaf9db4fdf41c2dba"
+       "9d1f49caaabf6591ac1f7bc6f7e0663d21afe01565953eab81f418ceed095adb7c3d0e254909a79831d49c3982973434facb42c63a1c"
+       "d911a6fe941a8a6d4a743b46c3a7649e44c78955e49d8155009549c4e2f7a3f6d5ba",
+       "46504c590201030000000098008f1a9c97be1b192e55304c25698fa2bdb61135239b9721f558ecf9a1d94342cca2cdea20ef4ae24be7"
+       "7ccb8c7de780fa9a4838b23b845dcc9a827e849be84638cacdd90736bc81d20099d368055b2c3b60ee7a4711f53101024078fe6ab7ff"
+       "723e2b8a4d66dc434cd83b17d9492476d38f8e0709e23e5577e39075067f72de9ccbe063340579b05e51b115d9261b44aab161804d65"
+       "5e91",
+       "46504c59010201000000003c000000001acc14be13cd47dd6fa975f243fd484900000010d8b1777d9c20c60c62b5e8da4ba34eda3a04"
+       "f09331fd9f264a9d69b63d1a281cd87a7c99",
+       "7f08d6ff14862c7e09ed76dd22ea8b75"},
+      {"46504c5902010200000000820202c169a352eeed35b18cdd9c58d64f16c1519a89eb5317bd0d4336cd68f638ff9d016a5b52b7fa9216"
+       "b2b65482c78444118121a2c7fed83db7119e9182aad7d18c7063e2a457555910af9e0efc76347d164043807f581ee4fbe42ca9dedc1b"
+       "5eb2a3aa3d2ecd59e7eee70b3629f22afd161d877353ddb99adc8e07006e56f850ce",
+       "46504c590201030000000098028f1a9cd6c300b29df398432eaa8803de5c59aa898bfccfb8c06285722d9a9b15789108419c0603bb3d"
+       "741d025b86ef3f9796f723f3aef708318c23f886bdf91145422f7d9b8cdd57de73726ddfbf4f0faf69c467db66d3157af57efe88e776"
+       "3d26c26bde8234cf89b06ca046fe6831d7260fb983bf1e382fb11df7460b405c62fa3fcfd8faf7e9e35efee9b6e86cb0a742df301b4c"
+       "daf4",
+       "46504c59010201000000003c00000000189a010ee1cbf6c69e8c3bc746cc5d71000000100c4a64d74e9aabd01fb678c9b70138ba08a5"
+       "94e91bd18bea9792f7b97705c0a00cf324ea",
+       "e6498a1ce9c22e759fe5bc3cfb8419ed"},
+      {"46504c59020102000000008202039001e1727e0f57f9f5880db104a6257a23f5cfff1abbe1e93045251afb97eb9fc0011ebe0f3a81df"
+       "5b691d76acb2f7a5c708e3d328f56bb39dbde5f29c8a17f481487e3ae863c678325422e6f78e166d18aa7fd636258bce28726f661f73"
+       "8893ce44311e4be6c0535193e5ef72e8686233729c227d820c999445d89246c8c359",
+       "46504c590201030000000098038f1a9c79f96dac8eb34b6347a7feb1814f2b4155c76f3a113cb93307cdfdabce507787e288d19eab6b"
+       "670fa27edca827b1d78a7ee10ef97c1738919c6d09157820429bc01b18cce7ce9ad65371239a788a9a9551e6afecaae7878e05080863"
+       "54565c02ff5eb1e0b7c97abb7f71ed730bc106177545e2dc86c99b47068c8ced4a48eb0a3a3bb7d54e65bb30ce9d93bc3af5b255b716"
+       "aab2",
+       "46504c59010201000000003c000000009d23a162313c610929d6b275a527606500000010957993f7d592292ef3806152f2d2488c13ca"
+       "6625d8c5102ba4dcecf5dc166bb08daecb73",
+       "b3c7113bbd42b3db233b33c953428ce6"},
+  };
+  for (const Session &session : SESSIONS) {
+    const std::vector<uint8_t> session_reply = hex(session.reply);
+    const std::vector<uint8_t> session_second = hex(session.second);
+    const std::vector<uint8_t> session_blob = hex(session.blob);
+    CHECK(session_reply.size() == FAIRPLAY_SETUP_P2_SIZE && session_second.size() == FAIRPLAY_SETUP_P3_SIZE &&
+          session_blob.size() == FAIRPLAY_KEY_SIZE);
+    // The reply is the receiver's own for that mode
+    uint8_t mode_first[FAIRPLAY_SETUP_FIRST_SIZE];
+    std::memcpy(mode_first, first, sizeof(mode_first));
+    mode_first[14] = session_reply[13];
+    CHECK(fairplay_setup_reply(mode_first, sizeof(mode_first), made, sizeof(made)) == sizeof(made) &&
+          std::memcmp(made, session_reply.data(), sizeof(made)) == 0);
+    CHECK(crypto.decrypt_fairplay_key(session_reply.data(), session_second.data(), session_blob.data(), key) &&
+          same(key, session.key));
+  }
+  // Only modes 0 to 3 exist
+  std::vector<uint8_t> unknown_mode = reply;
+  unknown_mode[13] = 4;
+  CHECK(!crypto.decrypt_fairplay_key(unknown_mode.data(), second.data(), blob.data(), key));
+#endif
 }
 
 static void test_packet_queue() {
@@ -457,6 +560,7 @@ int main() {
   test_plist_reader();
   test_plist_writer();
   test_fairplay_setup();
+  test_fairplay_key();
   test_packet_queue();
   test_realtime_stream_key();
   return finish("test_hap");

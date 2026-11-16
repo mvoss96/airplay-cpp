@@ -7,7 +7,7 @@
 
 namespace airplay {
 
-/// "FPLY", version 3, type 1 (setup), sequence 2, then the length (130) and mode bytes
+/// "FPLY", version (overwritten with the sender's 2 or 3), type 1 (setup), sequence 2, length (130), then the mode
 static const uint8_t REPLY_PREFIX[13] = {
     0x46, 0x50, 0x4c, 0x59, 0x03, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x82, 0x02,
 };
@@ -54,7 +54,7 @@ static const uint8_t REPLY_BODIES[4][128] = {
         0x33, 0x72, 0x9c, 0x22, 0x7d, 0x82, 0x0c, 0x99, 0x94, 0x45, 0xd8, 0x92, 0x46, 0xc8, 0xc3, 0x59,
     },
 };
-/// Header of the second reply, which ends with the last 20 bytes of the sender's message
+/// Header of the second reply (version byte overwritten with the sender's), which ends with the message's last 20 bytes
 static const uint8_t SECOND_REPLY_HEADER[12] = {
     0x46, 0x50, 0x4c, 0x59, 0x03, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x14,
 };
@@ -69,20 +69,26 @@ static constexpr size_t SECOND_REPLY_SUFFIX = 20;
 
 size_t fairplay_setup_reply(const uint8_t *message, size_t length, uint8_t *reply, size_t size) {
   if (message == nullptr || length < FIRST_MESSAGE_SIZE || std::memcmp(message, "FPLY", 4) != 0 ||
-      message[VERSION_POSITION] != 3 || message[TYPE_POSITION] != 1 || size < FAIRPLAY_SETUP_REPLY_SIZE) {
+      (message[VERSION_POSITION] != 2 && message[VERSION_POSITION] != 3) || message[TYPE_POSITION] != 1 ||
+      size < FAIRPLAY_SETUP_REPLY_SIZE) {
     return 0;
   }
+  // AirPlay 2 senders use FairPlay version 3, iTunes for Windows (AirPlay 1 / RAOP) version 2. The known-answer
+  // reply bodies are the same for both; only the version byte in the reply header is echoed back from the message.
+  const uint8_t version = message[VERSION_POSITION];
   if (message[SEQUENCE_POSITION] == 1 && length == FIRST_MESSAGE_SIZE) {
     const uint8_t mode = message[MODE_POSITION];
     if (mode >= 4)
       return 0;
     std::memcpy(reply, REPLY_PREFIX, sizeof(REPLY_PREFIX));
+    reply[VERSION_POSITION] = version;
     reply[sizeof(REPLY_PREFIX)] = mode;
     std::memcpy(reply + sizeof(REPLY_PREFIX) + 1, REPLY_BODIES[mode], sizeof(REPLY_BODIES[mode]));
     return FAIRPLAY_SETUP_REPLY_SIZE;
   }
   if (message[SEQUENCE_POSITION] == 3 && length == SECOND_MESSAGE_SIZE) {
     std::memcpy(reply, SECOND_REPLY_HEADER, sizeof(SECOND_REPLY_HEADER));
+    reply[VERSION_POSITION] = version;
     std::memcpy(reply + sizeof(SECOND_REPLY_HEADER), message + length - SECOND_REPLY_SUFFIX, SECOND_REPLY_SUFFIX);
     return sizeof(SECOND_REPLY_HEADER) + SECOND_REPLY_SUFFIX;
   }
