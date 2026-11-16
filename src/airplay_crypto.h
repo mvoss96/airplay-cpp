@@ -1,5 +1,7 @@
 #pragma once
 
+#include "airplay_fairplay.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -8,10 +10,6 @@ namespace airplay {
 inline constexpr size_t RSA_SIGNATURE_SIZE = 256;
 inline constexpr size_t AES_KEY_SIZE = 16;
 inline constexpr size_t AES_BLOCK_SIZE = 16;
-inline constexpr size_t FAIRPLAY_SETUP_FIRST_SIZE = 16;  // The sender's first FairPlay setup message
-inline constexpr size_t FAIRPLAY_SETUP_P2_SIZE = 142;    // The first FairPlay setup reply (this receiver sends it)
-inline constexpr size_t FAIRPLAY_SETUP_P3_SIZE = 164;    // The second FairPlay setup message (the sender sends it)
-inline constexpr size_t FAIRPLAY_KEY_SIZE = 72;          // The decoded "fpaeskey" SDP attribute
 
 /// Private key of the AirPort Express (PEM, null terminated), published in 2011 and used by every open source
 /// AirPlay 1 receiver. Senders check the Apple-Challenge signature and encrypt the session key with it.
@@ -34,17 +32,33 @@ class Crypto {
   /// @param key Receives AES_KEY_SIZE bytes.
   virtual bool decrypt_session_key(const uint8_t *encrypted, size_t length, uint8_t *key) = 0;
 
-  /// @brief Recovers the AirPlay 1 audio key from iTunes's FairPlay "fpaeskey" SDP attribute (FairPlay v2),
-  /// using the two messages of the /fp-setup handshake. iTunes sends fpaeskey instead of
-  /// rsaaeskey when the receiver announces FairPlay (feature bit 14). The default returns false, so receivers that
-  /// do not implement it fall back to the rsaaeskey path.
+  /// Recover the FairPlay v2 audio key from the setup messages and decoded fpaeskey attribute.
+  /// The shared implementation uses the optional AES and SHA-1 primitives below.
   /// @param p2 The FAIRPLAY_SETUP_P2_SIZE-byte setup reply this receiver sent (fairplay_setup_reply, sequence 2).
   /// @param p3 The FAIRPLAY_SETUP_P3_SIZE-byte second setup message from the sender (sequence 3).
   /// @param blob The FAIRPLAY_KEY_SIZE-byte decoded fpaeskey.
   /// @param key Receives AES_KEY_SIZE bytes.
   /// @return false when FairPlay is not supported or the key does not authenticate.
-  virtual bool decrypt_fairplay_key(const uint8_t * /*p2*/, const uint8_t * /*p3*/, const uint8_t * /*blob*/,
-                                    uint8_t * /*key*/) {
+  virtual bool decrypt_fairplay_key(const uint8_t *p2, const uint8_t *p3, const uint8_t *blob, uint8_t *key);
+
+  /// Optional AES-128-CBC with an explicit key. The IV is not modified; length must be a whole number of blocks.
+  virtual bool aes128_cbc_decrypt(const uint8_t * /*key*/, const uint8_t * /*iv*/, const uint8_t * /*input*/,
+                                  uint8_t * /*output*/, size_t /*length*/) {
+    return false;
+  }
+
+  /// Optional AES-128-ECB with an explicit key. Length must be a whole number of blocks.
+  virtual bool aes128_ecb_decrypt(const uint8_t * /*key*/, const uint8_t * /*input*/, uint8_t * /*output*/,
+                                  size_t /*length*/) {
+    return false;
+  }
+
+  /// Optional SHA-1. Writes 20 bytes to digest on success.
+  virtual bool sha1(const uint8_t * /*data*/, size_t /*length*/, uint8_t * /*digest*/) { return false; }
+
+  /// Optional HMAC-SHA1. Writes 20 bytes to mac on success.
+  virtual bool hmac_sha1(const uint8_t * /*key*/, size_t /*key_length*/, const uint8_t * /*data*/, size_t /*length*/,
+                         uint8_t * /*mac*/) {
     return false;
   }
 

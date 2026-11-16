@@ -3,6 +3,9 @@
 
 #include "airplay_fairplay.h"
 
+#include "airplay_crypto.h"
+#include "airplay_util.h"
+
 #include <cstring>
 
 namespace airplay {
@@ -63,12 +66,10 @@ static constexpr size_t VERSION_POSITION = 4;
 static constexpr size_t TYPE_POSITION = 5;
 static constexpr size_t SEQUENCE_POSITION = 6;
 static constexpr size_t MODE_POSITION = 14;
-static constexpr size_t FIRST_MESSAGE_SIZE = 16;
-static constexpr size_t SECOND_MESSAGE_SIZE = 164;
 static constexpr size_t SECOND_REPLY_SUFFIX = 20;
 
 size_t fairplay_setup_reply(const uint8_t *message, size_t length, uint8_t *reply, size_t size) {
-  if (message == nullptr || length < FIRST_MESSAGE_SIZE || std::memcmp(message, "FPLY", 4) != 0 ||
+  if (message == nullptr || length < FAIRPLAY_SETUP_FIRST_SIZE || std::memcmp(message, "FPLY", 4) != 0 ||
       (message[VERSION_POSITION] != 2 && message[VERSION_POSITION] != 3) || message[TYPE_POSITION] != 1 ||
       size < FAIRPLAY_SETUP_REPLY_SIZE) {
     return 0;
@@ -76,7 +77,7 @@ size_t fairplay_setup_reply(const uint8_t *message, size_t length, uint8_t *repl
   // AirPlay 2 senders use FairPlay version 3, iTunes for Windows (AirPlay 1 / RAOP) version 2. The known-answer
   // reply bodies are the same for both; only the version byte in the reply header is echoed back from the message.
   const uint8_t version = message[VERSION_POSITION];
-  if (message[SEQUENCE_POSITION] == 1 && length == FIRST_MESSAGE_SIZE) {
+  if (message[SEQUENCE_POSITION] == 1 && length == FAIRPLAY_SETUP_FIRST_SIZE) {
     const uint8_t mode = message[MODE_POSITION];
     if (mode >= 4)
       return 0;
@@ -86,13 +87,76 @@ size_t fairplay_setup_reply(const uint8_t *message, size_t length, uint8_t *repl
     std::memcpy(reply + sizeof(REPLY_PREFIX) + 1, REPLY_BODIES[mode], sizeof(REPLY_BODIES[mode]));
     return FAIRPLAY_SETUP_REPLY_SIZE;
   }
-  if (message[SEQUENCE_POSITION] == 3 && length == SECOND_MESSAGE_SIZE) {
+  if (message[SEQUENCE_POSITION] == 3 && length == FAIRPLAY_SETUP_P3_SIZE) {
     std::memcpy(reply, SECOND_REPLY_HEADER, sizeof(SECOND_REPLY_HEADER));
     reply[VERSION_POSITION] = version;
     std::memcpy(reply + sizeof(SECOND_REPLY_HEADER), message + length - SECOND_REPLY_SUFFIX, SECOND_REPLY_SUFFIX);
     return sizeof(SECOND_REPLY_HEADER) + SECOND_REPLY_SUFFIX;
   }
   return 0;
+}
+
+// iTunes for Windows wraps the audio key in a 72-byte blob: HEADER, A (16 bytes), LENGTH, an HMAC-SHA1 tag
+// (20 bytes) and the encrypted key (16 bytes). Its keys come from the two FairPlay setup messages.
+bool Crypto::decrypt_fairplay_key(const uint8_t *p2, const uint8_t *p3, const uint8_t *blob, uint8_t *key) {
+  static const uint8_t HEADER[16] = {0x46, 0x50, 0x4c, 0x59, 0x01, 0x02, 0x01, 0x00,
+                                     0x00, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00};
+  static const uint8_t LENGTH[4] = {0x00, 0x00, 0x00, 0x10};
+  if (std::memcmp(blob, HEADER, sizeof(HEADER)) != 0 || std::memcmp(blob + 32, LENGTH, sizeof(LENGTH)) != 0)
+    return false;
+
+  // 128 bytes of each setup message (the reply's after its header, the second message's), each decrypted with
+  // AES-128-CBC under a fixed key and IV of the mode the sender chose (the reply's byte 13); then salt || second ||
+  // reply || salt is hashed into the keys
+  static const uint8_t KEYS[4][16] = {
+      {0xb5, 0xf1, 0x26, 0xdd, 0x6e, 0x3e, 0x05, 0xa4, 0x1a, 0x96, 0x33, 0x61, 0x15, 0x3e, 0xe5, 0xdc},
+      {0xeb, 0xa1, 0xf1, 0x18, 0xef, 0x08, 0xb7, 0x1c, 0x60, 0xd5, 0x0f, 0xf0, 0xa9, 0x8c, 0x94, 0xb4},
+      {0x29, 0x7b, 0x84, 0x83, 0x41, 0x7c, 0xc9, 0xd5, 0x1b, 0x82, 0xd1, 0x7b, 0xba, 0xa7, 0x61, 0x9d},
+      {0x21, 0x41, 0x78, 0x3a, 0xac, 0x0b, 0x0b, 0x27, 0x19, 0x56, 0xcd, 0x1d, 0xbd, 0x01, 0x95, 0xc2},
+  };
+  static const uint8_t IVS[4][16] = {
+      {0xe7, 0xc3, 0x45, 0xf5, 0x00, 0x13, 0xe4, 0x93, 0x1e, 0x0a, 0x33, 0xe2, 0x39, 0xe8, 0xb3, 0xdb},
+      {0x3e, 0x08, 0x3f, 0x58, 0x4f, 0xf9, 0x88, 0x3e, 0x49, 0x2c, 0xf3, 0x65, 0x49, 0x02, 0x78, 0xe2},
+      {0xa7, 0xed, 0x28, 0xe5, 0x6a, 0x2f, 0x8a, 0x6f, 0x7e, 0x46, 0xfa, 0x76, 0x5a, 0x6c, 0x04, 0x0a},
+      {0x69, 0x8a, 0x2b, 0x3c, 0xf2, 0x6a, 0xa8, 0x29, 0xb1, 0x75, 0xba, 0x84, 0x2c, 0xec, 0x84, 0x21},
+  };
+  const uint8_t mode = p2[13];
+  if (mode >= 4)
+    return false;
+  uint8_t message[16 + 256 + 16];
+  if (!this->aes128_cbc_decrypt(KEYS[mode], IVS[mode], p3 + 16, message + 16, 128) ||
+      !this->aes128_cbc_decrypt(KEYS[mode], IVS[mode], p2 + 14, message + 16 + 128, 128))
+    return false;
+
+  // Kaes = MD5(salt || D || salt), Kmac = SHA-1(salt || D || salt), each with its own fixed salts
+  uint8_t kaes[16];
+  uint8_t kmac[20];
+  std::memcpy(message, "#l*GY&cqnwo*&5sd", 16);
+  std::memcpy(message + 16 + 256, "57bv&%niulqpdg3z", 16);
+  md5(message, sizeof(message), kaes);  // The library's own: MD5 may be left out of mbedTLS
+  std::memcpy(message, "asdiuAD8AKA9a>/?", 16);
+  std::memcpy(message + 16 + 256, "!D4H&2*203kjgha9", 16);
+  if (!this->sha1(message, sizeof(message), kmac))
+    return false;
+
+  // The key is AES-128-ECB(Kaes) decrypted, xor A, and must carry the tag HMAC-SHA1(Kmac, HEADER || A || LENGTH ||
+  // key)
+  uint8_t mac_message[36 + AES_KEY_SIZE];
+  if (!this->aes128_ecb_decrypt(kaes, blob + 56, mac_message + 36, AES_KEY_SIZE))
+    return false;
+  for (size_t i = 0; i < AES_KEY_SIZE; i++)
+    mac_message[36 + i] ^= blob[16 + i];
+  std::memcpy(mac_message, blob, 36);
+  uint8_t tag[20];
+  if (!this->hmac_sha1(kmac, sizeof(kmac), mac_message, sizeof(mac_message), tag))
+    return false;
+  uint8_t differ = 0;
+  for (size_t i = 0; i < sizeof(tag); i++)
+    differ |= tag[i] ^ blob[36 + i];
+  if (differ != 0)
+    return false;
+  std::memcpy(key, mac_message + 36, AES_KEY_SIZE);
+  return true;
 }
 
 }  // namespace airplay

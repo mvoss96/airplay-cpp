@@ -5,7 +5,11 @@
 
 namespace airplay {
 
-inline constexpr size_t FAIRPLAY_SETUP_REPLY_SIZE = 142;
+inline constexpr size_t FAIRPLAY_SETUP_FIRST_SIZE = 16;  // The sender's first FairPlay setup message
+inline constexpr size_t FAIRPLAY_SETUP_P2_SIZE = 142;    // The first FairPlay setup reply (this receiver sends it)
+inline constexpr size_t FAIRPLAY_SETUP_P3_SIZE = 164;    // The second FairPlay setup message (the sender sends it)
+inline constexpr size_t FAIRPLAY_KEY_SIZE = 72;          // The decoded "fpaeskey" SDP attribute
+inline constexpr size_t FAIRPLAY_SETUP_REPLY_SIZE = FAIRPLAY_SETUP_P2_SIZE;
 
 /// @brief Answers a FairPlay setup message (POST /fp-setup). iOS asks for it before streaming to AirPlay 2
 /// receivers that announce FairPlay (feature bit 14). AirPlay 2 audio keys arrive in SETUP, so only this handshake

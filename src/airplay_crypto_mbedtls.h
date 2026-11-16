@@ -43,7 +43,11 @@ class MbedtlsCrypto final : public Crypto {
 
   bool sign_challenge(const uint8_t *data, size_t length, uint8_t *signature) override;
   bool decrypt_session_key(const uint8_t *encrypted, size_t length, uint8_t *key) override;
-  bool decrypt_fairplay_key(const uint8_t *p2, const uint8_t *p3, const uint8_t *blob, uint8_t *key) override;
+  bool aes128_cbc_decrypt(const uint8_t *key, const uint8_t *iv, const uint8_t *input, uint8_t *output,
+                          size_t length) override;
+  bool aes128_ecb_decrypt(const uint8_t *key, const uint8_t *input, uint8_t *output, size_t length) override;
+  bool sha1(const uint8_t *data, size_t length, uint8_t *digest) override;
+  bool hmac_sha1(const uint8_t *key, size_t key_length, const uint8_t *data, size_t length, uint8_t *mac) override;
   bool set_audio_key(const uint8_t *key) override;
   bool decrypt_audio(uint8_t *iv, const uint8_t *input, uint8_t *output, size_t length) override;
 #ifndef AIRPLAY_MBEDTLS_PSA

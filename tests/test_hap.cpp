@@ -8,6 +8,7 @@
 #include "airplay_plist.h"
 #include "airplay_srp.h"
 #include "airplay_tlv8.h"
+#include "fake_network.h"
 #include "test_common.h"
 
 #include <cstdlib>
@@ -394,7 +395,6 @@ static void test_fairplay_setup() {
 }
 
 static void test_fairplay_key() {
-#ifdef AIRPLAY_HAS_MBEDTLS
   // An iTunes FairPlay session: the receiver's setup reply, the sender's second setup message
   // and its a=fpaeskey give this audio key
   const std::vector<uint8_t> reply = hex(
@@ -415,9 +415,15 @@ static void test_fairplay_key() {
   uint8_t made[FAIRPLAY_SETUP_REPLY_SIZE];
   CHECK(fairplay_setup_reply(first, sizeof(first), made, sizeof(made)) == sizeof(made) &&
         std::memcmp(made, reply.data(), sizeof(made)) == 0);
+  // A backend without the optional primitives refuses FairPlay without changing the output.
+  test::NoCrypto unsupported;
+  uint8_t key[AES_KEY_SIZE];
+  std::memset(key, 0xa5, sizeof(key));
+  CHECK(!unsupported.decrypt_fairplay_key(reply.data(), second.data(), blob.data(), key));
+  CHECK(same(key, "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"));
+#ifdef AIRPLAY_HAS_MBEDTLS
   MbedtlsCrypto crypto;
   CHECK(crypto.init());
-  uint8_t key[AES_KEY_SIZE];
   CHECK(crypto.decrypt_fairplay_key(reply.data(), second.data(), blob.data(), key));
   CHECK(same(key, "de19c9c675978ff4b788d26d7bbd0e3f"));
   // A wrong authentication tag is refused
