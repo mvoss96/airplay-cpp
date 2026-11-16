@@ -164,16 +164,30 @@ static std::vector<uint8_t> encrypt_payload(const std::vector<uint8_t> &plain) {
 
 #endif
 
+static void fill_random(uint8_t *buffer, size_t length) {
+  static std::mt19937 rng(7);
+  for (size_t i = 0; i < length; i++)
+    buffer[i] = static_cast<uint8_t>(rng());
+}
+
+static std::string hex_bytes(const char *text) {
+  std::string bytes;
+  for (size_t i = 0; text[i] != 0 && text[i + 1] != 0; i += 2)
+    bytes.push_back(static_cast<char>(std::stoi(std::string(text + i, 2), nullptr, 16)));
+  return bytes;
+}
+
 struct Fixture {
   explicit Fixture(bool metadata = true, uint32_t buffer_ms = 500, bool artwork = true, bool progress = false,
-                   const char *password = nullptr)
+                   const char *password = nullptr, bool airplay2 = false)
       : sink(SAMPLE_RATE / 5),
-        receiver(make_config(metadata, buffer_ms, artwork, progress, password), crypto, transport, sink, &listener) {
+        receiver(make_config(metadata, buffer_ms, artwork, progress, password, airplay2), crypto, transport, sink,
+                 &listener) {
     CHECK(this->crypto.init());
     CHECK(this->receiver.begin());
   }
   static ReceiverConfig make_config(bool metadata, uint32_t buffer_ms, bool artwork, bool progress,
-                                    const char *password) {
+                                    const char *password, bool airplay2) {
     ReceiverConfig config;
     config.name = "Kitchen";
     std::memcpy(config.mac, MAC, 6);
@@ -182,6 +196,8 @@ struct Fixture {
     config.progress = progress;
     config.password = password;
     config.buffer_ms = buffer_ms;
+    config.airplay2 = airplay2;
+    config.random = fill_random;
     return config;
   }
   void open(uint8_t connection) {
@@ -837,6 +853,45 @@ static void test_mdns() {
   CHECK(status_flags() == "0x4");
 }
 
+static void test_itunes_fairplay() {
+  // iTunes for Windows on the AirPlay 2 receiver's _raop service: the /fp-setup handshake, then an ANNOUNCE with
+  // a=fpaeskey on the same connection. The second message and key are from an iTunes FairPlay session.
+  Fixture f(true, 500, true, false, nullptr, true);
+  f.open(0);
+  const std::string first("FPLY\x02\x01\x01\x00\x00\x00\x00\x04\x02\x00\x01\xbb", 16);
+  const auto fp_setup = [&f](const std::string &body) {
+    send_request(f.receiver, 0,
+                 "POST /fp-setup RTSP/1.0\r\nCSeq: " + std::to_string(++f.cseq) +
+                     "\r\nContent-Type: application/octet-stream\r\nContent-Length: " + std::to_string(body.size()) +
+                     "\r\n\r\n" + body,
+                 f.now_us);
+    return f.transport.take(0);
+  };
+  std::string response = fp_setup(first);
+  CHECK(status_code(response) == 200);
+  response = fp_setup(hex_bytes(
+      "46504c590201030000000098018f1a9c50a2b1a02325ec8e046547d1c18f3daf2808117aa3d8fc1a96bdfe68c3d25180f853616"
+      "1439026e5865c06a43f701762be9745a8cbdf81df3f67705aa13493489bfe9e235e26c6b7b18c97d02b8e2912fb39eff643b2b8"
+      "32b8819103b5fdc3cbd806e47f4fc2d42b607270ec497c0c73fae9842af6e3d71245a2c5c27e69972a6d4867913cdf0b69f1c24"
+      "91f5de54a6a6cb55e14"));
+  CHECK(status_code(response) == 200);
+  const std::string blob = hex_bytes(
+      "46504c59010201000000003c00000000bcb464d6e39a9582900f566ccea7d1b9000000100ed6a4cbb73dbcd4afe8a76236167ca510cbf00"
+      "6af22fc5289fbfdc2bb423fd2cc48b82c");
+  char key_text[128];
+  char iv_text[32];
+  base64_encode_unpadded(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), key_text, sizeof(key_text));
+  base64_encode_unpadded(AES_IV, sizeof(AES_IV), iv_text, sizeof(iv_text));
+  const std::string sdp = std::string(PCM_SDP) + "a=fpaeskey:" + key_text + "\r\na=aesiv:" + iv_text + "\r\n";
+  response = f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", sdp);
+  CHECK(status_code(response) == 200);
+  // A key with a wrong authentication tag is refused
+  std::string tampered = sdp;
+  const size_t tag = tampered.find("a=fpaeskey:") + 11 + 50;  // Within the tag (bytes 36 to 55)
+  tampered[tag] = tampered[tag] == 'A' ? 'B' : 'A';
+  CHECK(status_code(f.request(0, "ANNOUNCE", "Content-Type: application/sdp\r\n", tampered)) == 415);
+}
+
 int main() {
   test_challenge();
   test_encrypted_session();
@@ -848,5 +903,6 @@ int main() {
   test_password();
   test_progress();
   test_mdns();
+  test_itunes_fairplay();
   return finish("test_session");
 }

@@ -147,11 +147,6 @@ struct ReceiverConfig {
   const char *model{"airplay-cpp"};
   /// MAC address of the network interface; part of the mDNS name and of the Apple-Challenge answer
   uint8_t mac[6]{};
-  /// For iTunes for Windows: the host announces a second, pure AirPlay 1 _raop service whose MAC has the locally
-  /// administered bit of the first octet flipped, so iTunes lists it apart from the AirPlay 2 service. iTunes
-  /// checks the Apple-Challenge signature against the announced MAC, so with this set the Apple-Response is signed
-  /// over that flipped MAC. AirPlay 2 senders (iPhone, Mac, the Home app) do not use the Apple-Challenge.
-  bool itunes{false};
   /// AirPlay 2: the receiver's HomeKit key and pairing identifier come from the MAC address and this number. A
   /// different number makes it a new accessory for the Home app (0: from the MAC address alone).
   uint32_t homekit_identity{0};
@@ -382,6 +377,11 @@ class Receiver {
     uint64_t write_counter{0};
     uint8_t *frame{nullptr};  // An incoming encrypted frame, until it is complete
     size_t frame_length{0};
+    // The FairPlay setup of this connection (iTunes runs several at once), for its a=fpaeskey: the sender's first
+    // message, from which the reply is made again, and its second
+    bool have_fairplay_setup{false};
+    uint8_t fairplay_first[FAIRPLAY_SETUP_FIRST_SIZE];
+    uint8_t fairplay_second[FAIRPLAY_SETUP_P3_SIZE];
   };
 
   /// A response to an AirPlay 2 request
@@ -434,7 +434,7 @@ class Receiver {
   /// @return false if the connection must be closed
   bool handle_request_(uint8_t connection, char *request, size_t header_length, char *body, size_t body_length,
                        int64_t now_us);
-  bool handle_announce_(const char *body, size_t body_length);
+  bool handle_announce_(uint8_t connection, const char *body, size_t body_length);
   bool handle_setup_(uint8_t connection, const char *transport, char *response_headers, size_t size);
   void handle_set_parameter_(const char *content_type, const char *body, size_t body_length, uint32_t now_ms);
   /// Starts receiving cover art. `body` is null if the image is too large to buffer and arrives in pieces.

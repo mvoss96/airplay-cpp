@@ -1,5 +1,6 @@
 #include "airplay_receiver.h"
 
+#include "airplay_fairplay.h"
 #include "airplay_log.h"
 #include "airplay_srp.h"
 #include "airplay_util.h"
@@ -223,10 +224,18 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
       {"vn", "65537"},  {"vs", "366.0"}, {"sf", "0x4"},   {"fv", "76400.10"},
   };
   static_assert(sizeof(RECORDS) / sizeof(RECORDS[0]) + 3 <= MAX_TXT_RECORDS, "No room for pw, am and md");
+  // With AirPlay 2, which answers the FairPlay setup, et offers FairPlay (3, 5) instead of RSA: iTunes for Windows
+  // then streams to this service, which it refuses with RSA as it announces AirPlay 2 features
+  const bool airplay2 = config.airplay2 && config.random != nullptr && config.password == nullptr;
   for (const TxtRecord &record : RECORDS) {
     // The status flags change with HomeKit access control
-    this->txt_records_[this->txt_record_count_++] =
-        std::strcmp(record.key, "sf") == 0 ? TxtRecord{record.key, this->status_flags_} : record;
+    TxtRecord entry = record;
+    if (std::strcmp(record.key, "sf") == 0) {
+      entry.value = this->status_flags_;
+    } else if (airplay2 && std::strcmp(record.key, "et") == 0) {
+      entry.value = "0,3,5";
+    }
+    this->txt_records_[this->txt_record_count_++] = entry;
   }
   std::snprintf(this->password_required_, sizeof(this->password_required_), "%s",
                 config.password != nullptr ? "true" : "false");
@@ -246,7 +255,7 @@ Receiver::Receiver(const ReceiverConfig &config, Crypto &crypto, Transport &tran
   if (md_length > 0)
     this->txt_records_[this->txt_record_count_++] = TxtRecord{"md", this->md_};
 
-  this->airplay2_ = config.airplay2 && config.random != nullptr && config.password == nullptr;
+  this->airplay2_ = airplay2;
   if (this->airplay2_) {
     this->init_airplay2_();
     // AirPlay 2 senders also look at the features of the RAOP service
@@ -421,6 +430,7 @@ void Receiver::connection_opened(uint8_t connection, const Endpoint &peer, const
   c.peer = peer;
   c.local = local;
   c.authenticated = false;
+  c.have_fairplay_setup = false;
   c.encrypted = false;
   c.encrypt_after_response = false;
   c.event_channel = false;
@@ -728,7 +738,7 @@ bool Receiver::handle_request_(uint8_t connection, char *request, size_t header_
     status_text = "Forbidden";
   } else if (std::strcmp(method, "ANNOUNCE") == 0) {
     this->take_session_(connection, request, header_length);
-    if (!this->handle_announce_(body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
+    if (!this->handle_announce_(connection, body != nullptr ? body : "", body != nullptr ? body_length : 0)) {
       status = 415;
       status_text = "Unsupported Media Type";
     }
@@ -985,7 +995,7 @@ void Receiver::read_sender_version_(const char *request, size_t header_length) {
   }
 }
 
-bool Receiver::handle_announce_(const char *body, size_t body_length) {
+bool Receiver::handle_announce_(uint8_t connection, const char *body, size_t body_length) {
   if (this->airplay2_) {
     // While AirPlay 2 is new: show how senders describe the stream (keys are long base64 lines, shown cut off)
     for (const char *line = body; line < body + body_length;) {
@@ -1049,6 +1059,20 @@ bool Receiver::handle_announce_(const char *body, size_t body_length) {
       uint8_t key[AES_KEY_SIZE];
       const size_t key_length = base64_decode(line + 12, length - 12, encrypted_key, sizeof(encrypted_key));
       have_key = this->crypto_.decrypt_session_key(encrypted_key, key_length, key) && this->crypto_.set_audio_key(key);
+      key_error = !have_key;
+    } else if (length > 11 && std::strncmp(line, "a=fpaeskey:", 11) == 0) {
+      // iTunes with FairPlay wraps the key here instead of in a=rsaaeskey, from the /fp-setup handshake that ran on
+      // this connection: its reply (made again from the first message) and the sender's second message
+      const Connection &c = this->connections_[connection];
+      uint8_t blob[FAIRPLAY_KEY_SIZE];
+      uint8_t reply[FAIRPLAY_SETUP_REPLY_SIZE];
+      uint8_t key[AES_KEY_SIZE];
+      const size_t blob_length = base64_decode(line + 11, length - 11, blob, sizeof(blob));
+      have_key = c.have_fairplay_setup && blob_length == FAIRPLAY_KEY_SIZE &&
+                 fairplay_setup_reply(c.fairplay_first, sizeof(c.fairplay_first), reply, sizeof(reply)) ==
+                     FAIRPLAY_SETUP_P2_SIZE &&
+                 this->crypto_.decrypt_fairplay_key(reply, c.fairplay_second, blob, key) &&
+                 this->crypto_.set_audio_key(key);
       key_error = !have_key;
     } else if (length > 8 && std::strncmp(line, "a=aesiv:", 8) == 0) {
       have_iv = base64_decode(line + 8, length - 8, this->aes_iv_, sizeof(this->aes_iv_)) == sizeof(this->aes_iv_);
@@ -1399,14 +1423,7 @@ bool Receiver::add_apple_response_(uint8_t connection, const char *challenge, ch
     return false;
   std::memcpy(data + length, &this->connections_[connection].local.address, 4);
   length += 4;
-  // The Apple-Challenge only reaches the pure AirPlay 1 _raop service (iTunes); AirPlay 2 senders never send it.
-  // That service announces the MAC with the locally administered bit of the first octet flipped, and iTunes
-  // checks the signature against the announced MAC, so sign over the flipped MAC when iTunes support is on.
-  uint8_t mac[sizeof(this->config_.mac)];
-  std::memcpy(mac, this->config_.mac, sizeof(mac));
-  if (this->config_.itunes)
-    mac[0] ^= 0x02;
-  std::memcpy(data + length, mac, sizeof(mac));
+  std::memcpy(data + length, this->config_.mac, sizeof(this->config_.mac));
 
   uint8_t signature[RSA_SIGNATURE_SIZE];
   if (!this->crypto_.sign_challenge(data, SIGNED_SIZE, signature))

@@ -22,12 +22,14 @@
 namespace airplay {
 
 // Feature bits, as in the "features" TXT record: audio (9), redundant audio (11), FairPlay (14), audio formats
-// (18-20, 22), unified advertiser info (30), control channel encryption (38), buffered audio (40),
+// (18-22), unified advertiser info (30), control channel encryption (38), buffered audio (40),
 // HomeKit pairing and peer management (46, 47) and transient pairing (48), and cover art, progress and text in
 // the AirPlay 1 way (15-17). iOS streams only to receivers with
 // FairPlay; without buffered audio it falls back to ANNOUNCE with a FairPlay encrypted key, and with NTP instead
-// of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted.
-static constexpr uint64_t DEFAULT_FEATURES = 0x1C140405FCA00ULL;
+// of PTP timing (41) it uses NTP, as the experiments in openairplay/airplay2-receiver noted. iTunes for Windows
+// runs the FairPlay setup only with 21, 25 and 27 as well (seen on the radio); without them it calls the receiver
+// incompatible.
+static constexpr uint64_t DEFAULT_FEATURES = 0x1C1404A7FCA00ULL;
 /// PTP timing (41), with ReceiverConfig::ptp. macOS only streams to receivers with it, and then only with PTP.
 static constexpr uint64_t FEATURE_PTP = 1ULL << 41;
 /// Status flags: an audio receiver
@@ -468,6 +470,15 @@ bool Receiver::handle_airplay2_request_(uint8_t connection, const char *method, 
     } else if (path_is(request, "/fp-setup")) {
       response.body_length =
           fairplay_setup_reply(data, data != nullptr ? body_length : 0, this->body_buffer_, AIRPLAY2_BODY_SIZE);
+      // Kept for an a=fpaeskey in this connection's ANNOUNCE (iTunes)
+      Connection &c = this->connections_[connection];
+      if (response.body_length == FAIRPLAY_SETUP_P2_SIZE && body_length == FAIRPLAY_SETUP_FIRST_SIZE) {
+        std::memcpy(c.fairplay_first, data, FAIRPLAY_SETUP_FIRST_SIZE);
+        c.have_fairplay_setup = false;
+      } else if (response.body_length != 0 && body_length == FAIRPLAY_SETUP_P3_SIZE) {
+        std::memcpy(c.fairplay_second, data, FAIRPLAY_SETUP_P3_SIZE);
+        c.have_fairplay_setup = true;
+      }
       if (response.body_length == 0) {
         AIRPLAY_LOGW("Unsupported FairPlay setup message");
         response.status = 400;
