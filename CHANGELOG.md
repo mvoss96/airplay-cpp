@@ -3,8 +3,8 @@
 ## v0.10.0
 
 - iTunes for Windows plays to the AirPlay 2 receiver itself: with AirPlay 2 the `_raop` service offers FairPlay
-  instead of RSA (et 0,3,5), and the receiver takes iTunes's key from `a=fpaeskey` (FairPlay version 2) with `Crypto::decrypt_fairplay_key()`, which MbedtlsCrypto implements with mbedTLS 2.28, 3.x
-  and 4. The FairPlay setup (POST /fp-setup) also answers version 2, and is kept per connection, as iTunes runs
+  instead of RSA (et 0,3,5), and the receiver takes iTunes's key from `a=fpaeskey` (FairPlay version 2) with `Crypto::decrypt_fairplay_key()`, a backend-neutral routine built on optional AES and SHA-1
+  primitives that MbedtlsCrypto provides for mbedTLS 2.28, 3.x and 4. The FairPlay setup (POST /fp-setup) also answers version 2, and is kept per connection, as iTunes runs
   several at once. AirPlay 1 senders without FairPlay play unencrypted (et 0). Feature bits 21, 25 and 27 are
   announced as well: without them iTunes does not run the FairPlay setup. The key is taken in all four FairPlay
   modes, which iTunes picks at random for each setup.
